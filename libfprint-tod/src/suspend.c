@@ -61,7 +61,8 @@ static gboolean suspend_monitor_cb(gpointer user_data) {
     g_source_destroy(params->timeout_src);
 
     //Suspend the device
-    suspend_dev(params->tdev, params->sleep_inhib);
+    if(params->sleep_inhib >= 0) suspend_dev(params->tdev, params->sleep_inhib);
+    params->sleep_inhib = -1;
 
     return G_SOURCE_REMOVE;
 }
@@ -109,6 +110,7 @@ static void suspend_signal_cb(GDBusConnection *con, const gchar *sender, const g
         //Wait for action to complete, but also add a timeout
         struct suspend_cancel_params *params = g_slice_new(struct suspend_cancel_params);
         params->tdev = g_object_ref(tdev);
+        params->sleep_inhib = sleep_inhib;
         params->timeout_src = fpi_device_add_timeout(FP_DEVICE(tdev), SUSPEND_CANCEL_TIMEOUT_SECS * 1000, suspend_timeout_cb, params, NULL);
         params->monitor_src = g_idle_source_new();
         g_source_set_callback(params->monitor_src, suspend_monitor_cb, params, (GDestroyNotify) suspend_params_free);
@@ -129,11 +131,8 @@ void register_suspend_monitor(FpiDeviceTudor *tdev) {
 }
 
 bool create_sleep_inhibitor(FpiDeviceTudor *tdev, GError **error) {
-    //Close the sleep inhibitor
-    if(tdev->host_sleep_inhib >= 0) {
-        g_assert_no_errno(close(tdev->host_sleep_inhib));
-        tdev->host_sleep_inhib = -1;
-    }
+    //Check if we already got a sleep inhibitor
+    if(tdev->host_sleep_inhib >= 0) return true;
 
     //Request a sleep inhibitor from logind
     GUnixFDList *fds;

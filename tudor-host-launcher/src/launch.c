@@ -16,8 +16,13 @@ struct host_entry {
 static GArray *hosts_array;
 static guint next_host_id = 1;
 
+static int killpg_ignore_noproc(pid_t proc, int sig) {
+    if(killpg(proc, sig) == 0 || errno == ESRCH) return 0;
+    else return 1;
+}
+
 static void free_host(struct host_entry *entry) {
-    if(entry->alive) g_assert_no_errno(killpg(entry->pid, SIGKILL));
+    if(entry->alive) g_assert_no_errno(killpg_ignore_noproc(entry->pid, SIGKILL));
     g_assert_no_errno(close(entry->pipe_fd));
 }
 
