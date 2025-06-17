@@ -69,6 +69,8 @@ driver_dll_names = [
     'synaWudfBioUsb104.dll'
 ]
 
+add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
+
 driver_dlls = custom_target('driver-download', 
     output: driver_dll_names,
     input: ['download_driver.sh', 'installer.sha'],
