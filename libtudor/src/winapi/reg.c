@@ -82,6 +82,7 @@ bool winreg_write_val(HANDLE hkey, const char *val_name, const void *buf, size_t
 }
 
 __winfnc LONG RegOpenKeyExA(HANDLE hkey, const char *subkey, DWORD opts, DWORD sam, HANDLE *out) {
+    TRACE();
     if(!subkey) {
         *out = hkey;
         return ERROR_SUCCESS;
@@ -103,6 +104,7 @@ __winfnc LONG RegOpenKeyExA(HANDLE hkey, const char *subkey, DWORD opts, DWORD s
 WINAPI(RegOpenKeyExA)
 
 __winfnc LONG RegOpenKeyExW(HANDLE hkey, const char16_t *subkey, DWORD opts, DWORD sam, HANDLE *out) {
+    TRACE();
     if(!subkey) {
         *out = hkey;
         return ERROR_SUCCESS;
@@ -127,24 +129,29 @@ __winfnc LONG RegOpenKeyExW(HANDLE hkey, const char16_t *subkey, DWORD opts, DWO
 WINAPI(RegOpenKeyExW)
 
 __winfnc LONG RegCreateKeyExA(HANDLE hkey, const char *subkey, DWORD reserved, const char *class, DWORD opts, DWORD sam, void *sec_attrs, HANDLE *out, DWORD *dispos) {
+    TRACE();
     if(dispos) *dispos = 0x2; //REG_OPENED_EXISTING_KEY
     return RegOpenKeyExA(hkey, subkey, opts, sam, out);
 }
 WINAPI(RegCreateKeyExA)
 
 __winfnc LONG RegCreateKeyExW(HANDLE hkey, const char16_t *subkey, DWORD reserved, const char16_t *class, DWORD opts, DWORD sam, void *sec_attrs, HANDLE *out, DWORD *dispos) {
+    TRACE();
     if(dispos) *dispos = 0x2; //REG_OPENED_EXISTING_KEY
     return RegOpenKeyExW(hkey, subkey, opts, sam, out);
 }
 WINAPI(RegCreateKeyExW)
 
 __winfnc LONG RegCloseKey(HANDLE hkey) {
+    TRACE();
     winhandle_destroy(hkey);
     return ERROR_SUCCESS;
 }
 WINAPI(RegCloseKey)
 
 __winfnc LONG RegQueryValueExA(HANDLE hkey, const char *val_name, DWORD *resv, DWORD *type, BYTE *data, DWORD *data_size) {
+    TRACE();
+
     //Forward to registry handler
     size_t data_sz = (size_t) *data_size;
 
@@ -155,11 +162,13 @@ __winfnc LONG RegQueryValueExA(HANDLE hkey, const char *val_name, DWORD *resv, D
 
     *data_size = (DWORD) data_sz;
 
+    printf("Res: %d\n", suc);
     return suc ? ERROR_SUCCESS : WINERR_SET_CODE;
 }
 WINAPI(RegQueryValueExA)
 
 __winfnc LONG RegQueryValueExW(HANDLE hkey, const char16_t *val_name, DWORD *resv, DWORD *type, BYTE *data, DWORD *data_size) {
+    TRACE();
     //Forward to registry handler
     char *val_cname = winstr_to_str(val_name);
     size_t data_sz = (size_t) *data_size;
@@ -177,6 +186,7 @@ __winfnc LONG RegQueryValueExW(HANDLE hkey, const char16_t *val_name, DWORD *res
 WINAPI(RegQueryValueExW)
 
 __winfnc LONG RegSetValueExA(HANDLE hkey, const char *val_name, DWORD resv, DWORD type, const BYTE *data, DWORD data_size) {
+    TRACE();
     //Forward to registry handler
     bool suc = winreg_write_val(hkey, val_name, data, data_size, (enum winreg_val_type) type);
     return suc ? ERROR_SUCCESS : WINERR_SET_CODE;
@@ -184,6 +194,7 @@ __winfnc LONG RegSetValueExA(HANDLE hkey, const char *val_name, DWORD resv, DWOR
 WINAPI(RegSetValueExA)
 
 __winfnc LONG RegSetValueExW(HANDLE hkey, const char16_t *val_name, DWORD resv, DWORD type, const BYTE *data, DWORD data_size) {
+    TRACE();
     //Forward to registry handler
     char *val_cname = winstr_to_str(val_name);
     bool suc = winreg_write_val(hkey, val_cname, data, data_size, (enum winreg_val_type) type);

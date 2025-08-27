@@ -1,4 +1,6 @@
 #include "internal.h"
+#include <sys/stat.h>
+#include <unistd.h>
 
 static pthread_mutex_t pipes_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct winpipe {
@@ -50,6 +52,7 @@ static void pipe_destroy(struct winpipe *pipe) {
 }
 
 __winfnc HANDLE CreateNamedPipeW(const char16_t *name, DWORD open_mode, DWORD pipe_mode, DWORD max_instances, DWORD out_buf_size, DWORD in_buf_size, DWORD default_timeout, void *security_attrs) {
+    TRACE();
     //Create the pipe
     struct winpipe *pipe = (struct winpipe*) malloc(sizeof(struct winpipe));
     if(!pipe) { winerr_set_errno(); return NULL; }
@@ -75,6 +78,7 @@ __winfnc HANDLE CreateNamedPipeW(const char16_t *name, DWORD open_mode, DWORD pi
 WINAPI(CreateNamedPipeW)
 
 __winfnc BOOL ConnectNamedPipe(HANDLE handle, OVERLAPPED *ovlp) {
+    TRACE();
     struct winpipe *pipe = (struct winpipe*) winio_get_file_context(handle);
 
     cant_fail_ret(pthread_mutex_lock(&pipe->lock));
@@ -90,3 +94,122 @@ __winfnc BOOL DisconnectNamedPipe(HANDLE handle) {
     return FALSE;
 }
 WINAPI(DisconnectNamedPipe)
+
+
+#define CSIDL_FOLDER_MASK	0x00ff
+
+__winfnc HRESULT SHGetFolderPathA(
+	void* hwndOwner,    /* [I] owner window */
+	int nFolder,       /* [I] CSIDL identifying the folder */
+	HANDLE hToken,     /* [I] access token */
+	DWORD dwFlags,     /* [I] which path to return */
+	char* pszPath)    /* [O] converted path */
+{
+    TRACE();
+    int folder = CSIDL_FOLDER_MASK & nFolder;
+    printf("SHGetFolderPathA: %d\n", folder);
+    const char* path = "/tmp/synatudor";
+    if (pszPath == NULL) {
+        pszPath = malloc(sizeof(path + 1));
+    }
+    strcpy(pszPath, path);
+    return 0;
+}
+WINAPI(SHGetFolderPathA)
+
+
+__winfnc BOOL PathAppendA(
+    char* path,
+    const char* more)
+{
+    TRACE();
+
+    if (!path || !more) return FALSE;
+
+    printf("PathAppendA path: %s\n", path);
+    printf("PathAppendA more: %s\n", more);
+
+    size_t path_len = strlen(path);
+    size_t more_len = strlen(more);
+
+    if (path_len == 0) {
+        // If path is empty, just copy more
+        strcpy(path, more);
+        return TRUE;
+    }
+
+    // Check if path ends with '/' and more starts with '/'
+    if (path[path_len - 1] != '/' && more[0] != '/') {
+        path[path_len] = '/';
+        path[path_len + 1] = '\0';
+    } else if (path[path_len - 1] == '/' && more[0] == '/') {
+        // Remove extra '/' from more
+        more++;
+    }
+
+    strcat(path, more);
+    printf("PathAppendA result: %s\n", path);
+    return 0;
+}
+WINAPI(PathAppendA)
+
+
+__winfnc BOOL PathFileExistsA(
+    const char* path)
+{
+    TRACE();
+    printf("PathExists: %s\n", path);
+    if (!path) {
+        return FALSE;
+    }
+
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return TRUE; // path exists
+    } else {
+        return FALSE; // stat failed → does not exist
+    }
+}
+WINAPI(PathFileExistsA)
+
+__winfnc BOOL CreateDirectoryA(
+    const char* path, void* securityAttributes)
+{
+    TRACE();
+    printf("CreateDirectoryA: %s\n", path);
+    (void)securityAttributes; // unused in Linux implementation
+
+    if (!path) {
+        return FALSE;
+    }
+
+    if (mkdir(path, 0755) == 0) {
+        return TRUE; // created successfully
+    } else {
+        if (errno == EEXIST) {
+            return FALSE; // already exists
+        }
+        perror("mkdir");
+        return FALSE;
+    }
+    return false;
+}
+WINAPI(CreateDirectoryA)
+
+__winfnc HANDLE RegisterEventSourceA(
+  const char* lpUNCServerName,
+  const char* lpSourceName)
+{
+    TRACE();
+    printf("RegisterEventSourceA: %s %s\n", lpUNCServerName, lpSourceName);
+    return NULL;
+}
+WINAPI(RegisterEventSourceA)
+
+__winfnc HANDLE CreateFileA(
+    const char* path, DWORD access, DWORD share_mode, void* sec, DWORD creat, DWORD flags, void* handle)
+{
+    TRACE();
+    return NULL;
+}
+WINAPI(CreateFileA)

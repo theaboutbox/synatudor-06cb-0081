@@ -83,21 +83,25 @@ __constr void win_init_tib() {
 DWORD win_get_thread_id() { return (DWORD) syscall(__NR_gettid); }
 
 __winfnc HANDLE GetCurrentProcess() {
+    TRACE();
     return (HANDLE) -1;
 }
 WINAPI(GetCurrentProcess)
 
 __winfnc DWORD GetCurrentProcessId() {
+    TRACE();
     return getpid();
 }
 WINAPI(GetCurrentProcessId)
 
 __winfnc DWORD GetCurrentThreadId() {
+    TRACE();
     return win_get_thread_id();
 }
 WINAPI(GetCurrentThreadId)
 
 __winfnc BOOL TerminateProcess(HANDLE proc, UINT exit_code) {
+    TRACE();
     if(proc != (HANDLE) -1) return FALSE;
     log_error("TerminateProcess called with exit code 0x%x!", exit_code);
     abort();
@@ -126,6 +130,7 @@ typedef struct {
 } STARTUPINFOW;
 
 __winfnc void GetStartupInfoW(STARTUPINFOW *info) {
+    TRACE();
     static char16_t *desktop = NULL;
     if(!desktop) desktop = winstr_from_str("TUDORHOST");
 
@@ -146,11 +151,13 @@ __winfnc void GetStartupInfoW(STARTUPINFOW *info) {
 WINAPI(GetStartupInfoW);
 
 __winfnc const char *GetCommandLineA() {
+    TRACE();
     return winmodule_get_cur()->cmdline;
 }
 WINAPI(GetCommandLineA)
 
 __winfnc const char16_t *GetCommandLineW() {
+    TRACE();
     static char16_t *cmd_line;
     if(!cmd_line) cmd_line = winstr_from_str(GetCommandLineA());
     return cmd_line;
@@ -158,6 +165,7 @@ __winfnc const char16_t *GetCommandLineW() {
 WINAPI(GetCommandLineW)
 
 __winfnc const char *GetEnvironmentStringsA() {
+    TRACE();
     //Determine environment block size
     int len = 1;
     for(const char **p = winmodule_get_cur()->environ; *p; p++) len += strlen(*p) + 1;
@@ -179,12 +187,14 @@ __winfnc const char *GetEnvironmentStringsA() {
 WINAPI(GetEnvironmentStringsA)
 
 __winfnc BOOL FreeEnvironmentStringsA(const char *env) {
+    TRACE();
     free((void*) env);
     return TRUE;
 }
 WINAPI(FreeEnvironmentStringsA)
 
 __winfnc const char16_t *GetEnvironmentStringsW() {
+    TRACE();
     //Determine environment block size
     int len = 1;
     for(const char **p = winmodule_get_cur()->environ; *p; p++) len += strlen(*p) + 1;
@@ -208,12 +218,14 @@ __winfnc const char16_t *GetEnvironmentStringsW() {
 WINAPI(GetEnvironmentStringsW)
 
 __winfnc BOOL FreeEnvironmentStringsW(const char16_t *env) {
+    TRACE();
     free((void*) env);
     return TRUE;
 }
 WINAPI(FreeEnvironmentStringsW)
 
 __winfnc BOOL IsProcessorFeaturePresent(DWORD feature) {
+    TRACE();
     log_debug("IsProcessorFeaturePresent | feature: %d", feature);
     return FALSE;
 }
@@ -284,17 +296,20 @@ typedef struct {
 } ARM64_NT_CONTEXT;
 
 __winfnc void RtlCaptureContext(ARM64_NT_CONTEXT *context) {
+    TRACE();
     log_warn("Unsupported function RtlCaptureContext called!");
     *context = (ARM64_NT_CONTEXT) {0};
 }
 WINAPI(RtlCaptureContext)
 
 __winfnc void *RtlLookupFunctionEntry(DWORD64 pc, DWORD64 *image_base, void *history) {
+    TRACE();
     return NULL;
 }
 WINAPI(RtlLookupFunctionEntry)
 
 __winfnc BOOL IsDebuggerPresent() {
+    TRACE();
     return FALSE;
 }
 WINAPI(IsDebuggerPresent)
@@ -304,6 +319,7 @@ typedef LONG __winfnc TOP_LEVEL_EXCEPTION_FILTER(void *ExceptionPointers);
 static TOP_LEVEL_EXCEPTION_FILTER *excep_filter = NULL;
 
 __winfnc TOP_LEVEL_EXCEPTION_FILTER *SetUnhandledExceptionFilter(TOP_LEVEL_EXCEPTION_FILTER *filter) {
+    TRACE();
     TOP_LEVEL_EXCEPTION_FILTER *old_filter = excep_filter;
     excep_filter = filter;
     return old_filter;
@@ -311,6 +327,7 @@ __winfnc TOP_LEVEL_EXCEPTION_FILTER *SetUnhandledExceptionFilter(TOP_LEVEL_EXCEP
 WINAPI(SetUnhandledExceptionFilter)
 
 __winfnc LONG UnhandledExceptionFilter(void *excep_pointers) {
+    TRACE();
     if(excep_filter) {
         LONG ret = excep_filter(excep_pointers);
         if(ret == 0 || ret == 1) return ret;
@@ -320,6 +337,40 @@ __winfnc LONG UnhandledExceptionFilter(void *excep_pointers) {
 WINAPI(UnhandledExceptionFilter)
 
 __winfnc void Sleep(DWORD num_ms) {
+    TRACE();
     cant_fail(usleep((useconds_t) num_ms * 1000));
 }
 WINAPI(Sleep)
+
+typedef uint64_t UINT64;
+typedef uint32_t UINT32;
+typedef char16_t* PWSTR;
+
+typedef struct PACKAGE_VERSION {
+  union {
+    UINT64 Version;
+    struct {
+      USHORT Revision;
+      USHORT Build;
+      USHORT Minor;
+      USHORT Major;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
+} PACKAGE_VERSION;
+
+
+typedef struct PACKAGE_ID {
+  UINT32          reserved;
+  UINT32          processorArchitecture;
+  PACKAGE_VERSION version;
+  PWSTR           name;
+  PWSTR           publisher;
+  PWSTR           resourceId;
+  PWSTR           publisherId;
+} PACKAGE_ID;
+
+__winfnc LONG GetCurrentPackageId(uint32_t* buffer_length, uint8_t* buf) {
+    TRACE();
+    return 15700;
+}
+WINAPI(GetCurrentPackageId)

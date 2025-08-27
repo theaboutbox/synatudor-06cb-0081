@@ -1,4 +1,4 @@
-project('synaTudor', ['c'],
+project('synaTudor', ['c', 'cpp'],
     version: '1.0.0',
     meson_version: '>= 0.57.0'
 )

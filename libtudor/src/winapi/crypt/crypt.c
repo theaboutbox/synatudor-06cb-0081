@@ -3,8 +3,13 @@
 #include "crypt.h"
 
 __winfnc BOOL CryptAcquireContextA(struct crypt_provider **prov, const char *cont_name, const char *prov_name, DWORD prov_type, DWORD flags) {
+    TRACE();
+    printf("Prov type: %d\n", prov_type);
+    printf("Cont name: %s\n", cont_name);
+    printf("Prov name: %s\n", prov_name);
     switch(prov_type) {
         case PROV_RSA_AES: *prov = &crypt_prov_rsa_aes; return TRUE;
+        case PROV_RSA_FULL: *prov = &crypt_prov_rsa_aes; return TRUE;
         default: {
             log_warn("CryptAcquireContextA | Couldn't find provider for container '%s' provider '%s' provider type 0x%x flags 0x%x", cont_name, prov_name, prov_type, flags);
             return FALSE;
@@ -14,11 +19,13 @@ __winfnc BOOL CryptAcquireContextA(struct crypt_provider **prov, const char *con
 WINAPI(CryptAcquireContextA)
 
 __winfnc BOOL CryptReleaseContext(struct crypt_provider *prov, DWORD flags) {
+    TRACE();
     return TRUE;
 }
 WINAPI(CryptReleaseContext)
 
 __winfnc BOOL CryptImportKey(struct crypt_provider *prov, const BLOBHEADER *data, DWORD data_len, struct crypt_key *pub_key, DWORD flags, struct crypt_key **out) {
+    TRACE();
     if(!prov->import_key) { winerr_set(); return FALSE; }
     if(pub_key) {
         log_warn("CryptImportKey called with encrypted key data!");
@@ -74,6 +81,7 @@ __winfnc BOOL CryptDestroyKey(struct crypt_key *key) {
 WINAPI(CryptDestroyKey)
 
 __winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct crypt_key *key, DWORD flags, struct crypt_hash **out) {
+    TRACE();
     //Get the algorithm
     struct crypt_hash_algorithm *algo;
     switch(alg_id) {
@@ -105,6 +113,7 @@ __winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct
 WINAPI(CryptCreateHash)
 
 __winfnc BOOL CryptDestroyHash(struct crypt_hash *hash) {
+    TRACE();
     if(hash->algo->destroy_hash) hash->algo->destroy_hash(hash->algo, hash->hash_data);
     free(hash);
     return TRUE;
@@ -112,6 +121,7 @@ __winfnc BOOL CryptDestroyHash(struct crypt_hash *hash) {
 WINAPI(CryptDestroyHash)
 
 __winfnc BOOL CryptDuplicateHash(struct crypt_hash *hash, DWORD *reserved, DWORD flags, struct crypt_hash **out) {
+    TRACE();
     //Allocate and duplicate hash
     struct crypt_hash *nhash = (struct crypt_hash*) malloc(sizeof(struct crypt_hash));
     if(!nhash) { winerr_set_errno(); return FALSE; }

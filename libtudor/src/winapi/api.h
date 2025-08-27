@@ -7,12 +7,18 @@
 
 #define WIN_CLOBBER_NONVOL_REGS __asm__("" ::: "%rbx","%rsi","%rdi");
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 //APIs
 struct __winapi_descr {
     const char *name;
     void *func;
     struct __winapi_descr *next;
 };
+
+#define TRACE() printf("Trace -->: [%s:%d] %s\n", __FILE__, __LINE__, __func__); fflush(stdout);
 
 #define WINAPI(api_name) \
 static struct __winapi_descr __winapi_##api_name##_descr = (struct __winapi_descr) {\
@@ -68,11 +74,26 @@ struct winmodule *winmodule_get_cur();
 void winmodule_set_cur(struct winmodule *module);
 
 //Log
+
+// typedef __builtin_ms_va_list win_va_list;
+// #define win_va_start(list, start) __builtin_ms_va_start(list, start)
+// #define win_va_end(list) __builtin_ms_va_end(list)
+// #define win_va_copy(a, b) __builtin_ms_va_copy(a, b)
+// #define win_va_arg(list, type) __builtin_va_arg(list, type)
+#ifdef __x86_64__
 typedef __builtin_ms_va_list win_va_list;
 #define win_va_start(list, start) __builtin_ms_va_start(list, start)
 #define win_va_end(list) __builtin_ms_va_end(list)
 #define win_va_copy(a, b) __builtin_ms_va_copy(a, b)
 #define win_va_arg(list, type) __builtin_va_arg(list, type)
+#else
+#include <stdarg.h>
+typedef va_list win_va_list;
+#define win_va_start(list, start) va_start(list, start)
+#define win_va_end(list) va_end(list)
+#define win_va_copy(a, b) va_copy(a, b)
+#define win_va_arg(list, type) va_arg(list, type)
+#endif
 
 void winlog_printf(const char *format, bool ptr_mode, win_va_list vas);
 
@@ -112,5 +133,9 @@ HANDLE winreg_open_key(void *ctx_obj, const char *key_name);
 const char *winreg_get_key_name(HANDLE key);
 bool winreg_query_val(HANDLE key, const char *val_name, void *buf, size_t *buf_size, enum winreg_val_type *val_type);
 bool winreg_write_val(HANDLE key, const char *val_name, const void *buf, size_t buf_size, enum winreg_val_type val_type);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

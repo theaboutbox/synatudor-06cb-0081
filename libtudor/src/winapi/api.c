@@ -1,5 +1,11 @@
 #include <stdlib.h>
 #include <string.h>
+#include <iconv.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <uchar.h>
+
 #include "internal.h"
 
 static struct __winapi_descr *descr_head;
@@ -13,6 +19,7 @@ void *resolve_windows_api(const char *name) {
     for(struct __winapi_descr *d = descr_head; d; d = d->next) {
         if(strcmp(d->name, name) == 0) return d->func;
     }
+    printf("Can't resolve win API! %s\n", name);
     return NULL;
 }
 
@@ -21,6 +28,44 @@ int winstr_len(const char16_t *str) {
     for(const char16_t *p = str; *p; p++) len++;
     return len;
 }
+
+/*
+char16_t* winstr_from_str(const char *str) {
+    if (!str) return NULL;
+
+    iconv_t cd = iconv_open("UTF-16LE", "UTF-8");
+    if (cd == (iconv_t)(-1)) return NULL;
+
+    size_t inbytes = strlen(str);
+    size_t outbytes = (inbytes + 1) * sizeof(char16_t);
+    char16_t *outbuf = malloc(outbytes);
+    if (!outbuf) {
+        iconv_close(cd);
+        return NULL;
+    }
+
+    char *inptr = (char *)str;
+    char *outptr = (char *)outbuf;
+    size_t inleft = inbytes;
+    size_t outleft = outbytes;
+
+    if (iconv(cd, &inptr, &inleft, &outptr, &outleft) == (size_t)(-1)) {
+        free(outbuf);
+        iconv_close(cd);
+        return NULL;
+    }
+
+    // Null-terminate
+    if (outleft >= 2) {
+        *(char16_t *)outptr = 0;
+    } else {
+        outbuf[(outbytes / sizeof(char16_t)) - 1] = 0;
+    }
+
+    iconv_close(cd);
+    return outbuf;
+}
+*/
 
 char16_t *winstr_from_str(const char *str) {
     if(!str) return NULL;

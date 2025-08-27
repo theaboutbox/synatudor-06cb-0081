@@ -6,6 +6,10 @@
 #include "loader.h"
 #include "wdf.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct async_args_enroll {
     bool *done;
 };
@@ -62,5 +66,9 @@ extern WINBIO_ENGINE_INTERFACE *tudor_engine_adapter;
 extern WINBIO_STORAGE_INTERFACE *tudor_storage_adapter;
 
 bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const char *val_name, bool is_write, void *buf, size_t *buf_size, enum winreg_val_type *val_type);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

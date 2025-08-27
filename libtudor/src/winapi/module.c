@@ -1,5 +1,7 @@
 #include <pthread.h>
 #include "internal.h"
+#include "stdlib.h"
+#include <sys/mman.h>
 
 static pthread_rwlock_t modules_lock = PTHREAD_RWLOCK_INITIALIZER;
 static struct winmodule *modules_head;
@@ -69,6 +71,7 @@ void winmodule_set_cur(struct winmodule *module) {
 }
 
 __winfnc HANDLE LoadLibraryExW(const char16_t *name, HANDLE file, DWORD flags) {
+    TRACE();
     //We don't support loading librarys dynamically, but some stdlib functions have to be loaded that way
     //As such return dummy modules
     struct winmodule *module = (struct winmodule*) malloc(sizeof(struct winmodule));
@@ -80,20 +83,43 @@ __winfnc HANDLE LoadLibraryExW(const char16_t *name, HANDLE file, DWORD flags) {
 }
 WINAPI(LoadLibraryExW)
 
+__winfnc HANDLE LoadLibraryA(const char *name) {
+    TRACE();
+
+    printf("LoadLibraryA: %s\n", name);
+    struct winmodule *module = (struct winmodule*) malloc(sizeof(struct winmodule));
+    if(!module) { winerr_set_errno(); return NULL; }
+    *module = (struct winmodule) {0};
+
+    module->name = malloc(strlen(name) + 1);
+    strcpy(module->name, name);
+    winmodule_register(module);
+
+    printf("LoadLibraryA: create handle: %p\n", module->handle);
+    return module->handle;
+}
+WINAPI(LoadLibraryA)
+
 __winfnc BOOL FreeLibrary(HANDLE handle) {
+    TRACE();
+    if (!handle) {return FALSE;}
+    printf("FreeLibrary %p\n", handle);
     winhandle_destroy(handle);
     return TRUE;
 }
 WINAPI(FreeLibrary)
 
 __winfnc HANDLE GetModuleHandleA(const char *name) {
+    TRACE();
     struct winmodule *module = (struct winmodule*) winmodule_find(name);
     return module ? module->handle : NULL;
 }
 WINAPI(GetModuleHandleA)
 
 __winfnc HANDLE GetModuleHandleW(const char16_t *name) {
+    TRACE();
     char *cname = winstr_to_str(name);
+    printf("GetModuleHandle: %s\n", cname);
     struct winmodule *module = (struct winmodule*) winmodule_find(cname);
     free(cname);
     return module ? module->handle : NULL;
@@ -117,9 +143,11 @@ __winfnc BOOL GetModuleHandleExW(DWORD flags, const char16_t *name, HANDLE *out)
 WINAPI(GetModuleHandleExW)
 
 __winfnc DWORD GetModuleFileNameA(HANDLE handle, char *name, DWORD size) {
+    TRACE();
     struct winmodule *module = handle ? (struct winmodule*) handle->data : cur_module;
  
     int name_len = strlen(module->name);
+    printf("GetModuleFileNameA() %s\n", module->name);
 
     if(size == 0) {
         winerr_set_code(ERROR_INSUFFICIENT_BUFFER);
@@ -138,6 +166,7 @@ __winfnc DWORD GetModuleFileNameA(HANDLE handle, char *name, DWORD size) {
 WINAPI(GetModuleFileNameA)
 
 __winfnc DWORD GetModuleFileNameW(HANDLE handle, char16_t *name, DWORD size) {
+    TRACE();
     struct winmodule *module = handle ? (struct winmodule*) handle->data : cur_module;
  
     char16_t *wname = winstr_from_str(module->name);
@@ -167,7 +196,69 @@ __winfnc BOOL DisableThreadLibraryCalls(HANDLE handle) {
 }
 WINAPI(DisableThreadLibraryCalls)
 
+static void GetProcAddressStub(char* lib, char *name) {
+    printf("Called GetProcAddress stub: %s\n", name);
+    abort();
+}
+
+static uint8_t *import_cur_page;
+static int import_cur_slot;
+#define IMPORT_STUB_SIZE 32
+#define STUB_PAGE_SIZE 8192
+
+static inline void encode_mov(uint8_t *targ, int reg, uint64_t val) {
+    targ[0] = 0x48;                 //REX - 64 bit operands
+    targ[1] = 0xb8 | reg;           //MOV r64, imm64
+    targ[2] = (val >>  0) & 0xff;   //imm64 - byte 0
+    targ[3] = (val >>  8) & 0xff;   //imm64 - byte 1
+    targ[4] = (val >> 16) & 0xff;   //imm64 - byte 2
+    targ[5] = (val >> 24) & 0xff;   //imm64 - byte 3
+    targ[6] = (val >> 32) & 0xff;   //imm64 - byte 4
+    targ[7] = (val >> 40) & 0xff;   //imm64 - byte 5
+    targ[8] = (val >> 48) & 0xff;   //imm64 - byte 6
+    targ[9] = (val >> 56) & 0xff;   //imm64 - byte 7
+}
+
+void *create_getproca_stub(const char *name) {
+    const char* lib = "GetProcAddress";
+    name = strdup(name);
+
+    //Obtain a stub slot
+    if(!import_cur_page || import_cur_slot*IMPORT_STUB_SIZE + IMPORT_STUB_SIZE > STUB_PAGE_SIZE) {
+        import_cur_page = (uint8_t*) mmap(NULL, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if(!import_cur_page) {
+            perror("Couldn't allocate import stub page");
+            abort();
+        }
+        import_cur_slot = 0;
+        log_debug("Allocated import stub page at %p", import_cur_page);
+    }
+
+    uint8_t *slot = import_cur_page + (import_cur_slot++)*IMPORT_STUB_SIZE;
+
+    //Encode slot instructions
+    encode_mov(slot +  0, 7, (uint64_t) name);           //mov rdi, <lib>
+    encode_mov(slot + 10, 6, (uint64_t) name);          //mov rsi, <name>
+    encode_mov(slot + 20, 0, (uint64_t) &GetProcAddressStub);  //mov rax, <stub function>
+    slot[30] = 0xff;                                    //jmp rax
+    slot[31] = 0xc0 | (4 << 3) | (0 << 0);              //  - ModR/M          
+
+    return slot;
+}
+
 __winfnc void *GetProcAddress(HANDLE handle, const char *name) {
+    TRACE();
+    printf("GetProcAddress ( %s )\n", name);
+    if (handle == NULL) {
+        printf("Call getProcAddress with NULL handle, %s\n", name);
+
+        void *resolv = resolve_windows_api(name);
+        // if(!resolv) winerr_set();
+        if(!resolv) return create_getproca_stub(name);
+
+        printf("GetProcAddress ret 1: %p\n", resolv);
+        return resolv;
+    }
     struct winmodule *module = (struct winmodule*) handle->data;
 
     //Check if it's an ordinal import
@@ -175,12 +266,55 @@ __winfnc void *GetProcAddress(HANDLE handle, const char *name) {
     if(!(nbits & ~((128ull << sizeof(uintptr_t)) - 1))) {
         int ord = (int) (nbits & ((128ull << sizeof(uintptr_t)) - 1));
         log_warn("GetProcAddress: Attempted ordinal import! module '%s' [%p] ord %d", module->name, module, ord);
+
+        printf("GetProcAddress ret 2: NULL\n");
         return NULL;
     }
 
     //Try to resolve the Windows API function
     void *resolv = resolve_windows_api(name);
-    if(!resolv) winerr_set();
+    // if(!resolv) winerr_set();
+    if(!resolv) return create_getproca_stub(name);
+
+    printf("GetProcAddress ret 3: %p\n", resolv);
     return resolv;
 }
 WINAPI(GetProcAddress)
+
+static uintptr_t get_pointer_obfuscator( void )
+{
+    static uintptr_t pointer_obfuscator;
+
+    if (!pointer_obfuscator)
+    {
+        ULONG seed = 12345;
+        uintptr_t r;
+
+        srand(seed);
+        /* generate a random value for the obfuscator */
+        r = (uintptr_t) rand(  );
+
+        pointer_obfuscator = r;
+    }
+
+    return pointer_obfuscator;
+}
+
+
+__winfnc void *EncodePointer(void* ptr) {
+    TRACE();
+    printf("Ptr = %p\n", ptr);
+    return ptr;
+    // void* ptrval = (void*) ptr;
+    // return (void*)((uintptr_t)ptrval ^ get_pointer_obfuscator());
+}
+WINAPI(EncodePointer)
+
+__winfnc void *DecodePointer(void* ptr) {
+    TRACE();
+    printf("Ptr = %p\n", ptr);
+    return ptr;
+    // void* ptrval = (void*) ptr;
+    // return (void*)((uintptr_t)ptrval ^ get_pointer_obfuscator());
+}
+WINAPI(DecodePointer)

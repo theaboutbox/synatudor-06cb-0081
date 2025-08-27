@@ -193,6 +193,7 @@ __winfnc DWORD UnregisterTraceGuids(HANDLE handle) {
 WINAPI(UnregisterTraceGuids)
 
 __winfnc ULONG TraceMessage(HANDLE handle, ULONG flags, GUID *guid, USHORT num, ...) {
+    TRACE();
     win_va_list vas;
     win_va_start(vas, num);
     winlog_trace(*guid, num, vas);

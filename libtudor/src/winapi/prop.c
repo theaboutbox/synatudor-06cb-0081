@@ -27,6 +27,7 @@ typedef struct _PROPVARIANT {
     };
 } PROPVARIANT;
 
+
 __winfnc HRESULT PropVariantClear(PROPVARIANT *pvar) {
     *pvar = (PROPVARIANT) {0};
     return ERROR_SUCCESS;

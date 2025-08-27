@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <libusb.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _HANDLE *HANDLE;
 
 typedef struct {
@@ -11,6 +15,13 @@ typedef struct {
     uint16_t PartB, PartC;
     uint64_t PartD:16, PartE:48;
 } RECGUID;
+
+typedef struct {
+    uint32_t Data1;     // 32 bits
+    uint16_t Data2;     // 16 bits  
+    uint16_t Data3;     // 16 bits
+    uint8_t  Data4[8];  // 8 bytes (64 bits total)
+} __attribute__((packed)) GUID_DLL;
 
 typedef struct _WINBIO_IDENTITY WINBIO_IDENTITY;
 typedef struct _WINBIO_PIPELINE WINBIO_PIPELINE;
@@ -104,5 +115,9 @@ bool tudor_enroll_discard(struct tudor_device *device);
 
 bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, bool *retry, bool *matches, tudor_async_res_t *res);
 bool tudor_identify(struct tudor_device *device, bool *retry, bool *found_match, RECGUID *guid, enum tudor_finger *finger, tudor_async_res_t *res);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

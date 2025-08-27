@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "internal.h"
+#include <malloc.h>
 
 #define PROC_HEAP_HANDLE ((HANDLE) (uintptr_t) 0x50524f4348454150) /* PROCHEAP */
 
@@ -54,3 +55,8 @@ __winfnc void *LocalFree(void *mem) {
     return NULL;
 }
 WINAPI(LocalFree)
+
+__winfnc SIZE_T HeapSize(HANDLE heap, DWORD flags, void *mem) {
+    return malloc_usable_size(mem);
+}
+WINAPI(HeapSize)

@@ -22,6 +22,6 @@ extern enum log_level LOG_LEVEL;
 #define log_debug(frmt, ...) { if(LOG_LEVEL <= LOG_DEBUG)       { pthread_mutex_lock(&LOG_LOCK); fprintf(stdout, "[DBG] " frmt "\n", ##__VA_ARGS__); pthread_mutex_unlock(&LOG_LOCK); } }
 #define log_info(frmt, ...)  { if(LOG_LEVEL <= LOG_INFO )       { pthread_mutex_lock(&LOG_LOCK); fprintf(stdout, "[INF] " frmt "\n", ##__VA_ARGS__); pthread_mutex_unlock(&LOG_LOCK); } }
 #define log_warn(frmt, ...)  { if(LOG_LEVEL <= LOG_WARN )       { pthread_mutex_lock(&LOG_LOCK); fprintf(stderr, "[WRN] " frmt "\n", ##__VA_ARGS__); pthread_mutex_unlock(&LOG_LOCK); } }
-#define log_error(frmt, ...) { if(LOG_LEVEL <= LOG_ERROR)       { pthread_mutex_lock(&LOG_LOCK); fprintf(stderr, "[ERR] " frmt "\n", ##__VA_ARGS__); pthread_mutex_unlock(&LOG_LOCK); } }
+#define log_error(frmt, ...) { if(LOG_LEVEL <= LOG_ERROR)       { pthread_mutex_lock(&LOG_LOCK); fprintf(stderr, "[ERR] " frmt "\n", ##__VA_ARGS__); fflush(stderr); pthread_mutex_unlock(&LOG_LOCK); } }
 
 #endif

@@ -20,6 +20,7 @@ typedef struct {
 } CRITICAL_SECTION;
 
 __winfnc BOOL InitializeCriticalSectionEx(CRITICAL_SECTION *sect, DWORD spinCount, DWORD flags) {
+    TRACE();
     memset(sect, 0, sizeof(CRITICAL_SECTION));
 
     sect->LockCount = 0;
@@ -44,7 +45,14 @@ __winfnc BOOL InitializeCriticalSectionEx(CRITICAL_SECTION *sect, DWORD spinCoun
 }
 WINAPI(InitializeCriticalSectionEx)
 
+__winfnc BOOL InitializeCriticalSectionAndSpinCount(CRITICAL_SECTION *sect, DWORD spinCount) {
+    TRACE();
+    return InitializeCriticalSectionEx(sect, spinCount, 0);
+}
+WINAPI(InitializeCriticalSectionAndSpinCount)
+
 __winfnc void InitializeCriticalSection(CRITICAL_SECTION *sect) {
+    TRACE();
     if(!InitializeCriticalSectionEx(sect, 0, 0)) {
         log_error("InitializeCriticalSection failed");
         abort();
@@ -53,6 +61,7 @@ __winfnc void InitializeCriticalSection(CRITICAL_SECTION *sect) {
 WINAPI(InitializeCriticalSection)
 
 __winfnc void DeleteCriticalSection(CRITICAL_SECTION* sect) {
+    TRACE();
     //Destroy the mutex
     cant_fail_ret(pthread_mutex_destroy((pthread_mutex_t*) sect->LockSemaphore));
     free(sect->LockSemaphore);
@@ -60,6 +69,7 @@ __winfnc void DeleteCriticalSection(CRITICAL_SECTION* sect) {
 WINAPI(DeleteCriticalSection)
 
 __winfnc void EnterCriticalSection(CRITICAL_SECTION *sect) {
+    TRACE();
     //Lock the mutex
     cant_fail_ret(pthread_mutex_lock((pthread_mutex_t*) sect->LockSemaphore));
 
@@ -71,6 +81,7 @@ __winfnc void EnterCriticalSection(CRITICAL_SECTION *sect) {
 WINAPI(EnterCriticalSection)
 
 __winfnc void LeaveCriticalSection(CRITICAL_SECTION *sect) {
+    TRACE();
     if(--sect->RecursionCount == 0) {
         sect->LockCount = 0;
         sect->OwningThread = NULL;
@@ -185,11 +196,13 @@ void win_reset_event(HANDLE handle) {
 }
 
 __winfnc HANDLE CreateEventA(void *attrs, BOOL manual_reset, BOOL initial_state, const char *name) {
+    TRACE();
     return win_create_event(name, initial_state, manual_reset);
 }
 WINAPI(CreateEventA);
 
 __winfnc HANDLE CreateEventW(void *attrs, BOOL manual_reset, BOOL initial_state, const char16_t *name) {
+    TRACE();
     char *cname = name ? winstr_to_str(name) : NULL;
     HANDLE evt = CreateEventA(attrs, manual_reset, initial_state, cname);
     free(cname);
@@ -198,6 +211,7 @@ __winfnc HANDLE CreateEventW(void *attrs, BOOL manual_reset, BOOL initial_state,
 WINAPI(CreateEventW);
 
 __winfnc BOOL SetEvent(HANDLE handle) {
+    TRACE();
     if(handle == INVALID_HANDLE_VALUE) return FALSE;
     win_set_event(handle);
     return TRUE;
@@ -205,6 +219,7 @@ __winfnc BOOL SetEvent(HANDLE handle) {
 WINAPI(SetEvent)
 
 __winfnc BOOL ResetEvent(HANDLE handle) {
+    TRACE();
     if(handle == INVALID_HANDLE_VALUE) return FALSE;
     win_reset_event(handle);
     return TRUE;
@@ -212,12 +227,15 @@ __winfnc BOOL ResetEvent(HANDLE handle) {
 WINAPI(ResetEvent)
 
 __winfnc DWORD WaitForSingleObject(HANDLE handle, DWORD timeout) {
+    TRACE();
     return win_wait_sync_obj(handle, timeout);
 }
 WINAPI(WaitForSingleObject)
 
 #define NUM_FLS_IDXS 128
+#define NUM_TLS_IDXS 128
 #define FLS_OUT_OF_INDEXES 0xffffffff
+#define TLS_OUT_OF_INDEXES 0xffffffff
 
 typedef __winfnc void PflsCallbackFunction(void *flsData);
 
@@ -235,6 +253,14 @@ struct fls_value {
     void *data;
 };
 
+static pthread_rwlock_t tls_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+static int tls_next_free;
+static struct {
+    int next_idx;
+    pthread_key_t key;
+} tls_indices[NUM_TLS_IDXS];
+
 __constr static void init_fls() {
     //Initialize indices
     fls_next_free = NUM_FLS_IDXS;
@@ -244,6 +270,65 @@ __constr static void init_fls() {
     }
 }
 
+__winfnc DWORD TlsAlloc() {
+    TRACE();
+    cant_fail_ret(pthread_rwlock_wrlock(&tls_lock));
+    DWORD idx = TLS_OUT_OF_INDEXES;
+    if (tls_next_free < NUM_TLS_IDXS) {
+        idx = tls_next_free;
+        tls_next_free = tls_indices[idx].next_idx;
+
+        tls_indices[idx].next_idx = -1;
+        cant_fail_ret(pthread_key_create(&tls_indices[idx].key, NULL));
+    }
+    cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
+    return idx;
+}
+WINAPI(TlsAlloc)
+
+__winfnc BOOL TlsFree(DWORD idx) {
+    TRACE();
+    cant_fail_ret(pthread_rwlock_wrlock(&tls_lock));
+    BOOL suc;
+    if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
+        cant_fail_ret(pthread_key_delete(tls_indices[idx].key));
+        tls_indices[idx].next_idx = tls_next_free;
+        tls_next_free = idx;
+        suc = TRUE;
+    } else suc = FALSE;
+    cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
+    if (!suc) winerr_set();
+    return suc;
+}
+WINAPI(TlsFree)
+
+__winfnc void *TlsGetValue(DWORD idx) {
+    TRACE();
+    cant_fail_ret(pthread_rwlock_rdlock(&tls_lock));
+    void *data = NULL;
+    if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
+        data = pthread_getspecific(tls_indices[idx].key);
+    } else winerr_set();
+    cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
+    return data;
+}
+WINAPI(TlsGetValue)
+
+__winfnc BOOL TlsSetValue(DWORD idx, void *data) {
+    TRACE();
+    cant_fail_ret(pthread_rwlock_rdlock(&tls_lock));
+    BOOL suc;
+    if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
+        suc = pthread_setspecific(tls_indices[idx].key, data) == 0;
+    } else {
+        winerr_set();
+        suc = FALSE;
+    }
+    cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
+    return suc;
+}
+WINAPI(TlsSetValue)
+
 static void fls_destructor(void *ptr) {
     struct fls_value *val = (struct fls_value*) ptr;
     if(val->callback) val->callback(val->data);
@@ -251,6 +336,7 @@ static void fls_destructor(void *ptr) {
 }
 
 __winfnc DWORD FlsAlloc(PflsCallbackFunction *callback) {
+    TRACE();
     cant_fail_ret(pthread_rwlock_wrlock(&fls_lock));
 
     //Try to obtain an index
@@ -271,6 +357,7 @@ __winfnc DWORD FlsAlloc(PflsCallbackFunction *callback) {
 WINAPI(FlsAlloc);
 
 __winfnc BOOL FlsFree(DWORD idx) {
+    TRACE();
     cant_fail_ret(pthread_rwlock_wrlock(&fls_lock));
 
     //Free the index
@@ -289,7 +376,7 @@ __winfnc BOOL FlsFree(DWORD idx) {
 }
 WINAPI(FlsFree);
 
-__winfnc void *FlsGetValue(DWORD idx) {
+void *FlsGetValueImpl(DWORD idx) {
     cant_fail_ret(pthread_rwlock_rdlock(&fls_lock));
 
     //Get the index's value
@@ -303,9 +390,18 @@ __winfnc void *FlsGetValue(DWORD idx) {
 
     return data;
 }
+
+__winfnc void *FlsGetValue(DWORD idx) {
+    TRACE();
+    void* res = FlsGetValueImpl(idx);
+
+    printf("FlsGetValue() : %d -> %p\n", idx, res);
+    fflush(stdout);
+    return res;
+}
 WINAPI(FlsGetValue);
 
-__winfnc BOOL FlsSetValue(DWORD idx, void *data) {
+bool FlsSetValueImpl(DWORD idx, void* data) {
     cant_fail_ret(pthread_rwlock_rdlock(&fls_lock));
 
     //Set the index's value
@@ -332,16 +428,45 @@ __winfnc BOOL FlsSetValue(DWORD idx, void *data) {
 
     return suc;
 }
+
+__winfnc BOOL FlsSetValue(DWORD idx, void *data) {
+    TRACE();
+
+    bool suc = FlsSetValueImpl(idx,  data);
+    printf("FlsSetValue() %d -> %p ok: %d\n", idx, data, suc);
+    return suc;
+}
 WINAPI(FlsSetValue);
 
-__winfnc DWORD TlsAlloc() { return FlsAlloc(NULL); }
-WINAPI(TlsAlloc)
+// __winfnc DWORD TlsAlloc() { TRACE(); return FlsAlloc(NULL); }
+// WINAPI(TlsAlloc)
+//
+// __winfnc BOOL TlsFree(DWORD idx) {TRACE();  return FlsFree(idx); }
+// WINAPI(TlsFree)
+//
+// __winfnc void *TlsGetValue(DWORD idx) {
+//     TRACE();  
+//     void* res = FlsGetValueImpl(idx); 
+//
+//     printf("TlsGetValue() : %d -> %p\n", idx, res);
+//     return res;
+// }
+// WINAPI(TlsGetValue)
+//
+// __winfnc BOOL TlsSetValue(DWORD idx, void *data) {
+//     TRACE();  
+//
+//     bool suc = FlsSetValueImpl(idx,  data);
+//     printf("TlsSetValue() %d %p %b\n", idx, data, suc);
+//     return suc;
+// }
+// WINAPI(TlsSetValue)
+//
+__winfnc HANDLE OpenProcess(DWORD access, bool inherit_handle, DWORD process_id) {
+    TRACE();  
+    printf("OpenProcess: %d\n", process_id);
 
-__winfnc BOOL TlsFree(DWORD idx) { return FlsFree(idx); }
-WINAPI(TlsFree)
-
-__winfnc void *TlsGetValue(DWORD idx) { return FlsGetValue(idx); }
-WINAPI(TlsGetValue)
-
-__winfnc BOOL TlsSetValue(DWORD idx, void *data) { return FlsSetValue(idx, data); }
-WINAPI(TlsSetValue)
+    return 0; 
+}
+WINAPI(OpenProcess)
+//

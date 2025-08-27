@@ -55,6 +55,7 @@ static void tudor_cleanup(struct tudor_device *device, OVERLAPPED *ovlp, struct 
     winwdf_destroy_object((WDFOBJECT) req);
 }
 
+/**
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state) {
     HRESULT hres;
     NTSTATUS status;
@@ -186,6 +187,7 @@ bool tudor_close(struct tudor_device *device) {
 
     return true;
 }
+*/
 
 bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_finger finger) {
     winmodule_set_cur(&tudor_adapter_dll->module);

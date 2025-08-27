@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct dll_export {
     char *name;
     void *addr;
@@ -23,5 +27,9 @@ bool load_dll(struct dll_image *dll, const char *name, uint8_t *data, uint32_t s
 void destroy_dll(struct dll_image *dll);
 
 void *find_dll_export(struct dll_image *dll, const char *name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

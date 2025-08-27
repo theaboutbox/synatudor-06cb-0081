@@ -34,6 +34,7 @@ libtudor_src = [
     'src/winapi/suspend.c',
     'src/winapi/io.c',
     'src/winapi/system.c',
+    'src/winapi/winusb.c',
 
     'src/winapi/crypt/rsa_aes.c',
     'src/winapi/crypt/evp_digest.c',
@@ -58,18 +59,23 @@ libtudor_src = [
     'src/winapi/wdf/usb.c',
 
     'src/tudor/async.c',
-    'src/tudor/driver.c',
+    # 'src/tudor/driver.c',
     'src/tudor/device.c',
     'src/tudor/storage.c',
-    'src/tudor/reg.c'
+    'src/tudor/reg.c',
+    'src/tudor/driver_wudf1.cpp',
+
 ]
 
 driver_dll_names = [
-    'synaFpAdapter104.dll',
-    'synaWudfBioUsb104.dll'
+    'synaAdvAdapter.dll',
+    'synaWudfBioUsb.dll'
 ]
 
 add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
+add_global_arguments('-g', language : ['c', 'cpp'])
+# add_global_arguments('-fsanitize=address', language : ['c', 'cpp'])
+
 
 driver_dlls = custom_target('driver-download', 
     output: driver_dll_names,
@@ -97,10 +103,13 @@ libcrypto_dep = dependency('libcrypto', version: '>=3.0.0')
 libusb_dep = dependency('libusb-1.0')
 
 libtudor_inc = include_directories('inc')
+# wudm1_inc = include_directories('src/wudm1_inc')
+# winapi_inc = include_directories('src/winapi')
 
 libtudor = shared_library('tudor', [libtudor_src, driver_dll_blobs],
     dependencies: [thread_dep, libcrypto_dep, libusb_dep],
     c_args: ['-D_GNU_SOURCE'] + libtudor_flags,
+    cpp_args: ['-D_GNU_SOURCE'] + libtudor_flags,
     link_args: ['-Wl,-z,noexecstack', '-Wl,--copy-dt-needed-entries'],
     include_directories: ['src', libtudor_inc],
     install: true,

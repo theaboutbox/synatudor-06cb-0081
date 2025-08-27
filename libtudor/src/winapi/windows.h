@@ -8,6 +8,7 @@
 
 typedef char CHAR;
 typedef unsigned char UCHAR;
+typedef UCHAR* PUCHAR;
 typedef char16_t WCHAR;
 typedef short SHORT;
 typedef unsigned short USHORT;
@@ -15,10 +16,12 @@ typedef int INT;
 typedef unsigned int UINT;
 typedef int LONG;
 typedef unsigned int ULONG;
+typedef ULONG* PULONG;
 typedef long long LONGLONG;
 typedef unsigned long long ULONGLONG;
 typedef intptr_t LONG_PTR;
 typedef uintptr_t ULONG_PTR;
+typedef void* PVOID;
 
 typedef uintptr_t SIZE_T;
 typedef unsigned char BYTE;
@@ -83,6 +86,8 @@ typedef struct {
     };
     HANDLE hEvent;
 } OVERLAPPED;
+
+typedef OVERLAPPED* LPOVERLAPPED;
 
 typedef struct {
     LONG x;
