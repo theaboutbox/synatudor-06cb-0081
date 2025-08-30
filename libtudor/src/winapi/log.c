@@ -156,6 +156,7 @@ static void trace_prov_destr(struct trace_provider *prov) {
 }
 
 __winfnc DWORD RegisterTraceGuidsA(Wmidprequest *request_fnc, void *request_ctx, GUID *control_guid, ULONG num_guids, TRACE_GUID_REGISTRATION *trace_guids, const char *mof_image, const char *mof_resource, HANDLE *handle) {
+    TRACE();
     //Allocate trace provider
     struct trace_provider *prov = (struct trace_provider*) malloc(sizeof(struct trace_provider));
     if(!prov) { return winerr_from_errno(); }
@@ -182,11 +183,13 @@ __winfnc DWORD RegisterTraceGuidsA(Wmidprequest *request_fnc, void *request_ctx,
 WINAPI(RegisterTraceGuidsA)
 
 __winfnc DWORD RegisterTraceGuidsW(Wmidprequest *request_fnc, void *request_ctx, GUID *control_guid, ULONG num_guids, TRACE_GUID_REGISTRATION *trace_guids, const char16_t *mof_image, const char16_t *mof_resource, HANDLE *handle) {
+    TRACE();
     return RegisterTraceGuidsA(request_fnc, request_ctx, control_guid, num_guids, trace_guids, NULL, NULL, handle);
 }
 WINAPI(RegisterTraceGuidsW)
 
 __winfnc DWORD UnregisterTraceGuids(HANDLE handle) {
+    TRACE();
     winhandle_destroy(handle);
     return ERROR_SUCCESS;
 }

@@ -10,10 +10,12 @@ struct crypt_key;
 
 typedef BOOL crypt_import_key_fnc(struct crypt_provider *prov, const BLOBHEADER *data, size_t data_size, void **key);
 typedef void crypt_destroy_key_fnc(struct crypt_provider *prov, void *key);
+typedef BOOL crypt_set_key_fnc(struct crypt_provider* prov, void** key, DWORD dwParam, const BYTE *pbData, DWORD dwFlags);
 
 struct crypt_provider {
     crypt_import_key_fnc *import_key;
     crypt_destroy_key_fnc *destroy_key;
+    crypt_set_key_fnc *set_key;
 };
 
 struct crypt_key {

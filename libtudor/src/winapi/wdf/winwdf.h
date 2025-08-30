@@ -154,6 +154,27 @@ typedef struct {
     ULONG_PTR Information;
 } IO_STATUS_BLOCK;
 
+// typedef enum _WDF_REQUEST_TYPE
+// {
+//     WdfRequestTypeUndefined        = 0,
+//     WdfRequestTypeCreate           = 1,
+//     WdfRequestTypeCleanup          = 2,
+//     WdfRequestTypeRead             = 3,
+//     WdfRequestTypeWrite            = 4,
+//     WdfRequestTypeDeviceControl  = 5,
+//     WdfRequestTypeClose            = 6,
+//     WdfRequestTypeUsb              = 7,
+//     WdfRequestTypeOther            = 8,
+//     WdfRequestTypeInternalIoctl    = 9,
+//     WdfRequestTypeTypeNoFormat     = 10,
+//     WdfRequestTypeFlushBuffers     = 11,
+//     WdfRequestTypeQueryInformation = 12,
+//     WdfRequestTypeSetInformation   = 13,
+//     WdfRequestTypeMaximum
+//
+// } WDF_REQUEST_TYPE, *PWDF_REQUEST_TYPE;
+
+
 typedef enum {
     WdfRequestTypeCreate,
     WdfRequestTypeCreateNamedPipe,

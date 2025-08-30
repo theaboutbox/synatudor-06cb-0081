@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include "stub.h"
 #include <tudor/log.h>
 
@@ -27,7 +28,9 @@ static uint8_t *import_cur_page;
 static int import_cur_slot;
 
 static void import_stub(char *lib, char *name) {
-    log_error("Unresolved import %s@%s called!", name, lib);
+    printf("Unresolved import %s@%s called!", name, lib);
+    fflush(stdout);
+    usleep(90000000);
     abort();
 }
 

@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include "internal.h"
 #include "stdlib.h"
+#include <unistd.h>
 #include <sys/mman.h>
 
 static pthread_rwlock_t modules_lock = PTHREAD_RWLOCK_INITIALIZER;
@@ -118,6 +119,13 @@ WINAPI(GetModuleHandleA)
 
 __winfnc HANDLE GetModuleHandleW(const char16_t *name) {
     TRACE();
+    if (!name) {
+        void* image_base = (void*)0xdeadc0de;
+
+        HANDLE h = winhandle_create(image_base, NULL);
+        // winhandle_create(&tid
+        return h;
+    }
     char *cname = winstr_to_str(name);
     printf("GetModuleHandle: %s\n", cname);
     struct winmodule *module = (struct winmodule*) winmodule_find(cname);
@@ -169,6 +177,7 @@ __winfnc DWORD GetModuleFileNameW(HANDLE handle, char16_t *name, DWORD size) {
     TRACE();
     struct winmodule *module = handle ? (struct winmodule*) handle->data : cur_module;
  
+    printf("Module: %s\n", module->name);
     char16_t *wname = winstr_from_str(module->name);
     int wname_len = winstr_len(wname);
 
@@ -198,6 +207,8 @@ WINAPI(DisableThreadLibraryCalls)
 
 static void GetProcAddressStub(char* lib, char *name) {
     printf("Called GetProcAddress stub: %s\n", name);
+    fflush(stdout);
+    usleep(9000000);
     abort();
 }
 
@@ -318,3 +329,54 @@ __winfnc void *DecodePointer(void* ptr) {
     // return (void*)((uintptr_t)ptrval ^ get_pointer_obfuscator());
 }
 WINAPI(DecodePointer)
+
+__winfnc uint16_t  RegisterClassExW(void* u) {
+    TRACE();
+    return 0;
+}
+WINAPI(RegisterClassExW)
+
+__winfnc BOOL GetMessageW(
+           void* lpMsg,
+  void*  hWnd,
+  UINT  wMsgFilterMin,
+  UINT  wMsgFilterMax
+) { TRACE(); return FALSE;}
+WINAPI(GetMessageW)
+
+__winfnc BOOL DestroyWindow(
+  void* hWnd
+) {TRACE(); return true;}
+WINAPI(DestroyWindow)
+
+__winfnc BOOL UnregisterClassW(
+  uint16_t*   lpClassName,
+  void* hInstance) 
+{
+    TRACE();
+    return true;
+}
+WINAPI(UnregisterClassW)
+
+typedef const char16_t* LPCWSTR;
+
+__winfnc void* CreateWindowExW(
+  DWORD     dwExStyle,
+  LPCWSTR   lpClassName,
+  LPCWSTR   lpWindowName,
+  DWORD     dwStyle,
+  int       X,
+  int       Y,
+  int       nWidth,
+  int       nHeight,
+  void*      hWndParent,
+  void*     hMenu,
+  void* hInstance,
+  void*    lpParam
+) 
+{
+    TRACE();
+    return NULL;
+}
+WINAPI(CreateWindowExW)
+

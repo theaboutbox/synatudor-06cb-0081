@@ -188,6 +188,22 @@ std::string utf16le_to_utf8(const char16_t* input) {
     return convert.to_bytes(u16str);
 }
 
+char16_t* utf8_to_utf16le(const std::string& input) {
+    // Converter from UTF-8 to UTF-16
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
+
+    std::u16string u16str = convert.from_bytes(input);
+
+    // Allocate new buffer (+1 for null terminator)
+    char16_t* buffer = new char16_t[u16str.size() + 1];
+
+    // Copy content
+    std::copy(u16str.begin(), u16str.end(), buffer);
+    buffer[u16str.size()] = u'\0'; // null terminator
+
+    return buffer; // caller must delete[]
+}
+
 struct IObjectCleanup;
 
 class MyDevInit : public IWDFDeviceInitialize {
@@ -316,17 +332,17 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             printf("ReleaseLock\r\n");
         }
     public:
-        virtual HRESULT STDMETHODCALLTYPE GetNamedValue( 
+        virtual HRESULT STDMETHODCALLTYPE GetNamedValue(  // 24
             /* [annotation][string][in] */ 
             _In_  LPCWSTR pszName,
             /* [annotation][out] */ 
             _Out_  PROPVARIANT *pv){
             std::wcout << L"=====================================" << std::endl;
             std::wcout << L"GetNamedValue " << pszName << std::endl;
-            std::wcout << L"=====================================" << std::endl;
-
             std::string fname = utf16le_to_utf8(pszName);
             std::cout << fname << std::endl;
+            std::wcout << L"=====================================" << std::endl;
+
             if(fname == "CalibrationData") {
                 std::ifstream input(fname + ".blob", std::ios::binary);
                 std::vector<char> buf((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -344,7 +360,8 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                 std::ifstream input(fname + ".uint");
                 if(input) {
                     pv->vt = VT_UINT;
-                    input >> pv->uintVal;
+                    unsigned int& dst = pv->uintVal;
+                    input >> dst;
                     std::cout << "UINT " << fname << " = " << pv->uintVal << std::endl; 
                 }
                 else {
@@ -353,13 +370,15 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                 }
             } 
             else {
-                DECIMAL_SETZERO(pv->decVal);
+                memset(pv, 0, sizeof(PROPVARIANT));
+                // DECIMAL_SETZERO(pv->decVal);
+                // pv->vt = VT_DECIMAL;
             }
             return 0;
         }
 
         
-        virtual HRESULT STDMETHODCALLTYPE SetNamedValue( 
+        virtual HRESULT STDMETHODCALLTYPE SetNamedValue(  // 32
             /* [annotation][string][in] */ 
             _In_  LPCWSTR pszName,
             /* [annotation][in] */ 
@@ -371,23 +390,21 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
 
             std::wcout << L"=====================================" << std::endl;
             std::wcout << L"SetNamedValue " << pszName << "=" << pv->vt << std::endl;
+            std::string str_u8 = utf16le_to_utf8(pszName);
+            std::cout << str_u8 << std::endl;
             switch(pv->vt) {
                 case VT_I1:
                     printf("VT_I1: %d\n", pv->cVal);
                     break;
                 case VT_UINT: {
-                        std::string fname;
-                        std::wstring wfname{};
-                        fname.assign(wfname.begin(), wfname.end());
+                        std::string fname = utf16le_to_utf8(pszName);
                         std::ofstream output(fname + ".uint");
                         output << pv->uintVal << std::endl;
                         printf("VT_UINT: %d\n", pv->uintVal);
                     }
                     break;
                 case VT_BLOB: {
-                        std::string fname;
-                        std::wstring wfname{};
-                        fname.assign(wfname.begin(), wfname.end());
+                        std::string fname = utf16le_to_utf8(pszName);
                         std::ofstream output(fname + ".blob", std::ios::binary);
                         std::copy(pv->blob.pBlobData, pv->blob.pBlobData + pv->blob.cbSize,
                                 std::ostreambuf_iterator<char>(output));
@@ -469,7 +486,7 @@ struct MyMem : public IWDFMemory {
         
         virtual HRESULT STDMETHODCALLTYPE AssignContext( 
             /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            _In_opt_ __drv_aliasesMem  void *pCleanupCallback,
             /* [annotation][unique][in] */ 
             _In_opt_ __drv_aliasesMem  void *pContext) { 
             printf("AssignContext\r\n");
@@ -597,7 +614,7 @@ struct MyRequest : public IWDFIoRequest {
         
         virtual HRESULT STDMETHODCALLTYPE AssignContext( 
             /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            _In_opt_ __drv_aliasesMem  void *pCleanupCallback,
             /* [annotation][unique][in] */ 
             _In_opt_ __drv_aliasesMem  void *pContext) { 
             printf("AssignContext\r\n");
@@ -753,7 +770,7 @@ struct MyRequest : public IWDFIoRequest {
         
         virtual HRESULT STDMETHODCALLTYPE Send( 
             /* [annotation][in] */ 
-            _In_  IWDFIoTarget *pIoTarget,
+            _In_  void *pIoTarget,
             /* [annotation][in] */ 
             _In_  ULONG Flags,
             /* [annotation][in] */ 
@@ -765,7 +782,7 @@ struct MyRequest : public IWDFIoRequest {
         
         virtual void STDMETHODCALLTYPE GetFileObject( 
             /* [annotation][out] */ 
-            _Out_  IWDFFile **ppFileObject){
+            _Out_  void **ppFileObject){
             printf("GetFileObject\r\n");
         }
 
@@ -1204,7 +1221,7 @@ struct MyDevice : public IWDFDevice3 {
             if (!pdwDeviceNameLength) {
                 return -1;
             }
-            static const char16_t name[] = u"usb";
+            static const char16_t name[] = u"C:\\usb.txt";
 
             // Required length (including null terminator)
             DWORD requiredLength = static_cast<DWORD>(std::char_traits<char16_t>::length(name) + 1);
@@ -1640,9 +1657,14 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
     // This is a simplified approach - you might need a more sophisticated request tracking system
     
     if (myQueue) {
-        // myQueue->ioctl->OnDeviceIoControl(
-        //     myQueue, req, code, in_size, out_size);
+        //MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+        MyMem in(in_buf, in_size), out(out_buf, out_size);
+        MyRequest req(WdfRequestTypeOther, 0x442004, &out, &in);
 
+        printf("about to ioctd: 0x%x\r\n", code);
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, code, 0, 0);
+        while(!req.complete)
+            usleep(20000);
     }
     
     // For now, return pending - the actual completion will happen in the callback
@@ -1777,14 +1799,15 @@ bool tudor_init() {
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     //
-    // if(rc != 0) {
-    //     return 0;
-    // }
+    if(rc != 0) {
+        abort();
+    }
     //
-    // usleep(100);
+    usleep(1000000);
     // printf("about to enter D0 state\r\n");
     // rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     // printf("OnD0Entry rc = %lx\r\n", rc);
+    // usleep(20000);
 
 
     //Query WINBIO interfaces
@@ -1881,30 +1904,6 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
 
     device_init();
 
-    //Reset the USB device
-    int usb_err;
-    if((usb_err = libusb_reset_device(usb_dev)) != 0) {
-        log_error("libusb_reset_device failed: %d [%s]", usb_err, libusb_error_name(usb_err));
-        return false;
-    }
-
-    //Open the device through the driver
-    device->reg_key = winreg_open_key(device, "HKEY_LOCAL_MACHINE\\Tudor\\Device");
-    // if((status = winwdf_add_device(tudor_wdf_driver, device->reg_key, usb_dev, &device->wdf_device)) != 0) {
-    //     log_error("Error adding WDF device: 0x%x!", status);
-    //     return false;
-    // }
-    // if(!device->wdf_device) {
-    //     log_error("Driver didn't create a WDF device!");
-    //     return false;
-    // }
-    // winwdf_event_queue_flush();
-
-    // if((status = winwdf_open_device(device->wdf_device, &device->wdf_file)) != 0) {
-    //     log_error("Error opening WDF file: 0x%x!", status);
-    //     return false;
-    // }
-
     //This is dumb, but otherwise we run into race conditions
     cant_fail(usleep(3000));
 
@@ -1917,7 +1916,7 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     *device->pipeline = (WINBIO_PIPELINE) {0};
     device->pipeline->EngineInterface = tudor_engine_adapter;
     device->pipeline->SensorInterface = tudor_sensor_adapter;
-    device->pipeline->StorageInterface = tudor_storage_adapter;
+    // device->pipeline->StorageInterface = tudor_storage_adapter;
     // device->pipeline->SensorHandle = device->winbio_file = winio_create_file(device, true, NULL, NULL, (winio_devctrl_fnc*) tudor_devctrl, (winio_cancel_fnc*) tudor_cancel, (winio_cleanup_fnc*) tudor_cleanup, NULL);
     device->pipeline->SensorHandle = device->winbio_file = winio_create_file(
         device, 
@@ -1937,12 +1936,12 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     log_debug("Attaching interfaces to pipeline...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Attach, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Attach, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Attach, device->pipeline);
+    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->Attach, device->pipeline);
 
     log_debug("Initializing pipeline interfaces...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->PipelineInit, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->PipelineInit, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->PipelineInit, device->pipeline);
+    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->PipelineInit, device->pipeline);
 
     //Reset the sensor
     log_debug("Resetting sensor...");
@@ -1952,7 +1951,7 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     log_debug("Activating pipeline...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Activate, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Activate, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Activate, device->pipeline);
+    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->Activate, device->pipeline);
 
     //Check the sensor status
     log_debug("Checking sensor status...");
@@ -1962,7 +1961,6 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
         log_error("Sensor didn't return ready status! [status 0x%x]", status);
         return false;
     }
-
 
     return true;
 }

@@ -31,6 +31,7 @@ int winerr_from_errno() {
 
 __winfnc DWORD GetLastError() {
     WIN_CLOBBER_NONVOL_REGS
+    // printf("Get last_error = %d\n", last_error);
     return last_error;
 }
 WINAPI(GetLastError)
@@ -38,5 +39,6 @@ WINAPI(GetLastError)
 __winfnc void SetLastError(DWORD err) {
     WIN_CLOBBER_NONVOL_REGS
     last_error = err;
+    // printf("Set last_error = %d\n", last_error);
 }
 WINAPI(SetLastError)

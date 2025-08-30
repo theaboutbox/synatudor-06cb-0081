@@ -8,6 +8,7 @@ typedef struct {
 } DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS;
 
 __winfnc DWORD PowerRegisterSuspendResumeNotification(DWORD flags, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS *params, HANDLE *out) {
+    TRACE();
     //TODO
     *out = NULL;
     return ERROR_SUCCESS;
@@ -15,6 +16,7 @@ __winfnc DWORD PowerRegisterSuspendResumeNotification(DWORD flags, DEVICE_NOTIFY
 WINAPI(PowerRegisterSuspendResumeNotification)
 
 __winfnc DWORD PowerUnregisterSuspendResumeNotification(HANDLE handle) {
+    TRACE();
     //TODO
     return ERROR_SUCCESS;
 }

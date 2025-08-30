@@ -91,6 +91,7 @@ static void destroy_key(struct bcrypt_key *key) {
 
 __winfnc NTSTATUS BCryptGetProperty(struct bcrypt_object *obj, const char16_t *name, UCHAR *out, ULONG out_size, ULONG *res_size, ULONG flags) {
     //Find property
+    TRACE();
     char *cname = winstr_to_str(name);
     struct bcrypt_property *prop = bcrypt_find_obj_prop(obj, cname);
 
@@ -110,6 +111,7 @@ WINAPI(BCryptGetProperty)
 
 __winfnc NTSTATUS BCryptSetProperty(struct bcrypt_object *obj, const char16_t *name, UCHAR *in, ULONG in_size, ULONG flags) {
     //Find existing property
+    TRACE();
     char *cname = winstr_to_str(name);
     struct bcrypt_property *prop = bcrypt_find_obj_prop(obj, cname);
 
@@ -137,6 +139,7 @@ __winfnc NTSTATUS BCryptSetProperty(struct bcrypt_object *obj, const char16_t *n
 WINAPI(BCryptSetProperty)
 
 __winfnc NTSTATUS BCryptOpenAlgorithmProvider(struct bcrypt_algo_wrap **out, const char16_t *alg_id, const char16_t *impl, ULONG flags) {
+    TRACE();
     char *alg_cid = winstr_to_str(alg_id);
 
     //Try to find the algorithm
@@ -175,12 +178,14 @@ __winfnc NTSTATUS BCryptOpenAlgorithmProvider(struct bcrypt_algo_wrap **out, con
 WINAPI(BCryptOpenAlgorithmProvider)
 
 __winfnc NTSTATUS BCryptCloseAlgorithmProvider(struct bcrypt_algo_wrap *algo, ULONG flags) {
+    TRACE();
     destroy_obj(&algo->obj);
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptCloseAlgorithmProvider)
 
 __winfnc NTSTATUS BCryptGenerateSymmetricKey(struct bcrypt_algo_wrap *algo, struct bcrypt_key **out, UCHAR *key_obj, ULONG key_obj_size, UCHAR *secret, ULONG secret_size, ULONG flags) {
+    TRACE();
     if(!algo->algo->generate_sym_key) return WINERR_SET_CODE;
 
     //Create and generate key
@@ -202,6 +207,7 @@ __winfnc NTSTATUS BCryptGenerateSymmetricKey(struct bcrypt_algo_wrap *algo, stru
 WINAPI(BCryptGenerateSymmetricKey)
 
 __winfnc NTSTATUS BCryptGenerateKeyPair(struct bcrypt_algo_wrap *algo, struct bcrypt_key **out, ULONG key_len, ULONG flags) {
+    TRACE();
     if(!algo->algo->generate_key_pair) return WINERR_SET_CODE;
 
     //Create and generate key
@@ -223,12 +229,15 @@ __winfnc NTSTATUS BCryptGenerateKeyPair(struct bcrypt_algo_wrap *algo, struct bc
 WINAPI(BCryptGenerateKeyPair)
 
 __winfnc NTSTATUS BCryptFinalizeKeyPair(struct bcrypt_key *key, ULONG flags) {
+    TRACE();
     if(key->algo->finalize_key) return key->algo->finalize_key(key->algo, key->key_data);
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptFinalizeKeyPair)
 
 __winfnc NTSTATUS BCryptImportKey(struct bcrypt_algo_wrap *algo, struct bcrypt_key *import_key, const char16_t *blob_type, struct bcrypt_key **out, UCHAR *in, ULONG in_size, ULONG flags) {
+    TRACE();
+
     if(!algo->algo->import_key) return WINERR_SET_CODE;
     if(import_key) {
         log_warn("BCryptImportKey called with encrypted input data!");
@@ -256,6 +265,7 @@ __winfnc NTSTATUS BCryptImportKey(struct bcrypt_algo_wrap *algo, struct bcrypt_k
 WINAPI(BCryptImportKey)
 
 __winfnc NTSTATUS BCryptImportKeyPair(struct bcrypt_algo_wrap *algo, struct bcrypt_key *import_key, const char16_t *blob_type, struct bcrypt_key **out, UCHAR *in, ULONG in_size, ULONG flags) {
+    TRACE();
     if(!algo->algo->import_key) return WINERR_SET_CODE;
     if(import_key) {
         log_warn("BCryptImportKeyPair called with encrypted input data!");
@@ -283,6 +293,7 @@ __winfnc NTSTATUS BCryptImportKeyPair(struct bcrypt_algo_wrap *algo, struct bcry
 WINAPI(BCryptImportKeyPair)
 
 __winfnc NTSTATUS BCryptExportKey(struct bcrypt_key *key, struct bcrypt_key *export_key, const char16_t *blob_type, UCHAR *out, ULONG out_size, ULONG *res_size, ULONG flags) {
+    TRACE();
     if(!key->algo->export_key) return WINERR_SET_CODE;
     if(export_key) {
         log_warn("BCryptExportKey called with encrypted output data!");
@@ -299,12 +310,14 @@ __winfnc NTSTATUS BCryptExportKey(struct bcrypt_key *key, struct bcrypt_key *exp
 WINAPI(BCryptExportKey)
 
 __winfnc NTSTATUS BCryptDestroyKey(struct bcrypt_key *key) {
+    TRACE();
     destroy_key(key);
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptDestroyKey);
 
 __winfnc NTSTATUS BCryptEncrypt(struct bcrypt_key *key, UCHAR *in, ULONG in_size, void *pad_info, UCHAR *iv, ULONG iv_size, UCHAR *out, ULONG out_size, ULONG *res_size, ULONG flags) {
+    TRACE();
     if(!key->algo->encrypt) return WINERR_SET_CODE;
     if(flags) {
         log_warn("BCryptEncrypt | Tried to use flags: 0x%x!", flags);
@@ -319,6 +332,7 @@ __winfnc NTSTATUS BCryptEncrypt(struct bcrypt_key *key, UCHAR *in, ULONG in_size
 WINAPI(BCryptEncrypt)
 
 __winfnc NTSTATUS BCryptDecrypt(struct bcrypt_key *key, UCHAR *in, ULONG in_size, void *pad_info, UCHAR *iv, ULONG iv_size, UCHAR *out, ULONG out_size, ULONG *res_size, ULONG flags) {
+    TRACE();
     if(!key->algo->decrypt) return WINERR_SET_CODE;
     if(flags) {
         log_warn("BCryptDecrypt | Tried to use flags: 0x%x!", flags);
@@ -333,6 +347,7 @@ __winfnc NTSTATUS BCryptDecrypt(struct bcrypt_key *key, UCHAR *in, ULONG in_size
 WINAPI(BCryptDecrypt)
 
 __winfnc NTSTATUS BCryptSignHash(struct bcrypt_key *key, void *pad_info, UCHAR *hash, ULONG hash_size, UCHAR *sig, ULONG buf_size, ULONG *sig_size, ULONG flags) {
+    TRACE();
     if(!key->algo->sign_hash) return WINERR_SET_CODE;
     if(flags) {
         log_warn("BCryptSignHash | Tried to use flags: 0x%x!", flags);
@@ -347,6 +362,7 @@ __winfnc NTSTATUS BCryptSignHash(struct bcrypt_key *key, void *pad_info, UCHAR *
 WINAPI(BCryptSignHash)
 
 __winfnc NTSTATUS BCryptVerifySignature(struct bcrypt_key *key, void *pad_info, UCHAR *hash, ULONG hash_size, UCHAR *sig, ULONG sig_size, ULONG flags) {
+    TRACE();
     if(!key->algo->verify_hash) return WINERR_SET_CODE;
     if(flags) {
         log_warn("BCryptVerifySignature | Tried to use flags: 0x%x!", flags);
@@ -358,6 +374,7 @@ __winfnc NTSTATUS BCryptVerifySignature(struct bcrypt_key *key, void *pad_info, 
 WINAPI(BCryptVerifySignature)
 
 __winfnc NTSTATUS BCryptSecretAgreement(struct bcrypt_key *priv_key, struct bcrypt_key *pub_key, struct bcrypt_secret **out, ULONG flags) {
+    TRACE();
     if(pub_key->algo != priv_key->algo) return WINERR_SET_CODE;
     if(!pub_key->algo->exchange_secret) return WINERR_SET_CODE;
 
@@ -381,6 +398,7 @@ __winfnc NTSTATUS BCryptSecretAgreement(struct bcrypt_key *priv_key, struct bcry
 WINAPI(BCryptSecretAgreement)
 
 __winfnc NTSTATUS BCryptDestroySecret(struct bcrypt_secret *secret) {
+    TRACE();
     destroy_obj(&secret->obj);
     free(secret->data);
     free(secret);
@@ -406,6 +424,7 @@ static const EVP_MD *determine_hash_md(BCryptBufferDesc *params) {
 }
 
 __winfnc NTSTATUS BCryptDeriveKey(struct bcrypt_secret *secret, const char16_t *kdf, BCryptBufferDesc *params, UCHAR *key, ULONG key_size, ULONG *res_size, ULONG flags) {
+    TRACE();
     if(params && params->ulVersion != BCRYPTBUFFER_VERSION) return WINERR_SET_CODE;
     if(flags) {
         log_warn("BCryptDeriveKey | Tried to use flags: 0x%x!", flags);

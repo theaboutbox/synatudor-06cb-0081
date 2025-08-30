@@ -48,6 +48,7 @@ typedef struct {
 } OSVERSIONINFOEXA;
 
 __winfnc NTSTATUS RtlGetVersion(OSVERSIONINFOW *ver) {
+    TRACE();
     ver->dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
     ver->dwMajorVersion = 10;
     ver->dwMinorVersion = 0;
@@ -58,11 +59,13 @@ __winfnc NTSTATUS RtlGetVersion(OSVERSIONINFOW *ver) {
 WINAPI(RtlGetVersion)
 
 __winfnc ULONGLONG VerSetConditionMask(ULONGLONG cond_mask, DWORD type_mask, BYTE condition) {
+    TRACE();
     return cond_mask;
 }
 WINAPI(VerSetConditionMask)
 
 __winfnc void GetSystemInfo(SYSTEM_INFO *info) {
+    TRACE();
     info->wProcessorArchitecture = 9; //PROCESSOR_ARCHITECTURE_AMD64
     info->dwPageSize = 4096;
     info->lpMinimumApplicationAddress = (void*) 0;
@@ -77,12 +80,14 @@ __winfnc void GetSystemInfo(SYSTEM_INFO *info) {
 WINAPI(GetSystemInfo)
 
 __winfnc BOOL VerifyVersionInfoW(ULONGLONG condition_mask, DWORD type_mask, ULONGLONG cond_mask) {
+    TRACE();
     //TODO
     return TRUE;
 }
 WINAPI(VerifyVersionInfoW)
 
 __winfnc BOOL ConvertStringSecurityDescriptorToSecurityDescriptorW(const char16_t *str, DWORD rev, void *descrpt, ULONG *descrpt_size) {
+    TRACE();
     //TODO
     if(descrpt_size) *descrpt_size = 0;
     return TRUE;

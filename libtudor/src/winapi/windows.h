@@ -15,7 +15,7 @@ typedef unsigned short USHORT;
 typedef int INT;
 typedef unsigned int UINT;
 typedef int LONG;
-typedef unsigned int ULONG;
+typedef uint32_t ULONG;
 typedef ULONG* PULONG;
 typedef long long LONGLONG;
 typedef unsigned long long ULONGLONG;
@@ -24,8 +24,8 @@ typedef uintptr_t ULONG_PTR;
 typedef void* PVOID;
 
 typedef uintptr_t SIZE_T;
-typedef unsigned char BYTE;
-typedef unsigned short WORD;
+typedef uint8_t BYTE;
+typedef uint16_t WORD;
 typedef unsigned int DWORD;
 typedef uint64_t DWORD64;
 
@@ -44,6 +44,7 @@ typedef struct {
     uint16_t PartB, PartC;
     uint64_t PartD:16, PartE:48;
 } __packed GUID;
+
 #define DEFINE_GUID(a, b, c, d, e) ((GUID) {\
     .PartA = 0x##a,\
     .PartB = 0x##b, .PartC = 0x##c,\

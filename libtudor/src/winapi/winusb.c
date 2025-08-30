@@ -35,6 +35,7 @@ WINUSB_PIPE_INFORMATION pipe_types[] = {
 };
 
 struct driver_info {
+    char padding[0x18];
     libusb_context *ctx;
     struct {
         long vend_id;
@@ -82,6 +83,7 @@ bool claim_device(struct driver_info *info)
                 err(libusb_set_configuration(info->dev, 1));
                 err(libusb_claim_interface(info->dev, 0));
 
+                printf("libusb initialized, device = %p\n", info->dev);
                 return TRUE;
             }
         }
@@ -101,8 +103,12 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
     struct driver_info *info = malloc(sizeof(struct driver_info));
 
     memset(info, 0, sizeof(*info));
-
     *InterfaceHandle = info;
+
+    printf("DeviceHandle: %p\n", DeviceHandle);
+    printf("ppInterfaceHandle: %p\n", InterfaceHandle);
+    printf("pInterfaceHandle: %p\n", info);
+
 
     if(DeviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
@@ -124,7 +130,10 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
     info->playback = 0;
 
     info->dev = NULL;
-    libusb_init(&info->ctx);
+    int rc = libusb_init(&info->ctx);
+    if (rc != 0) {
+        abort();
+    }
 
     return claim_device(info);
 }
@@ -149,25 +158,26 @@ __winfnc BOOL WinUsb_GetDescriptor(
             ULONG BufferLength,
             PULONG LengthTransferred)
 {
+    TRACE();
+
     struct driver_info *info = InterfaceHandle;
     int rc, i;
     uint16_t dti = (uint16_t)((DescriptorType << 8) | Index);
 
-    TRACE();
 
         rc = libusb_control_transfer(info->dev, LIBUSB_ENDPOINT_IN,
                     LIBUSB_REQUEST_GET_DESCRIPTOR, dti,
                     LanguageID, Buffer, (uint16_t) BufferLength, 1000);
 
 
-        if(rc >= 0) {
-            fprintf(info->script, "blackbox: usb %d dsc ", dti);
-            for(i=0;i<rc;i++) {
-                fprintf(info->script, "%02x", Buffer[i]);
-            }
-            fprintf(info->script, "\r\n");
-            fflush(info->script);
-        }
+        // if(rc >= 0) {
+        //     fprintf(info->script, "blackbox: usb %d dsc ", dti);
+        //     for(i=0;i<rc;i++) {
+        //         fprintf(info->script, "%02x", Buffer[i]);
+        //     }
+        //     fprintf(info->script, "\r\n");
+        //     fflush(info->script);
+        // }
 
     printf("rc = %d\n", rc);
     *LengthTransferred = rc;
@@ -189,8 +199,7 @@ __winfnc BOOL WinUsb_QueryInterfaceSettings(
 }
 WINAPI(WinUsb_QueryInterfaceSettings)
 
-__winfnc BOOL 
-WinUsb_ControlTransfer(
+__winfnc BOOL WinUsb_ControlTransfer(
             HANDLE InterfaceHandle, 
             WINUSB_SETUP_PACKET SetupPacket,
             PUCHAR Buffer,
@@ -220,11 +229,9 @@ WinUsb_ControlTransfer(
     }
     printf("\r\n");
 #endif
-    if(!info->playback) {
-        rc = libusb_control_transfer(info->dev,
-            SetupPacket.RequestType, SetupPacket.Request, SetupPacket.Value, SetupPacket.Index,
-            Buffer, SetupPacket.Length, 10000);
-    }
+    rc = libusb_control_transfer(info->dev,
+        SetupPacket.RequestType, SetupPacket.Request, SetupPacket.Value, SetupPacket.Index,
+        Buffer, SetupPacket.Length, 10000);
     
     if(rc < 0) 
         return FALSE;
@@ -234,8 +241,12 @@ WinUsb_ControlTransfer(
         printf("%02x ", Buffer[i]);
     printf("\r\n");
 #endif
+    printf("ControlTransfer rc = %d\n", rc);
 
-    *LengthTransferred = rc;
+    ULONG res = (ULONG) rc;
+    *LengthTransferred = res;
+    winerr_clear();
+    usleep(500000);
     return TRUE;
 }
 WINAPI(WinUsb_ControlTransfer)
@@ -249,6 +260,7 @@ WinUsb_ReadPipe(
             PULONG LengthTransferred, 
             LPOVERLAPPED Overlapped)
 {
+    TRACE();
     struct driver_info *dev = InterfaceHandle;
     WINUSB_PIPE_INFORMATION *wpi = NULL;
     int i, rc;

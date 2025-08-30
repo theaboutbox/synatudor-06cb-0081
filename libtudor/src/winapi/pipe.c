@@ -210,6 +210,14 @@ __winfnc HANDLE CreateFileA(
     const char* path, DWORD access, DWORD share_mode, void* sec, DWORD creat, DWORD flags, void* handle)
 {
     TRACE();
-    return NULL;
+    printf("Path: %s\n", path);
+    printf("Share mode: %d\n", share_mode);
+    printf("sec: %p\n", sec);
+    printf("creat: %d\n", creat);
+    printf("flags: %d\n", flags);
+    printf("handle: %p\n", handle);
+    static const char* dummy = "ABC";
+    HANDLE h = winhandle_create(dummy, NULL);
+    return h;
 }
 WINAPI(CreateFileA)

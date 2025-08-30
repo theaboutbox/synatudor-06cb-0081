@@ -64,6 +64,7 @@ typedef struct _BLOB {
   BYTE  *pBlobData;
 } BLOB, *LPBLOB;
 
+
 typedef struct tagDEC {
   USHORT wReserved;
   union {
@@ -146,12 +147,13 @@ typedef enum _VARENUM {
   VT_TYPEMASK = 0xfff
 } VARENUM;
 
-typedef struct _PROPVARIANT PROPVARIANT;
-typedef struct _PROPVARIANT {
-    USHORT vt;
-    BYTE wReserved1;
-    BYTE wReserved2;
-    ULONG wReserved3;
+// typedef struct _PROPVARIANT PROPVARIANT;
+
+struct PROPVARIANT {
+    uint16_t vt;
+    uint16_t wReserved1;
+    uint16_t wReserved2;
+    uint16_t wReserved3;
     union {
         CHAR cVal;
         UCHAR bVal;
@@ -172,8 +174,8 @@ typedef struct _PROPVARIANT {
         PROPVARIANT *pvarVal;
         BLOB              blob;
     };
-    DECIMAL decVal;
-} PROPVARIANT;
+    DECIMAL decVal __align(8);
+};
 
 
 typedef enum _WDF_TRI_STATE {
@@ -345,26 +347,6 @@ typedef struct _WUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS {
   WDF_TRI_STATE                         ExcludeD3Cold;
 } WUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS, *PWUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS;
 
-
-// typedef enum _WDF_REQUEST_TYPE
-// {
-//     WdfRequestUndefined        = 0,
-//     WdfRequestCreate           = 1,
-//     WdfRequestCleanup          = 2,
-//     WdfRequestRead             = 3,
-//     WdfRequestWrite            = 4,
-//     WdfRequestDeviceIoControl  = 5,
-//     WdfRequestClose            = 6,
-//     WdfRequestUsb              = 7,
-//     WdfRequestOther            = 8,
-//     WdfRequestInternalIoctl    = 9,
-//     WdfRequestTypeNoFormat     = 10,
-//     WdfRequestFlushBuffers     = 11,
-//     WdfRequestQueryInformation = 12,
-//     WdfRequestSetInformation   = 13,
-//     WdfRequestMaximum
-//
-// } WDF_REQUEST_TYPE, *PWDF_REQUEST_TYPE;
 
 typedef enum _WDF_REQUEST_STOP_ACTION_FLAGS {
     WdfRequestStopActionInvalid          = 0x00000000,

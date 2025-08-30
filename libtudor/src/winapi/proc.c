@@ -80,7 +80,9 @@ __constr void win_init_tib() {
     syscall(SYS_arch_prctl, ARCH_SET_GS, &thread_tib);
 }
 
-DWORD win_get_thread_id() { return (DWORD) syscall(__NR_gettid); }
+DWORD win_get_thread_id() { 
+    return (DWORD) syscall(__NR_gettid); 
+}
 
 __winfnc HANDLE GetCurrentProcess() {
     TRACE();
@@ -96,7 +98,10 @@ WINAPI(GetCurrentProcessId)
 
 __winfnc DWORD GetCurrentThreadId() {
     TRACE();
-    return win_get_thread_id();
+    DWORD thread_id = win_get_thread_id();
+
+    printf("Thread id: %d\n", thread_id);
+    return thread_id;
 }
 WINAPI(GetCurrentThreadId)
 

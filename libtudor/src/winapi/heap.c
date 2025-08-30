@@ -51,12 +51,14 @@ __winfnc BOOL HeapFree(HANDLE heap, DWORD flags, void *mem) {
 WINAPI(HeapFree)
 
 __winfnc void *LocalFree(void *mem) {
+    TRACE();
     free(mem);
     return NULL;
 }
 WINAPI(LocalFree)
 
 __winfnc SIZE_T HeapSize(HANDLE heap, DWORD flags, void *mem) {
+    TRACE();
     return malloc_usable_size(mem);
 }
 WINAPI(HeapSize)

@@ -35,6 +35,7 @@ static void thread_destr(struct win_thread *thread) {
 }
 
 static DWORD thread_wait(struct win_thread *thread, DWORD timeout) {
+    TRACE();
     if(thread->has_detached) return 0;
 
     if(timeout == INFINITE) {
@@ -80,6 +81,7 @@ static void *thread_entry(void *arg) {
 }
 
 __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_START_ROUTINE *start_proc, void *param, DWORD flags, DWORD *id) {
+    TRACE();
     //Allocate thread
     struct win_thread *thread = (struct win_thread*) malloc(sizeof(struct win_thread));
     if(!thread) { winerr_set_errno(); return NULL; }
@@ -111,12 +113,14 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
 WINAPI(CreateThread)
 
 __winfnc DWORD GetThreadId(HANDLE handle) {
+    TRACE();
     struct win_thread *thread = (struct win_thread*) handle->data;
     return thread->thread_id;
 }
 WINAPI(GetThreadId)
 
 __winfnc DWORD ResumeThread(HANDLE handle) {
+    TRACE();
     struct win_thread *thread = (struct win_thread*) handle->data;
 
     //Decrement the suspend counter
@@ -131,6 +135,7 @@ __winfnc DWORD ResumeThread(HANDLE handle) {
 WINAPI(ResumeThread)
 
 __winfnc void ExitThread(DWORD exit_code) {
+    TRACE();
     pthread_exit((void*) (uintptr_t) exit_code);
 }
 WINAPI(ExitThread)

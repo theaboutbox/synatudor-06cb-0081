@@ -73,6 +73,7 @@ __winfnc BOOL CryptImportKey(struct crypt_provider *prov, const BLOBHEADER *data
 WINAPI(CryptImportKey)
 
 __winfnc BOOL CryptDestroyKey(struct crypt_key *key) {
+    TRACE();
     if(key->prov->destroy_key) key->prov->destroy_key(key->prov, key->key_data);
     free(key->plain_data);
     free(key);
@@ -82,6 +83,7 @@ WINAPI(CryptDestroyKey)
 
 __winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct crypt_key *key, DWORD flags, struct crypt_hash **out) {
     TRACE();
+    printf("Alg id: %x\n", alg_id);
     //Get the algorithm
     struct crypt_hash_algorithm *algo;
     switch(alg_id) {
@@ -139,6 +141,7 @@ __winfnc BOOL CryptDuplicateHash(struct crypt_hash *hash, DWORD *reserved, DWORD
 WINAPI(CryptDuplicateHash)
 
 __winfnc BOOL CryptGetHashParam(struct crypt_hash *hash, DWORD param, BYTE *data, DWORD *data_len, DWORD flags) {
+    TRACE();
     size_t buf_size = *data_len;
     BOOL suc = hash->algo->get_hash_param(hash->algo, hash->hash_data, param, data, &buf_size);
     *data_len = (size_t) buf_size;
@@ -147,14 +150,32 @@ __winfnc BOOL CryptGetHashParam(struct crypt_hash *hash, DWORD param, BYTE *data
 WINAPI(CryptGetHashParam)
 
 __winfnc BOOL CryptSetHashParam(struct crypt_hash *hash, DWORD param, const BYTE *data, DWORD flags) {
+    TRACE();
     return hash->algo->set_hash_param(hash->algo, hash->hash_data, param, data);
 }
 WINAPI(CryptSetHashParam)
 
 __winfnc BOOL CryptHashData(struct crypt_hash *hash, const BYTE *data, DWORD data_len, DWORD flags) {
+    TRACE();
     return hash->algo->update_hash(hash->algo, hash->hash_data, data, data_len);
 }
 WINAPI(CryptHashData)
+
+__winfnc BOOL CryptSetKeyParam(struct crypt_key *key, DWORD param, const BYTE *data, DWORD flags) {
+    // return hash->algo->set_hash_param(hash->algo, hash->hash_data, param, data);
+    TRACE();
+    struct crypt_provider* prov = NULL;
+
+
+    if (!key || !data || !key->prov)
+    {
+        return FALSE;
+    }
+
+    prov = key->prov;
+    return prov->set_key(prov, &key, param, data, flags);
+}
+WINAPI(CryptSetKeyParam)
 
 __winfnc BOOL CryptEncodeObject(DWORD cert_enc_type, const char *struct_type, void *struct_info, BYTE *enc, DWORD *enc_size) {
     //Handle integer constants
@@ -201,6 +222,63 @@ __winfnc BOOL CryptEncodeObject(DWORD cert_enc_type, const char *struct_type, vo
     return FALSE;
 }
 WINAPI(CryptEncodeObject)
+
+__winfnc BOOL CryptEncrypt(
+  struct crypt_key*  hKey,
+  struct crypt_hash* hHash,
+  BOOL       Final,
+  DWORD      dwFlags,
+  BYTE       *pbData,
+  DWORD      *pdwDataLen,
+  DWORD      dwBufLen) 
+{
+    TRACE();
+    printf("%d %d %p %p %d\n", (int) Final, dwFlags, pbData, pdwDataLen, dwBufLen);
+    if (pbData == NULL) {
+        if (pdwDataLen == NULL) {
+            return false;
+
+        }
+        printf("Data len requested: %d\n", *pdwDataLen);
+
+        return true;
+    }
+
+    if (pdwDataLen != NULL) {
+        printf("Data len: %d\n", *pdwDataLen);
+
+    }
+    return true;
+}
+WINAPI(CryptEncrypt)
+
+__winfnc BOOL CryptDecrypt(
+  struct crypt_key*  hKey,
+  struct crypt_hash* hHash,
+  BOOL       Final,
+  DWORD      dwFlags,
+  BYTE       *pbData,
+  DWORD      *pdwDataLen) 
+{
+    TRACE();
+    printf("%d %d %p %p\n", (int) Final, dwFlags, pbData, pdwDataLen);
+    if (pbData == NULL) {
+        if (pdwDataLen == NULL) {
+            return false;
+
+        }
+        printf("Data len requested: %d\n", *pdwDataLen);
+
+        return true;
+    }
+
+    if (pdwDataLen != NULL) {
+        printf("Data len: %d\n", *pdwDataLen);
+
+    }
+    return true;
+}
+WINAPI(CryptDecrypt)
 
 __winfnc BOOL CryptDecodeObject(DWORD cert_enc_type, const char *struct_type, const BYTE *enc, DWORD enc_size, DWORD flags, void *struct_info, DWORD *struct_info_size) {
     //Handle integer constants

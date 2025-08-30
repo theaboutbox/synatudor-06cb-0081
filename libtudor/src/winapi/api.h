@@ -3,6 +3,9 @@
 
 #include "attr.h"
 #include <tudor/log.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
 #include "windows.h"
 
 #define WIN_CLOBBER_NONVOL_REGS __asm__("" ::: "%rbx","%rsi","%rdi");
@@ -18,7 +21,13 @@ struct __winapi_descr {
     struct __winapi_descr *next;
 };
 
-#define TRACE() printf("Trace -->: [%s:%d] %s\n", __FILE__, __LINE__, __func__); fflush(stdout);
+#define TRACE() do { \
+    printf("Trace -->: [TID %ld] [%s:%d] %s\n", \
+           (long)syscall(SYS_gettid), __FILE__, __LINE__, __func__); \
+    fflush(stdout); \
+} while (0)
+// #define TRACE() printf("Trace -->: [%s:%d] %s\n", __FILE__, __LINE__, __func__); fflush(stdout);
+
 
 #define WINAPI(api_name) \
 static struct __winapi_descr __winapi_##api_name##_descr = (struct __winapi_descr) {\
