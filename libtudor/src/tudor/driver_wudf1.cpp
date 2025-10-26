@@ -1661,7 +1661,7 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
         MyMem in(in_buf, in_size), out(out_buf, out_size);
         MyRequest req(WdfRequestTypeOther, 0x442004, &out, &in);
 
-        printf("about to ioctd: 0x%x\r\n", code);
+        printf("about to ioctl: 0x%x\r\n", code);
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, code, 0, 0);
         while(!req.complete)
             usleep(20000);
@@ -1796,6 +1796,7 @@ bool tudor_init() {
     print_vtable(myDevice->pnphwcb, 5); 
 
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
+    usleep(5000000);
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     //
@@ -1804,10 +1805,10 @@ bool tudor_init() {
     }
     //
     usleep(1000000);
-    // printf("about to enter D0 state\r\n");
-    // rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    // printf("OnD0Entry rc = %lx\r\n", rc);
-    // usleep(20000);
+    printf("about to enter D0 state\r\n");
+    rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
+    printf("OnD0Entry rc = %lx\r\n", rc);
+    usleep(20000);
 
 
     //Query WINBIO interfaces

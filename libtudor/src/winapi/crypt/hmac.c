@@ -98,7 +98,16 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             return TRUE;
         }
         case HP_HASHVAL: {
+            printf("HMAC: HASHVAL\n");
             if(!hmac_flush(hash)) return FALSE;
+            if (!data) {
+                if (!data_size) {
+                    winerr_set_code(ERROR_INSUFFICIENT_BUFFER);
+                    return FALSE;
+                }
+                *((DWORD*) data_size) = (DWORD) hash->hash_size;
+                return true;
+            }
 
             if(data && *data_size >= hash->hash_size) {
                 if(hash->outer_size > 0) LIBCRYPTO_ERR(EVP_DigestSignUpdate(hash->hmac_ctx, hash->outer_data, hash->outer_size));
@@ -107,9 +116,17 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
                 hash->is_completed = TRUE;
             } else if(data) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
             *data_size = hash->hash_size;
+
+            printf("Data size: %d\n", (int) *data_size);
+            printf("Hash out: ");
+            for (DWORD i = 0; i < *data_size; i++) {
+                printf("%02X", ((unsigned char*)data)[i]);  // two-digit uppercase hex
+            }
+            printf("\n");
             return TRUE;
         }
         case HP_HASHSIZE: {
+            printf("HMAC: HASHSIZE\n");
             if(!hash->has_algo) { winerr_set_errno(); return FALSE; }
             if(data && *data_size >= sizeof(ULONG)) {
                 *((ULONG*) data) = (ULONG) hash->hash_size;
@@ -118,6 +135,7 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             return TRUE;
         }
         case HP_HMAC_INFO: {
+            printf("HMAC: INFO\n");
             if(data && *data_size >= sizeof(HMAC_INFO)) {
                 HMAC_INFO *info = (HMAC_INFO*) data;
                 info->pbInnerString = (BYTE*) hash->inner_data;
@@ -132,6 +150,7 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
     }
 }
 
+
 static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_hash *hash, DWORD param, void *data) {
     switch(param) {
         case HP_HASHVAL: {
@@ -142,6 +161,12 @@ static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
         case HP_HMAC_INFO: {
             if(hash->is_completed) { winerr_set_errno(); return FALSE; }
             HMAC_INFO *info = (HMAC_INFO*) data;
+            printf("info: %p\n", info);
+            printf("info->innerStringSize: %d\n", info->cbInnerString);
+            printf("info->outerStringSize: %d\n", info->cbOuterString);
+            printf("info->innerString: %s\n", info->pbInnerString);
+            printf("info->outerString: %p\n", info->pbOuterString);
+            printf("info->hasAlgId: %x\n", info->HashAlgid);
 
             //Set algorithm
             switch(info->HashAlgid) {
@@ -157,15 +182,21 @@ static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             hash->hash_algo = info->HashAlgid;
 
             //Copy inner and outer strings
-            hash->inner_data = malloc(info->cbInnerString);
-            hash->inner_size = info->cbInnerString;
+            hash->inner_size = info->cbInnerString ? info->cbInnerString : 64;
+            hash->inner_data = malloc(hash->inner_size);
             if(!hash->inner_data) { winerr_set_errno(); return FALSE; }
-            memcpy(hash->inner_data, info->pbInnerString, hash->inner_size);
+            if (info->cbInnerString)
+                memcpy(hash->inner_data, info->pbInnerString, hash->inner_size);
+            else
+                memset(hash->inner_data, 0x36, hash->inner_size);
 
-            hash->outer_data = malloc(info->cbOuterString);
-            hash->outer_size = info->cbOuterString;
+            hash->outer_size = info->cbOuterString ? info->cbOuterString : 64;
+            hash->outer_data = malloc(hash->outer_size);
             if(!hash->outer_data) { winerr_set_errno(); return FALSE; }
-            memcpy(hash->outer_data, info->pbOuterString, hash->outer_size);
+            if (info->cbOuterString)
+                memcpy(hash->outer_data, info->pbOuterString, hash->outer_size);
+            else
+                memset(hash->outer_data, 0x5C, hash->outer_size);
 
             hash->has_algo = true;
             hash->is_dirty = true;

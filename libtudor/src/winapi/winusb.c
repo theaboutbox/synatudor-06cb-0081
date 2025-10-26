@@ -35,7 +35,7 @@ WINUSB_PIPE_INFORMATION pipe_types[] = {
 };
 
 struct driver_info {
-    char padding[0x18];
+    // char padding[0x18];
     libusb_context *ctx;
     struct {
         long vend_id;
@@ -276,70 +276,70 @@ WinUsb_ReadPipe(
         printf("unknown pipe!\n");
         return FALSE;
     }
-    if(!dev->playback) {
-        switch(wpi->PipeType) {
-            case UsbdPipeTypeBulk:
-                printf("bulk xfer\n");
-                rc = libusb_bulk_transfer(
+
+    switch(wpi->PipeType) {
+        case UsbdPipeTypeBulk:
+            printf("bulk xfer\n");
+            rc = libusb_bulk_transfer(
+                    dev->dev, 
+                    PipeID, 
+                    Buffer, 
+                    BufferLength, 
+                    (int*)LengthTransferred, 
+                    dev->timeouts[PipeID]+1000);
+            //sleep(3);
+            printf("LengthTransferred: %d\n", *LengthTransferred);
+            break;
+
+        case UsbdPipeTypeInterrupt:
+            printf("interrupt xfer?\n");
+            dev->abort[PipeID] = 1;
+            for(i=0;;) {
+                rc = libusb_interrupt_transfer(
                         dev->dev, 
                         PipeID, 
                         Buffer, 
                         BufferLength, 
                         (int*)LengthTransferred, 
-                        dev->timeouts[PipeID]+1000);
-                //sleep(3);
-                break;
+                        200);
+                
+                printf("libusb_interrupt_transfer=%d!\n", rc);
 
-            case UsbdPipeTypeInterrupt:
-                printf("interrupt xfer?\n");
-                dev->abort[PipeID] = 1;
-                for(i=0;;) {
-                    rc = libusb_interrupt_transfer(
-                            dev->dev, 
-                            PipeID, 
-                            Buffer, 
-                            BufferLength, 
-                            (int*)LengthTransferred, 
-                            200);
-                    
-                    printf("libusb_interrupt_transfer=%d!\n", rc);
-
-                    if(rc == LIBUSB_ERROR_TIMEOUT) {
-                        if(dev->abort[PipeID] == 2) {
-                            printf("W: Pipe was aborted!\n");
-                            rc = 0;
-                            break;
-                        }
-
-                        if(dev->timeouts[PipeID]) {
-                            if(i > dev->timeouts[PipeID])
-                                break;
-                            else
-                                i += 200;
-                        }
-                        continue;
+                if(rc == LIBUSB_ERROR_TIMEOUT) {
+                    if(dev->abort[PipeID] == 2) {
+                        printf("W: Pipe was aborted!\n");
+                        rc = 0;
+                        break;
                     }
 
-                    break;
+                    if(dev->timeouts[PipeID]) {
+                        if(i > dev->timeouts[PipeID])
+                            break;
+                        else
+                            i += 200;
+                    }
+                    continue;
                 }
-                dev->abort[PipeID] = 0;
+
                 break;
-
-            default:
-                printf("E: unknown pipe type!\n");
-                return FALSE;
-        }
-
-        if(rc < 0)  {
-            printf("E: xfer Failed - %s\n", libusb_error_name(rc));
-
-            if(rc == LIBUSB_ERROR_TIMEOUT) {
-                // SetLastError(ERROR_SEM_TIMEOUT);
-                return FALSE;
             }
+            dev->abort[PipeID] = 0;
+            break;
 
-            exit(0); // Don't know what to do, panic quit
+        default:
+            printf("E: unknown pipe type!\n");
+            return FALSE;
+    }
+
+    if(rc < 0)  {
+        printf("E: xfer Failed - %s\n", libusb_error_name(rc));
+
+        if(rc == LIBUSB_ERROR_TIMEOUT) {
+            // SetLastError(ERROR_SEM_TIMEOUT);
+            return FALSE;
         }
+
+        exit(0); // Don't know what to do, panic quit
     }
 
     return TRUE;

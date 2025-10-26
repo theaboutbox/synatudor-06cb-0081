@@ -141,6 +141,7 @@ WINAPI(BCryptSetProperty)
 __winfnc NTSTATUS BCryptOpenAlgorithmProvider(struct bcrypt_algo_wrap **out, const char16_t *alg_id, const char16_t *impl, ULONG flags) {
     TRACE();
     char *alg_cid = winstr_to_str(alg_id);
+    printf("Provider: %s\n", alg_cid);
 
     //Try to find the algorithm
     struct bcrypt_algorithm *algo = NULL;
@@ -173,6 +174,13 @@ __winfnc NTSTATUS BCryptOpenAlgorithmProvider(struct bcrypt_algo_wrap **out, con
     add_obj_prop(&wrap->obj, "AuthTagLength", &tls, sizeof(tls));
 
     *out = wrap;
+    if (impl) {
+        char* impl_c = winstr_to_str(impl);
+        printf("Alg: %s\n", impl_c);
+        printf("Out ptr: %p\n", (void*)*out);
+        free(impl_c);
+    }
+    printf("Ret: 1\n");
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptOpenAlgorithmProvider)
@@ -210,6 +218,8 @@ __winfnc NTSTATUS BCryptGenerateKeyPair(struct bcrypt_algo_wrap *algo, struct bc
     TRACE();
     if(!algo->algo->generate_key_pair) return WINERR_SET_CODE;
 
+    printf("algo = %p key_len = %d flags = %u\n", algo, key_len, flags);
+
     //Create and generate key
     NTSTATUS status;
 
@@ -224,13 +234,21 @@ __winfnc NTSTATUS BCryptGenerateKeyPair(struct bcrypt_algo_wrap *algo, struct bc
     }
 
     *out = key;
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptGenerateKeyPair)
 
 __winfnc NTSTATUS BCryptFinalizeKeyPair(struct bcrypt_key *key, ULONG flags) {
     TRACE();
-    if(key->algo->finalize_key) return key->algo->finalize_key(key->algo, key->key_data);
+    if(key->algo->finalize_key) {
+        NTSTATUS status = key->algo->finalize_key(key->algo, key->key_data);
+        printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
+    } else {
+        printf("Finalize key is NULL!\n");
+        // fflush(stdout);
+        // abort();
+    }
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptFinalizeKeyPair)
@@ -272,6 +290,10 @@ __winfnc NTSTATUS BCryptImportKeyPair(struct bcrypt_algo_wrap *algo, struct bcry
         return WINERR_SET_CODE;
     }
 
+    char* blob_type_c = winstr_to_str(blob_type);
+    printf("Blob type: %s\n", blob_type_c);
+    free(blob_type_c);
+
     //Allocate key
     NTSTATUS status;
 
@@ -288,6 +310,7 @@ __winfnc NTSTATUS BCryptImportKeyPair(struct bcrypt_algo_wrap *algo, struct bcry
     }
 
     *out = key;
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
 WINAPI(BCryptImportKeyPair)
@@ -301,10 +324,12 @@ __winfnc NTSTATUS BCryptExportKey(struct bcrypt_key *key, struct bcrypt_key *exp
     }
 
     char *export_type = winstr_to_str(blob_type);
+    printf("Export key %p, type = %s, out = %p, out_size = %d\n", key, export_type, out, (int)out_size);
     size_t buf_size = out_size;
     NTSTATUS status = key->algo->export_key(key->algo, key->key_data, export_type, out, &buf_size);
     if(status == STATUS_SUCCESS) *res_size = (ULONG) buf_size;
     free(export_type);
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return status;
 }
 WINAPI(BCryptExportKey)
@@ -342,6 +367,7 @@ __winfnc NTSTATUS BCryptDecrypt(struct bcrypt_key *key, UCHAR *in, ULONG in_size
     size_t sz = out_size;
     NTSTATUS status = key->algo->decrypt(key->algo, key->key_data, &key->algo_wrap->obj, pad_info, iv, iv_size, in, in_size, out, &sz);
     if(status == STATUS_SUCCESS) *res_size = (ULONG) sz;
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return status;
 }
 WINAPI(BCryptDecrypt)
@@ -357,6 +383,7 @@ __winfnc NTSTATUS BCryptSignHash(struct bcrypt_key *key, void *pad_info, UCHAR *
     size_t sz = buf_size;
     NTSTATUS status = key->algo->sign_hash(key->algo, key->key_data, hash, hash_size, sig, &sz);
     if(status == STATUS_SUCCESS) *sig_size = (ULONG) sz;
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return status;
 }
 WINAPI(BCryptSignHash)
@@ -393,6 +420,7 @@ __winfnc NTSTATUS BCryptSecretAgreement(struct bcrypt_key *priv_key, struct bcry
         free(secret);
     } else *out = secret;
 
+    printf("Ret: %d\n", (int) status == STATUS_SUCCESS);
     return status;
 }
 WINAPI(BCryptSecretAgreement)

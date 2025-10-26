@@ -2,6 +2,27 @@
 #include <openssl/rand.h>
 #include "crypt.h"
 
+struct protect_data_t
+{
+    DWORD       count0;
+    DATA_BLOB   info0;        /* using this to hold crypt_magic_str */
+    DWORD       count1;
+    DATA_BLOB   info1;
+    DWORD       null0;
+    WCHAR *     szDataDescr;  /* serialized differently than the DATA_BLOBs */
+    ALG_ID      cipher_alg;
+    DWORD       cipher_key_len;
+    DATA_BLOB   data0;
+    DWORD       null1;
+    ALG_ID      hash_alg;
+    DWORD       hash_len;
+    DATA_BLOB   salt;
+    DATA_BLOB   cipher;
+    DATA_BLOB   fingerprint;
+};
+
+
+
 __winfnc BOOL CryptAcquireContextA(struct crypt_provider **prov, const char *cont_name, const char *prov_name, DWORD prov_type, DWORD flags) {
     TRACE();
     printf("Prov type: %d\n", prov_type);
@@ -87,10 +108,10 @@ __winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct
     //Get the algorithm
     struct crypt_hash_algorithm *algo;
     switch(alg_id) {
-        case CALG_SHA1: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha1; break;
-        case CALG_SHA_256: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha256; break;
-        case CALG_SHA_384: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha384; break;
-        case CALG_SHA_512: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha512; break;
+        case CALG_SHA1: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha1; printf("SHA1\n"); break;
+        case CALG_SHA_256: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha256;printf("SHA256\n"); break;
+        case CALG_SHA_384: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha384; printf("SHA384\n");break;
+        case CALG_SHA_512: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha512; printf("SHA512\n"); break;
         case CALG_HMAC: algo = &crypt_hash_algo_hmac; break;
         default: {
             log_warn("CryptCreateHash | Couldn't find algorithm id 0x%x flags 0x%x", alg_id, flags);
@@ -110,6 +131,7 @@ __winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct
     }
 
     *out = hash;
+    printf("Created hash: %p\n", hash);
     return TRUE;
 }
 WINAPI(CryptCreateHash)
@@ -143,8 +165,10 @@ WINAPI(CryptDuplicateHash)
 __winfnc BOOL CryptGetHashParam(struct crypt_hash *hash, DWORD param, BYTE *data, DWORD *data_len, DWORD flags) {
     TRACE();
     size_t buf_size = *data_len;
+    printf("Hash: %p Param: %d\n", hash, param);
     BOOL suc = hash->algo->get_hash_param(hash->algo, hash->hash_data, param, data, &buf_size);
     *data_len = (size_t) buf_size;
+    printf("Ret: %d\n", (int) suc);
     return suc;
 }
 WINAPI(CryptGetHashParam)
@@ -157,7 +181,16 @@ WINAPI(CryptSetHashParam)
 
 __winfnc BOOL CryptHashData(struct crypt_hash *hash, const BYTE *data, DWORD data_len, DWORD flags) {
     TRACE();
-    return hash->algo->update_hash(hash->algo, hash->hash_data, data, data_len);
+    printf("Data (%lu bytes): ", (unsigned long)data_len);
+    printf("Hash input: ");
+    for (DWORD i = 0; i < data_len; i++) {
+        printf("%02X", data[i]);  // two-digit uppercase hex
+    }
+    printf("\n");
+    fflush(stdout);
+    bool ret = hash->algo->update_hash(hash->algo, hash->hash_data, data, data_len);
+    printf("Ret: %d\n", (int) ret);
+    return ret;
 }
 WINAPI(CryptHashData)
 
@@ -321,34 +354,82 @@ __winfnc BOOL CryptDecodeObject(DWORD cert_enc_type, const char *struct_type, co
 WINAPI(CryptDecodeObject)
 
 __winfnc BOOL CryptProtectData(DATA_BLOB *in, const char16_t *descr, DATA_BLOB *entropy, void *reserved, void *prompt_struct, DWORD flags, DATA_BLOB *out) {
-    out->cbData = in->cbData;
-    out->pbData = (BYTE*) malloc(in->cbData);
-    if(!out->pbData) { winerr_set_errno(); return FALSE; }
-    memcpy(out->pbData, in->pbData, in->cbData);
+    TRACE();
+    if (in->cbData == 96) {
+        out->cbData = 242;
+    } else {
+        out->cbData = in->cbData * 3;
+    }
+
+
+    out->pbData = (BYTE*) malloc(out->cbData);
+
+    uint8_t* src = (uint8_t*)in->pbData;
+    uint8_t* dst = (uint8_t*)out->pbData;
+
+    printf("Protect data input:\n");
+    for (int i = 0; i < in->cbData; ++i) {
+        printf("%02x", src[i]);
+    }
+    printf("\n");
+    memset(dst, 0, out->cbData);
+    for (int i = 0; i < in->cbData; ++i) {
+        dst[out->cbData-i-1] = src[i];
+    }
+
+    // Store size as first few bytes
+    int* size_out = (int*)out->pbData;
+    *size_out = in->cbData;
+
+    printf("Ret: 1\n");
     return TRUE;
 }
 WINAPI(CryptProtectData)
 
-__winfnc BOOL CryptUnprotectData(DATA_BLOB *in, const char16_t *descr, DATA_BLOB *entropy, void *reserved, void *prompt_struct, DWORD flags, DATA_BLOB *out) {
-    out->cbData = in->cbData;
-    out->pbData = (BYTE*) malloc(in->cbData);
-    if(!out->pbData) { winerr_set_errno(); return FALSE; }
-    memcpy(out->pbData, in->pbData, in->cbData);
+
+
+__winfnc BOOL CryptUnprotectData(
+                               DATA_BLOB* in,
+                               wchar_t * ppszDataDescr,
+                               DATA_BLOB* pOptionalEntropy,
+                               PVOID pvReserved,
+                               void* pPromptStruct,
+                               DWORD dwFlags,
+                               DATA_BLOB* out)
+
+{
+    TRACE();
+    int* size_in = in->pbData;
+    int size = *size_in;
+
+    out->cbData = (DWORD) size;
+    out->pbData = (BYTE*) malloc(out->cbData);
+
+    uint8_t* src = (uint8_t*)in->pbData;
+    uint8_t* dst = (uint8_t*)out->pbData;
+    memset(dst, 0, out->cbData);
+    for (int i = 0; i < out->cbData; ++i) {
+        dst[i] = src[in->cbData - i - i];
+    }
+
     return TRUE;
 }
 WINAPI(CryptUnprotectData)
 
 __winfnc BOOL CryptProtectMemory(void *data, DWORD size, DWORD flags) {
+    TRACE();
     return TRUE;
 }
 WINAPI(CryptProtectMemory);
 
 __winfnc BOOL CryptUnprotectMemory(void *data, DWORD size, DWORD flags) {
+    TRACE();
     return TRUE;
 }
 WINAPI(CryptUnprotectMemory);
 
 __winfnc BOOL CryptGenRandom(HANDLE prov, DWORD len, BYTE *buf) {
+    TRACE();
     LIBCRYPTO_ERR(RAND_bytes(buf, (int) len));
     return TRUE;
 }

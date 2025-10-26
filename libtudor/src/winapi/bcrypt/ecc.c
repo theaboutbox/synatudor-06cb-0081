@@ -3,6 +3,7 @@
 #include <openssl/core_names.h>
 #include <openssl/param_build.h>
 #include <openssl/ec.h>
+#include <openssl/bn.h>
 #include "bcrypt.h"
 
 #define BCRYPT_ECDH_PUBLIC_P256_MAGIC 0x314b4345
@@ -84,6 +85,15 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
     BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB*) buf;
     p256_param_t *key_params = (p256_param_t*) (ecc_blob + 1);
 
+    if (buf != NULL) {
+        printf("Import key: raw data:\n");
+
+        for (int i = 0; i < buf_size; ++i) {
+            printf("%02x", ((uint8_t*)buf)[i]);
+        }
+        printf("\n");
+    }
+
     BIGNUM *pub_x, *pub_y, *priv_d;
     if(strcmp(import_type, "ECCPUBLICBLOB") == 0) {
         if(buf_size < sizeof(BCRYPT_ECCKEY_BLOB) + 2*P256_PARAM_SIZE) return STATUS_BUFFER_TOO_SMALL;
@@ -112,6 +122,8 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             EC_POINT_free(pub_point);
         }
     } else return WINERR_SET_CODE;
+
+    log_error("d=%s\n", BN_bn2hex(priv_d));
 
     //Create the public key point and encode it
     EC_POINT *pub_point;
@@ -189,6 +201,12 @@ static NTSTATUS p256_export_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             ecc_blob->cbKey = P256_PARAM_SIZE;
             memcpy(key_params[0], key->pub_x, P256_PARAM_SIZE);
             memcpy(key_params[1], key->pub_y, P256_PARAM_SIZE);
+
+            printf("Exporting PUBLIC KEY\n");
+            for (int i = 0; i < *buf_size; ++i) {
+                printf("%02x", ((uint8_t*)buf)[i]);
+            }
+            printf("\n");
         } else if(buf) return STATUS_BUFFER_TOO_SMALL;
         *buf_size = sizeof(BCRYPT_ECCKEY_BLOB) + 2*P256_PARAM_SIZE;
         return STATUS_SUCCESS;
@@ -200,10 +218,174 @@ static NTSTATUS p256_export_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             memcpy(key_params[0], key->pub_x, P256_PARAM_SIZE);
             memcpy(key_params[1], key->pub_y, P256_PARAM_SIZE);
             memcpy(key_params[2], key->priv_d, P256_PARAM_SIZE);
+
+            printf("Exporting PRIVATE KEY\n");
+            for (int i = 0; i < *buf_size; ++i) {
+                printf("%02x", ((uint8_t*)buf)[i]);
+            }
+            printf("\n");
         } else if(buf) return STATUS_BUFFER_TOO_SMALL;
         *buf_size = sizeof(BCRYPT_ECCKEY_BLOB) + 3*P256_PARAM_SIZE;
         return STATUS_SUCCESS;
     } else return WINERR_SET_CODE;
+}
+
+#define CURVE_NID NID_X9_62_prime256v1
+
+int
+derive_ec_pubkey(unsigned char *buf)
+{
+    BIGNUM *prv;
+    EC_POINT *pub;
+    EC_GROUP *curve;
+    BN_CTX *ctx = BN_CTX_new();
+    unsigned char *out;
+
+    curve = EC_GROUP_new_by_curve_name(CURVE_NID);
+
+    pub = EC_POINT_new(curve);
+    prv = BN_bin2bn(buf+32*2, 32, NULL);
+
+    log_error("d=%s\n", BN_bn2hex(prv));
+
+    if (1 != EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx))
+        puts("oops, EC_POINT_mul");
+
+    if(65 != EC_POINT_point2buf(curve, pub, POINT_CONVERSION_UNCOMPRESSED, &out, ctx))
+        puts("oops, EC_POINT_point2buf");
+
+    memmove(buf, out+1, 32*2);
+
+    CRYPTO_free(out, OPENSSL_FILE, OPENSSL_LINE);
+    BN_free(prv);
+    EC_POINT_free(pub);
+    EC_GROUP_free(curve);
+    BN_CTX_free(ctx);
+
+    return 0;
+}
+
+
+
+NTSTATUS key_import_ecc(struct p256_key *key, const unsigned char *buf, unsigned long len)
+{
+    printf("Finalize key enter\n");
+    const BCRYPT_ECCKEY_BLOB *ecc_blob = (const BCRYPT_ECCKEY_BLOB *)buf;
+    const unsigned char *x_bytes, *y_bytes, *d_bytes;
+    EC_KEY *ec_key = NULL;
+    EC_GROUP *group = NULL;
+    EC_POINT *pub_point = NULL;
+    BIGNUM *x = NULL, *y = NULL, *d = NULL;
+    int nid = NID_X9_62_prime256v1;  /* secp256r1 / P-256 */
+    NTSTATUS status = STATUS_SUCCESS;
+
+    /* Basic validation */
+    if (!key || !buf || len < sizeof(*ecc_blob) + 96)
+        return STATUS_INTERNAL_ERROR;
+
+    if (ecc_blob->cbKey != 32)
+        return STATUS_INTERNAL_ERROR;
+
+    /* Layout: [header][X][Y][D] */
+    x_bytes = (const unsigned char *)(ecc_blob + 1);
+    y_bytes = x_bytes + ecc_blob->cbKey;
+    d_bytes = y_bytes + ecc_blob->cbKey;
+
+    /* Initialize OpenSSL EC key */
+    ec_key = EC_KEY_new_by_curve_name(nid);
+    if (!ec_key)
+        return STATUS_INTERNAL_ERROR;
+
+    group = (EC_GROUP *)EC_KEY_get0_group(ec_key);
+    pub_point = EC_POINT_new(group);
+    if (!pub_point)
+    {
+        status = STATUS_INTERNAL_ERROR;
+        goto cleanup;
+    }
+
+    /* Convert to BIGNUMs */
+    x = BN_bin2bn(x_bytes, ecc_blob->cbKey, NULL);
+    y = BN_bin2bn(y_bytes, ecc_blob->cbKey, NULL);
+    d = BN_bin2bn(d_bytes, ecc_blob->cbKey, NULL);
+
+
+    log_error("d=%s\n", BN_bn2hex(d));
+    if (!x || !y || !d)
+    {
+        status = STATUS_INTERNAL_ERROR;
+        goto cleanup;
+    }
+
+    /* If the blob may have invalid public coordinates, derive them */
+    if (BN_is_zero(x) && BN_is_zero(y))
+    {
+        if (!EC_POINT_mul(group, pub_point, d, NULL, NULL, NULL))
+        {
+            status = STATUS_INTERNAL_ERROR;
+            goto cleanup;
+        }
+
+        /* Extract back to X/Y */
+        if (!EC_POINT_get_affine_coordinates_GFp(group, pub_point, x, y, NULL))
+        {
+            status = STATUS_INTERNAL_ERROR;
+            goto cleanup;
+        }
+    }
+    else
+    {
+        /* Use provided X/Y coordinates */
+        if (!EC_POINT_set_affine_coordinates_GFp(group, pub_point, x, y, NULL))
+        {
+            status = STATUS_INTERNAL_ERROR;
+            goto cleanup;
+        }
+    }
+
+    /* Set both private and public components */
+    if (!EC_KEY_set_private_key(ec_key, d) ||
+        !EC_KEY_set_public_key(ec_key, pub_point))
+    {
+        status = STATUS_INTERNAL_ERROR;
+        goto cleanup;
+    }
+
+    if (EC_KEY_check_key(ec_key) != 1)
+    {
+        fprintf(stderr, "EC key consistency check failed\n");
+        status = STATUS_INTERNAL_ERROR;
+        goto cleanup;
+    }
+
+    /* Attach to EVP_PKEY wrapper */
+    key->ec_key = EVP_PKEY_new();
+    if (!key->ec_key || EVP_PKEY_set1_EC_KEY(key->ec_key, ec_key) != 1)
+    {
+        status = STATUS_INTERNAL_ERROR;
+        goto cleanup;
+    }
+
+    /* Copy raw parameters into struct */
+    BN_bn2binpad(x, key->pub_x, 32);
+    BN_bn2binpad(y, key->pub_y, 32);
+    BN_bn2binpad(d, key->priv_d, 32);
+    key->has_public = true;
+    key->has_private = true;
+
+cleanup:
+    if (x) BN_free(x);
+    if (y) BN_free(y);
+    if (d) BN_free(d);
+    if (pub_point) EC_POINT_free(pub_point);
+    if (ec_key) EC_KEY_free(ec_key);
+
+    return status;
+}
+
+
+static NTSTATUS p256_finalize_key(struct bcrypt_ecc_algorithm *algo, struct p256_key *key) {
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 static void p256_destroy_key(struct bcrypt_ecc_algorithm *algo, struct p256_key *key) {
@@ -282,6 +464,7 @@ static NTSTATUS p256_ecdsa_verify_hash(struct bcrypt_ecc_algorithm *algo, struct
     EVP_PKEY_CTX_free(ctx);
     OPENSSL_free(buf);
 
+    printf("P256 ECDSA: VerifySignature ret = %d\n", ret);
     return ret ? STATUS_SUCCESS : STATUS_INVALID_SIGNATURE;
 }
 
@@ -321,7 +504,7 @@ struct bcrypt_ecc_algorithm
             .generate_key_pair = (bcrypt_generate_key_pair_fnc*) p256_generate_key_pair,
             .import_key = (bcrypt_import_key_fnc*) p256_import_key,
             .export_key = (bcrypt_export_key_fnc*) p256_export_key,
-            .finalize_key = NULL,
+            .finalize_key = (bcrypt_finalize_key_fnc*) p256_finalize_key,
             .destroy_key = (bcrypt_destroy_key_fnc*) p256_destroy_key,
 
             .encrypt = NULL,
@@ -344,7 +527,7 @@ struct bcrypt_ecc_algorithm
             .generate_key_pair = (bcrypt_generate_key_pair_fnc*) p256_generate_key_pair,
             .import_key = (bcrypt_import_key_fnc*) p256_import_key,
             .export_key = (bcrypt_export_key_fnc*) p256_export_key,
-            .finalize_key = NULL,
+            .finalize_key = (bcrypt_finalize_key_fnc*) p256_finalize_key,
             .destroy_key = (bcrypt_destroy_key_fnc*) p256_destroy_key,
 
             .encrypt = NULL,
