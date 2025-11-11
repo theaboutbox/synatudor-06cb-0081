@@ -1,6 +1,7 @@
 #include <openssl/ecdsa.h>
 #include <openssl/rand.h>
 #include "crypt.h"
+#include "assert.h"
 
 struct protect_data_t
 {
@@ -21,192 +22,404 @@ struct protect_data_t
     DATA_BLOB   fingerprint;
 };
 
+#define CRYPT_Alloc malloc
+#define CRYPT_Free free
+
+static PCRYPTPROV CRYPT_LoadProvider()
+{
+	PCRYPTPROV provider;
+
+	if ( !(provider = (PCRYPTPROV) malloc(sizeof(CRYPTPROV))) ) goto error;
+	if ( !(provider->pFuncs = CRYPT_Alloc(sizeof(PROVFUNCS))) ) goto error;
+	if ( !(provider->pVTable = CRYPT_Alloc(sizeof(VTableProvStruc))) ) goto error;
+	// if ( !(provider->hModule = LoadLibraryW(pImage)) )
+	provider->dwMagic = MAGIC_CRYPTPROV;
+	provider->refcount = 1;
+	provider->pVTable->Version = 3;
+	provider->pVTable->FuncVerifyImage = NULL;
+	provider->pVTable->FuncReturnhWnd = NULL;
+	provider->pVTable->dwProvType = 0;
+	provider->pVTable->pbContextInfo = NULL;
+	provider->pVTable->cbContextInfo = 0;
+	provider->pVTable->pszProvName = NULL;
+    printf("Created provider\n");
+    printf("pVtable = %p\n", provider->pVTable);
+
+	return provider;
+
+error:
+    abort();
+	return NULL;
+}
+
+__winfnc BOOL  RSAENH_CPGenRandom(HCRYPTPROV hProv, DWORD dwLen, BYTE *pbBuffer);
+
+__winfnc BOOL RSAENH_CPAcquireContext(HCRYPTPROV *phProv, LPSTR pszContainer,
+                   DWORD dwFlags, PVTableProvStruc pVTable);
 
 
-__winfnc BOOL CryptAcquireContextA(struct crypt_provider **prov, const char *cont_name, const char *prov_name, DWORD prov_type, DWORD flags) {
+__winfnc BOOL 
+RSAENH_CPEncrypt(
+    HCRYPTPROV hProv, 
+    HCRYPTKEY hKey, 
+    HCRYPTHASH hHash, 
+    BOOL Final, 
+    DWORD dwFlags, 
+    BYTE *pbData,
+    DWORD *pdwDataLen, 
+    DWORD dwBufLen
+);
+
+__winfnc BOOL RSAENH_CPDecrypt(HCRYPTPROV hProv, HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final, 
+                             DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen);
+
+__winfnc BOOL RSAENH_CPReleaseContext(HCRYPTPROV hProv, DWORD dwFlags);
+
+__winfnc BOOL RSAENH_CPImportKey(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataLen,
+                               HCRYPTKEY hPubKey, DWORD dwFlags, HCRYPTKEY *phKey);
+
+
+__winfnc BOOL RSAENH_CPCreateHash( HCRYPTPROV hProv, ALG_ID Algid, HCRYPTKEY hKey, DWORD dwFlags, HCRYPTHASH *phHash);
+
+__winfnc BOOL RSAENH_CPSetHashParam( HCRYPTPROV hProv, HCRYPTHASH hHash, DWORD dwParam, BYTE *pbData, DWORD dwFlags);
+
+__winfnc BOOL RSAENH_CPGetHashParam( HCRYPTPROV hProv, HCRYPTHASH hHash, DWORD dwParam, BYTE *pbData, DWORD *pdwDataLen, DWORD dwFlags);
+
+__winfnc BOOL RSAENH_CPDestroyHash( HCRYPTPROV hProv, HCRYPTHASH hHash);
+
+__winfnc BOOL RSAENH_CPHashData( HCRYPTPROV hProv, HCRYPTHASH hHash, const BYTE *pbData, DWORD dwDataLen, DWORD dwFlags);
+
+__winfnc BOOL  RSAENH_CPSetKeyParam(HCRYPTPROV hProv, HCRYPTKEY hKey, DWORD dwParam, BYTE *pbData, 
+                                 DWORD dwFlags);
+
+__winfnc BOOL RSAENH_CPDestroyKey(HCRYPTPROV hProv, HCRYPTKEY hKey);
+
+__winfnc BOOL RSAENH_CPDuplicateHash(HCRYPTPROV hUID, HCRYPTHASH hHash, DWORD *pdwReserved, 
+                                   DWORD dwFlags, HCRYPTHASH *phHash);
+
+__winfnc BOOL DllMainRSAENH(HINSTANCE hInstance, DWORD fdwReason, PVOID reserved);
+
+__winfnc BOOL CryptAcquireContextA (HCRYPTPROV *phProv, LPCSTR pszContainer,
+		LPCSTR pszProvider, DWORD dwProvType, DWORD dwFlags) {
     TRACE();
-    printf("Prov type: %d\n", prov_type);
-    printf("Cont name: %s\n", cont_name);
-    printf("Prov name: %s\n", prov_name);
-    switch(prov_type) {
-        case PROV_RSA_AES: *prov = &crypt_prov_rsa_aes; return TRUE;
-        case PROV_RSA_FULL: *prov = &crypt_prov_rsa_aes; return TRUE;
-        default: {
-            log_warn("CryptAcquireContextA | Couldn't find provider for container '%s' provider '%s' provider type 0x%x flags 0x%x", cont_name, prov_name, prov_type, flags);
-            return FALSE;
-        }
+    DllMainRSAENH(0, 1, 0);
+    printf("Prov type: %d\n", dwProvType);
+    printf("Cont name: %s\n", pszContainer);
+    printf("Prov name: %s\n", pszProvider);
+    // sleep(1);
+	PCRYPTPROV pProv = NULL;
+
+    pProv = CRYPT_LoadProvider();
+
+	if (!pszProvider || !*pszProvider)
+	{
+        pProv->pVTable->pszProvName = strdup("Microsoft Enhanced RSA and AES Cryptographic Provider");
+    } else {
+        pProv->pVTable->pszProvName = strdup(pszProvider);
     }
+
+	pProv->pVTable->dwProvType = dwProvType;
+
+    assert(pProv != NULL);
+
+	//    sleep(1);
+	bool res = (RSAENH_CPAcquireContext(&pProv->hPrivate, pszContainer, dwFlags, pProv->pVTable));
+    DWORD err = GetErrorFromLib();
+    printf("Error after lib: %x\n", err);
+    winerr_set_code(err);
+    printf("After call rc = %d hPrivate = %lu\n", (int) res, pProv->hPrivate);
+	//    sleep(1);
+	//
+    if (res) {
+       printf("AcquireContextA success\n");
+       *phProv = (HCRYPTPROV)pProv;
+       return TRUE;
+    }
+	//
+	//    printf("AcquireContextA fail!\n");
+	//    abort();
+    return res;
 }
 WINAPI(CryptAcquireContextA)
 
-__winfnc BOOL CryptReleaseContext(struct crypt_provider *prov, DWORD flags) {
+__winfnc BOOL CryptReleaseContext(HCRYPTPROV prov, DWORD flags) {
     TRACE();
+    RSAENH_CPReleaseContext(prov, flags);
     return TRUE;
 }
 WINAPI(CryptReleaseContext)
 
-__winfnc BOOL CryptImportKey(struct crypt_provider *prov, const BLOBHEADER *data, DWORD data_len, struct crypt_key *pub_key, DWORD flags, struct crypt_key **out) {
+
+__winfnc BOOL CryptImportKey(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataLen,
+                               HCRYPTKEY hPubKey, DWORD dwFlags, HCRYPTKEY *phKey)
+{
     TRACE();
-    if(!prov->import_key) { winerr_set(); return FALSE; }
-    if(pub_key) {
-        log_warn("CryptImportKey called with encrypted key data!");
-        winerr_set();
-        return FALSE;
-    }
 
-    if(data_len < sizeof(BLOBHEADER)) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+	PCRYPTPROV prov = (PCRYPTPROV)hProv;
+	PCRYPTKEY pubkey = (PCRYPTKEY)hPubKey, importkey;
 
-    //Allocate key
-    struct crypt_key *key = (struct crypt_key*) malloc(sizeof(struct crypt_key));
-    if(!key) { winerr_set_errno(); return FALSE; }
-    key->prov = prov;
-    key->key_data = NULL;
+    printf("prov = %p key = %p", prov, phKey);
 
-    if(data->bType == type_PLAINTEXTKEYBLOB) {
-        //Copy plaintext data
-        PLAINTEXTKEYBLOB *blob = (PLAINTEXTKEYBLOB*) data;
-        if(data_len < sizeof(PLAINTEXTKEYBLOB) + blob->dwKeySize) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+	if (!prov || !pbData || !dwDataLen || !phKey ||
+		prov->dwMagic != MAGIC_CRYPTPROV ||
+		(pubkey && pubkey->dwMagic != MAGIC_CRYPTKEY))
+	{
+        printf("A\n");
+		return FALSE;
+	}
 
-        key->plain_data = malloc(blob->dwKeySize);
-        key->plain_size = blob->dwKeySize;
-        if(!key->plain_data) {
-            winerr_set_errno();
-            free(key);
-            return FALSE;
-        }
-        memcpy(key->plain_data, blob+1, blob->dwKeySize);
-    } else {
-        key->plain_data = NULL;
-        key->plain_size = 0;
-    }
+	if ( !(importkey = CRYPT_Alloc(sizeof(CRYPTKEY))) )
+	{
+        printf("B\n");
+		return FALSE;
+	}
 
-    //Import key
-    if(!prov->import_key(prov, data, data_len, &key->key_data)) {
-        winerr_set_errno();
-        free(key->plain_data);
-        free(key);
-        return FALSE;
-    }
+	importkey->pProvider = prov;
+	importkey->dwMagic = MAGIC_CRYPTKEY;
+    printf("hPrivate: %lu\n", prov->hPrivate);
+	if (RSAENH_CPImportKey(prov->hPrivate, pbData, dwDataLen,
+			pubkey ? pubkey->hPrivate : 0, dwFlags, &importkey->hPrivate))
+	{
+		*phKey = (HCRYPTKEY)importkey;
+        TRACE_OK();
+		return TRUE;
+	}
 
-    *out = key;
-    return TRUE;
+	importkey->dwMagic = 0;
+	// CRYPT_Free(importkey);
+	return FALSE;
 }
 WINAPI(CryptImportKey)
 
-__winfnc BOOL CryptDestroyKey(struct crypt_key *key) {
+__winfnc BOOL CryptDestroyKey(HCRYPTKEY hKey) {
     TRACE();
-    if(key->prov->destroy_key) key->prov->destroy_key(key->prov, key->key_data);
-    free(key->plain_data);
-    free(key);
-    return TRUE;
+
+	PCRYPTKEY key = (PCRYPTKEY)hKey;
+	PCRYPTPROV prov;
+	BOOL ret;
+
+	// TRACE("(0x%lx)\n", hKey);
+
+	if (!key)
+	{
+		winerr_set_code(ERROR_INVALID_HANDLE);
+		return FALSE;
+	}
+
+	if (!key->pProvider || key->dwMagic != MAGIC_CRYPTKEY ||
+		key->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = key->pProvider;
+	ret = RSAENH_CPDestroyKey(prov->hPrivate, key->hPrivate);
+	key->dwMagic = 0;
+	CRYPT_Free(key);
+	return ret;
 }
 WINAPI(CryptDestroyKey)
 
-__winfnc BOOL CryptCreateHash(struct crypt_provider *prov, ALG_ID alg_id, struct crypt_key *key, DWORD flags, struct crypt_hash **out) {
+__winfnc BOOL CryptCreateHash (HCRYPTPROV hProv, ALG_ID Algid, HCRYPTKEY hKey,
+		DWORD dwFlags, HCRYPTHASH *phHash)
+{
     TRACE();
-    printf("Alg id: %x\n", alg_id);
-    //Get the algorithm
-    struct crypt_hash_algorithm *algo;
-    switch(alg_id) {
-        case CALG_SHA1: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha1; printf("SHA1\n"); break;
-        case CALG_SHA_256: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha256;printf("SHA256\n"); break;
-        case CALG_SHA_384: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha384; printf("SHA384\n");break;
-        case CALG_SHA_512: algo = (struct crypt_hash_algorithm*) &crypt_hash_algo_sha512; printf("SHA512\n"); break;
-        case CALG_HMAC: algo = &crypt_hash_algo_hmac; break;
-        default: {
-            log_warn("CryptCreateHash | Couldn't find algorithm id 0x%x flags 0x%x", alg_id, flags);
-            return FALSE;
+	PCRYPTPROV prov = (PCRYPTPROV)hProv;
+	PCRYPTKEY key = (PCRYPTKEY)hKey;
+	PCRYPTHASH hash;
+
+	printf("(0x%lx, 0x%x, 0x%lx, %08x, %p)\n", hProv, Algid, hKey, dwFlags, phHash);
+
+	if (!prov || !phHash || prov->dwMagic != MAGIC_CRYPTPROV ||
+		(key && key->dwMagic != MAGIC_CRYPTKEY))
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (dwFlags)
+	{
+		winerr_set_code(NTE_BAD_FLAGS);
+		return FALSE;
+	}
+	if ( !(hash = CRYPT_Alloc(sizeof(CRYPTHASH))) )
+	{
+		winerr_set_code(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+
+	hash->pProvider = prov;
+	hash->dwMagic = MAGIC_CRYPTHASH;
+	if (RSAENH_CPCreateHash(prov->hPrivate, Algid,
+			key ? key->hPrivate : 0, 0, &hash->hPrivate))
+        {
+            *phHash = (HCRYPTHASH)hash;
+            return TRUE;
         }
-    }
 
-    //Allocate and create hash
-    struct crypt_hash *hash = (struct crypt_hash*) malloc(sizeof(struct crypt_hash));
-    if(!hash) { winerr_set_errno(); return FALSE; }
-    hash->algo = algo;
-    hash->hash_data = NULL;
-
-    if(!algo->create_hash(algo, key, &hash->hash_data)) {
-        free(hash);
-        return FALSE;
-    }
-
-    *out = hash;
-    printf("Created hash: %p\n", hash);
-    return TRUE;
+	/* CSP error! */
+	hash->dwMagic = 0;
+	CRYPT_Free(hash);
+	*phHash = 0;
+	return FALSE;
 }
 WINAPI(CryptCreateHash)
 
-__winfnc BOOL CryptDestroyHash(struct crypt_hash *hash) {
+__winfnc BOOL CryptDestroyHash (HCRYPTHASH hHash)
+{
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
+	PCRYPTPROV prov;
+	BOOL ret;
+
     TRACE();
-    if(hash->algo->destroy_hash) hash->algo->destroy_hash(hash->algo, hash->hash_data);
-    free(hash);
-    return TRUE;
+	// TRACE("(0x%lx)\n", hHash);
+
+	if (!hash)
+	{
+		winerr_set_code(ERROR_INVALID_HANDLE);
+		return FALSE;
+	}
+
+	if (!hash->pProvider || hash->dwMagic != MAGIC_CRYPTHASH ||
+		hash->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = hash->pProvider;
+	ret = RSAENH_CPDestroyHash(prov->hPrivate, hash->hPrivate);
+	hash->dwMagic = 0;
+	CRYPT_Free(hash);
+	return ret;
 }
 WINAPI(CryptDestroyHash)
 
-__winfnc BOOL CryptDuplicateHash(struct crypt_hash *hash, DWORD *reserved, DWORD flags, struct crypt_hash **out) {
+__winfnc BOOL  CryptDuplicateHash (HCRYPTHASH hHash, DWORD *pdwReserved,
+		DWORD dwFlags, HCRYPTHASH *phHash)
+{
     TRACE();
-    //Allocate and duplicate hash
-    struct crypt_hash *nhash = (struct crypt_hash*) malloc(sizeof(struct crypt_hash));
-    if(!nhash) { winerr_set_errno(); return FALSE; }
-    nhash->algo = hash->algo;
-    nhash->hash_data = NULL;
 
-    if(!hash->algo->duplicate_hash(hash->algo, hash->hash_data, &nhash->hash_data)) {
-        free(nhash);
-        return FALSE;
-    }
+    PCRYPTPROV prov;
+	PCRYPTHASH orghash, newhash;
 
-    *out = nhash;
-    return TRUE;
+	// TRACE("(0x%lx, %p, %08x, %p)\n", hHash, pdwReserved, dwFlags, phHash);
+
+	orghash = (PCRYPTHASH)hHash;
+	if (!orghash || pdwReserved || !phHash || !orghash->pProvider ||
+		orghash->dwMagic != MAGIC_CRYPTHASH || orghash->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = orghash->pProvider;
+
+	if ( !(newhash = CRYPT_Alloc(sizeof(CRYPTHASH))) )
+	{
+		winerr_set_code(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+
+	newhash->pProvider = prov;
+	newhash->dwMagic = MAGIC_CRYPTHASH;
+	if (RSAENH_CPDuplicateHash(prov->hPrivate, orghash->hPrivate, pdwReserved, dwFlags, &newhash->hPrivate))
+	{
+		*phHash = (HCRYPTHASH)newhash;
+		return TRUE;
+	}
+	newhash->dwMagic = 0;
+	CRYPT_Free(newhash);
+	return FALSE;
 }
 WINAPI(CryptDuplicateHash)
 
-__winfnc BOOL CryptGetHashParam(struct crypt_hash *hash, DWORD param, BYTE *data, DWORD *data_len, DWORD flags) {
+__winfnc BOOL  CryptGetHashParam (HCRYPTHASH hHash, DWORD dwParam, BYTE *pbData,
+		DWORD *pdwDataLen, DWORD dwFlags)
+{
+	PCRYPTPROV prov;
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
+
     TRACE();
-    size_t buf_size = *data_len;
-    printf("Hash: %p Param: %d\n", hash, param);
-    BOOL suc = hash->algo->get_hash_param(hash->algo, hash->hash_data, param, data, &buf_size);
-    *data_len = (size_t) buf_size;
-    printf("Ret: %d\n", (int) suc);
-    return suc;
+	// TRACE("(0x%lx, %d, %p, %p, %08x)\n", hHash, dwParam, pbData, pdwDataLen, dwFlags);
+
+	if (!hash || !pdwDataLen || !hash->pProvider ||
+		hash->dwMagic != MAGIC_CRYPTHASH || hash->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = hash->pProvider;
+	return RSAENH_CPGetHashParam(prov->hPrivate, hash->hPrivate, dwParam,
+			pbData, pdwDataLen, dwFlags);
 }
 WINAPI(CryptGetHashParam)
 
-__winfnc BOOL CryptSetHashParam(struct crypt_hash *hash, DWORD param, const BYTE *data, DWORD flags) {
+
+__winfnc BOOL CryptSetHashParam (HCRYPTHASH hHash, DWORD dwParam, const BYTE *pbData, DWORD dwFlags)
+{
+	PCRYPTPROV prov;
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
+
     TRACE();
-    return hash->algo->set_hash_param(hash->algo, hash->hash_data, param, data);
+	// TRACE("(0x%lx, %d, %p, %08x)\n", hHash, dwParam, pbData, dwFlags);
+
+	if (!hash || !pbData || !hash->pProvider ||
+		hash->dwMagic != MAGIC_CRYPTHASH || hash->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = hash->pProvider;
+	return RSAENH_CPSetHashParam(prov->hPrivate, hash->hPrivate,
+			dwParam, pbData, dwFlags);
 }
 WINAPI(CryptSetHashParam)
 
-__winfnc BOOL CryptHashData(struct crypt_hash *hash, const BYTE *data, DWORD data_len, DWORD flags) {
+__winfnc BOOL CryptHashData (HCRYPTHASH hHash, const BYTE *pbData, DWORD dwDataLen, DWORD dwFlags)
+{
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
+	PCRYPTPROV prov;
+
     TRACE();
-    printf("Data (%lu bytes): ", (unsigned long)data_len);
-    printf("Hash input: ");
-    for (DWORD i = 0; i < data_len; i++) {
-        printf("%02X", data[i]);  // two-digit uppercase hex
-    }
-    printf("\n");
-    fflush(stdout);
-    bool ret = hash->algo->update_hash(hash->algo, hash->hash_data, data, data_len);
-    printf("Ret: %d\n", (int) ret);
-    return ret;
+	// TRACE("(0x%lx, %p, %d, %08x)\n", hHash, pbData, dwDataLen, dwFlags);
+
+	if (!hash)
+	{
+		winerr_set_code(ERROR_INVALID_HANDLE);
+		return FALSE;
+	}
+	if (!hash->pProvider || hash->dwMagic != MAGIC_CRYPTHASH ||
+		hash->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	prov = hash->pProvider;
+	return RSAENH_CPHashData(prov->hPrivate, hash->hPrivate, pbData, dwDataLen, dwFlags);
 }
 WINAPI(CryptHashData)
 
-__winfnc BOOL CryptSetKeyParam(struct crypt_key *key, DWORD param, const BYTE *data, DWORD flags) {
-    // return hash->algo->set_hash_param(hash->algo, hash->hash_data, param, data);
-    TRACE();
-    struct crypt_provider* prov = NULL;
+__winfnc BOOL CryptSetKeyParam (HCRYPTKEY hKey, DWORD dwParam, const BYTE *pbData, DWORD dwFlags)
+{
+	PCRYPTPROV prov;
+	PCRYPTKEY key = (PCRYPTKEY)hKey;
 
+	// TRACE("(0x%lx, %d, %p, %08x)\n", hKey, dwParam, pbData, dwFlags);
 
-    if (!key || !data || !key->prov)
-    {
-        return FALSE;
-    }
+	if (!key || !pbData || !key->pProvider ||
+		key->dwMagic != MAGIC_CRYPTKEY || key->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
 
-    prov = key->prov;
-    return prov->set_key(prov, &key, param, data, flags);
+	prov = key->pProvider;
+	return RSAENH_CPSetKeyParam(prov->hPrivate, key->hPrivate,
+			dwParam, pbData, dwFlags);
 }
 WINAPI(CryptSetKeyParam)
 
@@ -256,60 +469,92 @@ __winfnc BOOL CryptEncodeObject(DWORD cert_enc_type, const char *struct_type, vo
 }
 WINAPI(CryptEncodeObject)
 
-__winfnc BOOL CryptEncrypt(
-  struct crypt_key*  hKey,
-  struct crypt_hash* hHash,
-  BOOL       Final,
-  DWORD      dwFlags,
-  BYTE       *pbData,
-  DWORD      *pdwDataLen,
-  DWORD      dwBufLen) 
+
+__winfnc BOOL  CryptEncrypt (HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
+		DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen, DWORD dwBufLen)
 {
-    TRACE();
-    printf("%d %d %p %p %d\n", (int) Final, dwFlags, pbData, pdwDataLen, dwBufLen);
-    if (pbData == NULL) {
-        if (pdwDataLen == NULL) {
-            return false;
+	PCRYPTPROV prov;
+	PCRYPTKEY key = (PCRYPTKEY)hKey;
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
 
+	printf("(0x%lx, 0x%lx, %d, %08x, %p, %p, %d)\n", hKey, hHash, Final, dwFlags, pbData, pdwDataLen, dwBufLen);
+        printf("To be encrypted: ");
+        for(int i=0;i<*pdwDataLen;i++) {
+            if(i > 3000000) {
+                printf("...");
+                break;
+            } else {
+                printf("%02x", pbData[i]);
+            }
         }
-        printf("Data len requested: %d\n", *pdwDataLen);
+        printf("\n");
 
-        return true;
-    }
+	if (!key || !pdwDataLen || !key->pProvider ||
+		key->dwMagic != MAGIC_CRYPTKEY || key->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
 
-    if (pdwDataLen != NULL) {
-        printf("Data len: %d\n", *pdwDataLen);
-
-    }
-    return true;
+	prov = key->pProvider;
+	BOOL rc = RSAENH_CPEncrypt(prov->hPrivate, key->hPrivate, hash ? hash->hPrivate : 0,
+			Final, dwFlags, pbData, pdwDataLen, dwBufLen);
+        printf("Encrypted: ");
+        for(int i=0;i<*pdwDataLen;i++) {
+            if(i > 30) {
+                printf("...");
+                break;
+            } else {
+                printf("%02x", pbData[i]);
+            }
+        }
+        printf("\n");
+        return rc;
 }
 WINAPI(CryptEncrypt)
 
-__winfnc BOOL CryptDecrypt(
-  struct crypt_key*  hKey,
-  struct crypt_hash* hHash,
-  BOOL       Final,
-  DWORD      dwFlags,
-  BYTE       *pbData,
-  DWORD      *pdwDataLen) 
+
+__winfnc BOOL  CryptDecrypt (HCRYPTKEY hKey, HCRYPTHASH hHash, BOOL Final,
+		DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen)
 {
-    TRACE();
-    printf("%d %d %p %p\n", (int) Final, dwFlags, pbData, pdwDataLen);
-    if (pbData == NULL) {
-        if (pdwDataLen == NULL) {
-            return false;
+	PCRYPTPROV prov;
+	PCRYPTKEY key = (PCRYPTKEY)hKey;
+	PCRYPTHASH hash = (PCRYPTHASH)hHash;
 
+	printf("(0x%lx, 0x%lx, %d, %08x, %p, %p)\n", hKey, hHash, Final, dwFlags, pbData, pdwDataLen);
+
+        printf("To be decrypted: ");
+        for(int i=0;i<*pdwDataLen;i++) {
+            if(i > 30) {
+                printf("...");
+                break;
+            } else {
+                printf("%02x", pbData[i]);
+            }
         }
-        printf("Data len requested: %d\n", *pdwDataLen);
+        printf("\n");
+	if (!key || !pbData || !pdwDataLen ||
+		!key->pProvider || key->dwMagic != MAGIC_CRYPTKEY ||
+		key->pProvider->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
 
-        return true;
-    }
-
-    if (pdwDataLen != NULL) {
-        printf("Data len: %d\n", *pdwDataLen);
-
-    }
-    return true;
+	prov = key->pProvider;
+	BOOL rc = RSAENH_CPDecrypt(prov->hPrivate, key->hPrivate, hash ? hash->hPrivate : 0,
+			Final, dwFlags, pbData, pdwDataLen);
+        printf("Decrypted: ");
+        for(int i=0;i<*pdwDataLen;i++) {
+            if(i > 3000000) {
+                printf("...");
+                break;
+            } else {
+                printf("%02x", pbData[i]);
+            }
+        }
+        printf("\n");
+        return rc;
 }
 WINAPI(CryptDecrypt)
 
@@ -355,33 +600,13 @@ WINAPI(CryptDecodeObject)
 
 __winfnc BOOL CryptProtectData(DATA_BLOB *in, const char16_t *descr, DATA_BLOB *entropy, void *reserved, void *prompt_struct, DWORD flags, DATA_BLOB *out) {
     TRACE();
-    if (in->cbData == 96) {
-        out->cbData = 242;
-    } else {
-        out->cbData = in->cbData * 3;
-    }
 
+    out->pbData = malloc(in->cbData);
+    out->cbData = in->cbData;
+    memcpy(out->pbData, in->pbData, in->cbData);
 
-    out->pbData = (BYTE*) malloc(out->cbData);
-
-    uint8_t* src = (uint8_t*)in->pbData;
-    uint8_t* dst = (uint8_t*)out->pbData;
-
-    printf("Protect data input:\n");
-    for (int i = 0; i < in->cbData; ++i) {
-        printf("%02x", src[i]);
-    }
-    printf("\n");
-    memset(dst, 0, out->cbData);
-    for (int i = 0; i < in->cbData; ++i) {
-        dst[out->cbData-i-1] = src[i];
-    }
-
-    // Store size as first few bytes
-    int* size_out = (int*)out->pbData;
-    *size_out = in->cbData;
-
-    printf("Ret: 1\n");
+    printf("in = %p out = %p\n", in, out);
+    print_hex_str("Protect input", in->pbData, in->cbData);
     return TRUE;
 }
 WINAPI(CryptProtectData)
@@ -399,19 +624,12 @@ __winfnc BOOL CryptUnprotectData(
 
 {
     TRACE();
-    int* size_in = in->pbData;
-    int size = *size_in;
-
-    out->cbData = (DWORD) size;
-    out->pbData = (BYTE*) malloc(out->cbData);
-
-    uint8_t* src = (uint8_t*)in->pbData;
-    uint8_t* dst = (uint8_t*)out->pbData;
-    memset(dst, 0, out->cbData);
-    for (int i = 0; i < out->cbData; ++i) {
-        dst[i] = src[in->cbData - i - i];
-    }
-
+    out->pbData = malloc(in->cbData);
+    out->cbData = in->cbData;
+    memcpy(out->pbData, in->pbData, in->cbData);
+    printf("in = %p out = %p\n", in, out);
+    print_hex_str("Unprotect output", out->pbData, out->cbData);
+    printf("out->cbData: %d\n", out->cbData);
     return TRUE;
 }
 WINAPI(CryptUnprotectData)
@@ -428,9 +646,29 @@ __winfnc BOOL CryptUnprotectMemory(void *data, DWORD size, DWORD flags) {
 }
 WINAPI(CryptUnprotectMemory);
 
-__winfnc BOOL CryptGenRandom(HANDLE prov, DWORD len, BYTE *buf) {
+
+__winfnc BOOL CryptGenRandom (HCRYPTPROV hProv, DWORD dwLen, BYTE *pbBuffer)
+{
     TRACE();
-    LIBCRYPTO_ERR(RAND_bytes(buf, (int) len));
-    return TRUE;
+    // TRACE("(hProv=%08lx, dwLen=%d, pbBuffer=%p)\n", hProv, dwLen, pbBuffer);
+    
+	PCRYPTPROV prov = (PCRYPTPROV)hProv;
+
+	printf("(0x%lx, %d, %p)\n", hProv, dwLen, pbBuffer);
+
+	if (!hProv)
+	{
+		winerr_set_code(ERROR_INVALID_HANDLE);
+		return FALSE;
+	}
+
+	if (prov->dwMagic != MAGIC_CRYPTPROV)
+	{
+		winerr_set_code(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	return RSAENH_CPGenRandom(prov->hPrivate, dwLen, pbBuffer);
+
 }
 WINAPI(CryptGenRandom)

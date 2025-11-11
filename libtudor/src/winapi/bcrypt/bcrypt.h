@@ -4,6 +4,13 @@
 #include <tudor/libcrypto.h>
 #include "winapi/api.h"
 
+
+typedef PVOID BCRYPT_ALG_HANDLE;
+typedef PVOID BCRYPT_KEY_HANDLE;
+typedef PVOID BCRYPT_HANDLE;
+typedef PVOID BCRYPT_HASH_HANDLE;
+typedef char16_t LPCWSTR;
+
 struct bcrypt_property {
     struct bcrypt_property *next;
 

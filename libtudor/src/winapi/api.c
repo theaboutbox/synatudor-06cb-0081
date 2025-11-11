@@ -113,3 +113,13 @@ char *winstr_to_str(const char16_t *wstr) {
 
     return str;
 }
+
+void print_hex_str(const char* name, uint8_t* buf, size_t size)
+{
+    if (name != NULL) printf("[Hex] %s %d:\n", name, (int) size);
+    for (size_t i = 0; i < size; ++i) {
+        printf("%02x", buf[i]);
+    }
+    printf("\n");
+}
+

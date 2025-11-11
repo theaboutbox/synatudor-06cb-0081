@@ -74,7 +74,11 @@ driver_dll_names = [
 
 add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
 add_global_arguments('-g', language : ['c', 'cpp'])
-# add_global_arguments('-fsanitize=address', language : ['c', 'cpp'])
+add_global_arguments('-fsanitize=address', language : ['c', 'cpp'])
+
+
+bridge_proj = subproject('cryptbridge')
+cryptbridge_dep = bridge_proj.get_variable('cryptbridge_dep')
 
 
 driver_dlls = custom_target('driver-download', 
@@ -107,7 +111,7 @@ libtudor_inc = include_directories('inc')
 # winapi_inc = include_directories('src/winapi')
 
 libtudor = shared_library('tudor', [libtudor_src, driver_dll_blobs],
-    dependencies: [thread_dep, libcrypto_dep, libusb_dep],
+    dependencies: [thread_dep, libcrypto_dep, libusb_dep, cryptbridge_dep],
     c_args: ['-D_GNU_SOURCE'] + libtudor_flags,
     cpp_args: ['-D_GNU_SOURCE'] + libtudor_flags,
     link_args: ['-Wl,-z,noexecstack', '-Wl,--copy-dt-needed-entries'],

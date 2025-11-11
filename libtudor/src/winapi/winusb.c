@@ -127,15 +127,32 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
     info->supported_devices_cnt = 1;
 
     info->script = NULL;
+    info->script_line = 0;
     info->playback = 0;
 
     info->dev = NULL;
-    int rc = libusb_init(&info->ctx);
-    if (rc != 0) {
-        abort();
+
+    if(info->playback) {
+        info->script = fopen("usb_script.txt", "rt");
+        info->playback = 1;
+        if(info->script == NULL) {
+            log_error("failed to open the USB script \n");
+            abort();
+            return FALSE;
+        }
+
+        info->script_line = 0;
+        return TRUE;
+
+    } else {
+        int rc = libusb_init(&info->ctx);
+        if (rc != 0) {
+            abort();
+        }
+
+        return claim_device(info);
     }
 
-    return claim_device(info);
 }
 WINAPI(WinUsb_Initialize)
 
@@ -163,6 +180,41 @@ __winfnc BOOL WinUsb_GetDescriptor(
     struct driver_info *info = InterfaceHandle;
     int rc, i;
     uint16_t dti = (uint16_t)((DescriptorType << 8) | Index);
+
+    if (info->playback) {
+        int p;
+        char dir[10];
+        char hex[8000000], *hp;
+
+        info->script_line++;
+        fscanf(info->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
+        
+        if(p != dti) {
+            log_error("wrong dtype or index on script line %d (expected %d, requested %d)\n", info->script_line, p, dti);
+            exit(0);
+        }
+        if(strcmp(dir, "dsc") != 0) {
+            log_error("wrong direction on script line %d (expected %s, requested %s)\n", info->script_line, dir, "dsc");
+            exit(0);
+        }
+        rc=0;
+        for(hp=hex;*hp;hp+=2) {
+            char hh[] = { hp[0], hp[1], 0 }, *hhp;
+            int b = strtol(hh, &hhp, 0x10);
+
+            if(hhp - hh != 2) {
+                log_error("broken hex value on script line %d: %s\n", info->script_line, hp);
+                exit(0);
+            }
+            Buffer[rc] = b;
+            rc++;
+        }
+
+        log_error("rc=%d\n", rc);
+        *LengthTransferred = rc;
+        return TRUE;
+    }
+
 
 
         rc = libusb_control_transfer(info->dev, LIBUSB_ENDPOINT_IN,
@@ -229,6 +281,11 @@ __winfnc BOOL WinUsb_ControlTransfer(
     }
     printf("\r\n");
 #endif
+    if (info->playback) {
+        rc = SetupPacket.Length;
+        *LengthTransferred = rc;
+        return TRUE;
+    }
     rc = libusb_control_transfer(info->dev,
         SetupPacket.RequestType, SetupPacket.Request, SetupPacket.Value, SetupPacket.Index,
         Buffer, SetupPacket.Length, 10000);
@@ -275,6 +332,37 @@ WinUsb_ReadPipe(
     if(!wpi) {
         printf("unknown pipe!\n");
         return FALSE;
+    }
+
+    if (dev->playback) {
+        int p;
+        char dir[10];
+        char hex[8000000], *hp;
+
+        dev->script_line++;
+        fscanf(dev->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
+        if(p != PipeID) {
+            log_error("wrong pipe on script line %d (expected %d, requested %d)\n", dev->script_line, p, PipeID);
+            exit(0);
+        }
+        if(strcmp(dir, "<<<") != 0) {
+            log_error("wrong direction on script line %d (expected %s, requested %s)\n", dev->script_line, dir, "<<<");
+            exit(0);
+        }
+        *LengthTransferred=0;
+        for(hp=hex;*hp;hp+=2) {
+            char hh[] = { hp[0], hp[1], 0 }, *hhp;
+            int b = strtol(hh, &hhp, 0x10);
+
+            if(hhp - hh != 2) {
+                log_error("broken hex value on script line %d: %s\n", dev->script_line, hp);
+                exit(0);
+            }
+            Buffer[*LengthTransferred] = b;
+            (*LengthTransferred)++;
+        }
+
+        return TRUE;
     }
 
     switch(wpi->PipeType) {
@@ -369,6 +457,53 @@ WinUsb_WritePipe(
     //     abort();
     //     return FALSE;
     // }
+    if (dev->playback) {
+        int p;
+        char dir[10];
+        char hex[8000000], *hp;
+
+        dev->script_line++;
+        fscanf(dev->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
+        if(p != PipeID) {
+            log_error("wrong pipe on script line %d (expected %d, requested %d)\n", dev->script_line, p, PipeID);
+            exit(0);
+        }
+        if(strcmp(dir, ">>>") != 0) {
+            log_error("wrong direction on script line %d (expected %s, requested %s)\n", dev->script_line, dir, ">>>");
+            exit(0);
+        }
+        send=0;
+        for(hp=hex;*hp;hp+=2) {
+            char hh[] = { hp[0], hp[1], 0 }, *hhp;
+            int b = strtol(hh, &hhp, 0x10);
+
+            if(hhp - hh != 2) {
+                log_error("broken hex value on script line %d: %s\n", dev->script_line, hp);
+                // exit(0);
+            }
+
+            if(Buffer[send] != b) {
+                log_error("send byte mismatch onscript line %d, column %ld: %02x != %02x\n", dev->script_line, hp-hex, b, Buffer[send]);
+                printf("HEX GT: %d \n", (int) (strlen(hex) / 2));
+                printf("%s\n", hex);
+                printf("HEX Out: %d \n", (int) BufferLength);
+                for (int i = 0; i < BufferLength; ++i) {
+                    printf("%02x", Buffer[i]);
+                }
+                printf("\n");
+                sleep(2);
+                exit(0);
+            }
+            send++;
+        }
+        if(send != BufferLength) {
+            log_error("send != BufferLength on script line %d\n", dev->script_line);
+            exit(0);
+        }
+
+        *LengthTransferred = send;
+        return TRUE;
+    }
 
     rc = libusb_bulk_transfer(dev->dev,
             PipeID,

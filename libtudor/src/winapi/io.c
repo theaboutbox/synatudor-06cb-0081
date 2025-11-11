@@ -277,3 +277,14 @@ __winfnc BOOL DeviceIoControl(HANDLE handle, DWORD code, const void *in_buf, DWO
     return GetOverlappedResult(handle, ovlp, out_ret, TRUE);
 }
 WINAPI(DeviceIoControl)
+
+__winfnc HANDLE FindFirstFileA( const char* lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
+{
+    TRACE();
+    // printf("len %lu s = %s\n", strlen(lpFileName), lpFileName);
+
+    winerr_set_code(2);
+
+    return INVALID_HANDLE_VALUE;
+}
+WINAPI(FindFirstFileA)

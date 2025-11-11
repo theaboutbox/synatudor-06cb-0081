@@ -52,6 +52,11 @@ typedef struct {
     .PartE = (((0x##e >> 40) & 0xff) <<  0) | (((0x##e >> 32) & 0xff) <<  8) | (((0x##e >> 24) & 0xff) << 16) | (((0x##e >> 16) & 0xff) << 24) | (((0x##e >>  8) & 0xff) << 32) | (((0x##e >>  0) & 0xff) << 40)\
 })
 
+#define ERROR_INVALID_PARAMETER                            87
+#define NTE_BAD_FLAGS                                      0x80090009
+#define ERROR_NOT_ENOUGH_MEMORY                            8
+#define ERROR_INVALID_HANDLE                               6
+
 enum {
     ERROR_SUCCESS = 0x0,
     ERROR_INSUFFICIENT_BUFFER = 0x7a,
@@ -106,5 +111,26 @@ typedef struct {
 enum {
     FILE_FLAG_OVERLAPPED = 0x40000000
 };
+
+typedef struct _FILETIME {
+  DWORD dwLowDateTime;
+  DWORD dwHighDateTime;
+} FILETIME, *PFILETIME, *LPFILETIME;
+
+typedef struct _WIN32_FIND_DATAA {
+  DWORD    dwFileAttributes;
+  FILETIME ftCreationTime;
+  FILETIME ftLastAccessTime;
+  FILETIME ftLastWriteTime;
+  DWORD    nFileSizeHigh;
+  DWORD    nFileSizeLow;
+  DWORD    dwReserved0;
+  DWORD    dwReserved1;
+  CHAR     cFileName[260];
+  CHAR     cAlternateFileName[14];
+  DWORD    dwFileType; // Obsolete. Do not use.
+  DWORD    dwCreatorType; // Obsolete. Do not use
+  WORD     wFinderFlags; // Obsolete. Do not use
+} WIN32_FIND_DATAA, *PWIN32_FIND_DATAA, *LPWIN32_FIND_DATAA;
 
 #endif

@@ -21,8 +21,14 @@ struct __winapi_descr {
     struct __winapi_descr *next;
 };
 
+#define TRACE_OK() do { \
+    printf("[Trace] --> %s OK\n", \
+           __func__); \
+    fflush(stdout); \
+} while (0)
+
 #define TRACE() do { \
-    printf("Trace -->: [TID %ld] [%s:%d] %s\n", \
+    printf("\n\n[Trace] -->: [TID %ld] [%s:%d] %s\n", \
            (long)syscall(SYS_gettid), __FILE__, __LINE__, __func__); \
     fflush(stdout); \
 } while (0)
@@ -53,6 +59,8 @@ void winerr_set();
 void winerr_set_code(int code);
 void winerr_set_errno();
 int winerr_from_errno();
+
+DWORD GetErrorFromLib();
 
 //Handles
 typedef void winhandle_destr_fnc(void *data);
@@ -142,6 +150,8 @@ HANDLE winreg_open_key(void *ctx_obj, const char *key_name);
 const char *winreg_get_key_name(HANDLE key);
 bool winreg_query_val(HANDLE key, const char *val_name, void *buf, size_t *buf_size, enum winreg_val_type *val_type);
 bool winreg_write_val(HANDLE key, const char *val_name, const void *buf, size_t buf_size, enum winreg_val_type val_type);
+
+void print_hex_str(const char* name, uint8_t* buf, size_t size);
 
 #ifdef __cplusplus
 }

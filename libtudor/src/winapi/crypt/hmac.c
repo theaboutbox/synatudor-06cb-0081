@@ -2,6 +2,17 @@
 #include <openssl/evp.h>
 #include "crypt.h"
 
+#include "wincrypt.h"
+
+BOOL  
+RSAENH_CPCreateHash(
+    HCRYPTPROV hProv, 
+    ALG_ID Algid, 
+    HCRYPTKEY hKey, 
+    DWORD dwFlags, 
+    void *phHash
+);
+
 struct hmac_hash {
     EVP_MD_CTX *hmac_ctx;
     EVP_PKEY *hmac_pkey;
@@ -152,6 +163,7 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
 
 
 static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_hash *hash, DWORD param, void *data) {
+    printf("HMAC set hash param\n");
     switch(param) {
         case HP_HASHVAL: {
             log_warn("hmac_set_hash_param | Tried to set hash value!");
@@ -198,8 +210,11 @@ static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             else
                 memset(hash->outer_data, 0x5C, hash->outer_size);
 
+            print_hex_str("Outer string", hash->outer_data, hash->outer_size);
+            print_hex_str("Inner string", hash->inner_data, hash->inner_size);
             hash->has_algo = true;
             hash->is_dirty = true;
+            TRACE_OK();
             return TRUE;
         }
         default: winerr_set_errno(); return FALSE;

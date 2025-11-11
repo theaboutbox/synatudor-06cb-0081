@@ -121,9 +121,9 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             LIBCRYPTO_ERR(EC_POINT_get_affine_coordinates(p256_get_curve(), pub_point, pub_x, pub_y, NULL));
             EC_POINT_free(pub_point);
         }
+        log_error("d=%s\n", BN_bn2hex(priv_d));
     } else return WINERR_SET_CODE;
 
-    log_error("d=%s\n", BN_bn2hex(priv_d));
 
     //Create the public key point and encode it
     EC_POINT *pub_point;
@@ -393,7 +393,173 @@ static void p256_destroy_key(struct bcrypt_ecc_algorithm *algo, struct p256_key 
     free(key);
 }
 
+
+int ecc_sign(
+            PUCHAR px, ULONG sx,
+            PUCHAR py, ULONG sy,
+            PUCHAR pd, ULONG sd,
+            PUCHAR src, ULONG src_len, 
+            PUCHAR dst)
+{
+    log_error("Enter ecc_sign\n");
+    log_error("px ptr = %p size = %ul\n", px, sx);
+    log_error("py ptr = %p size = %ul\n", py, sy);
+    log_error("pd ptr = %p size = %ul\n", pd, sd);
+    log_error("src ptr = %p size = %ul\n", src, src_len);
+    log_error("dst ptr = %p\n", dst);
+
+    EC_KEY *key = EC_KEY_new_by_curve_name(CURVE_NID);
+    BIGNUM *x = BN_bin2bn(px, sx, NULL);
+    BIGNUM *y = BN_bin2bn(py, sy, NULL);
+    BIGNUM *d = BN_bin2bn(pd, sd, NULL);
+
+    if(!x || !y || !d) {
+        log_error("oops, one of pBN_bin2bn failed (%p %p %p)\n", x, y, d);
+        return -1;
+    }
+
+    log_error("x=%s\n", BN_bn2hex(x));
+    log_error("y=%s\n", BN_bn2hex(y));
+    log_error("d=%s\n", BN_bn2hex(d));
+
+    if(!EC_KEY_set_private_key(key, d)) {
+        // log_error("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
+        return -1;
+    }
+    log_error("After Set private key\n");
+#if 1
+    if(!EC_KEY_set_public_key_affine_coordinates(key, x, y)) {
+        log_error("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        return -1;
+    }
+    log_error("After Set public key\n");
+#endif
+
+    BIGNUM *kinv = BN_new();
+    BIGNUM *rp = BN_new();;
+
+    if(!pECDSA_sign_setup(key, NULL, &kinv, &rp)) {
+        ERR("oops, ECDSA_sign_setup failed\n");
+        return -1;
+    }
+    log_error("kinv=%s\n", BN_bn2hex(kinv));
+    log_error("rp=%s\n", BN_bn2hex(rp));
+
+    log_error("After BIGNUM convert");
+    ECDSA_SIG *sig = ECDSA_do_sign_ex(src, src_len, kinv, rp, key);
+    BN_free(kinv);
+    BN_free(rp);
+
+    if(sig == NULL) {
+        log_error("oops, ECDSA_do_sign failed\n");
+        return -1;
+    }
+
+    BIGNUM *r = NULL;
+    BIGNUM *s = NULL;
+
+    ECDSA_SIG_get0(sig, &r, &s);
+
+    if(!BN_bn2binpad(r, dst, 32)) {
+        log_error("oops, BN_bn2binpad failed for r\n");
+        return -1;
+    }
+
+    if(!BN_bn2binpad(s, dst+32, 32)) {
+        log_error("oops, BN_bn2binpad failed for s\n");
+        return -1;
+    }
+
+    BN_free(r);
+    BN_free(s);
+    BN_free(d);
+    BN_free(y);
+    BN_free(x);
+
+    return 0;
+}
+
+
 static NTSTATUS p256_ecdsa_sign_hash(struct bcrypt_ecc_algorithm *algo, struct p256_key *key, const void *hash, size_t hash_size, void *sig, size_t *sig_size) {
+    printf("p256_ecdsa_sign_hash\n");
+
+
+    int ret = 0;
+    EC_KEY *ec_key = NULL;
+    const EC_GROUP *group = NULL;
+    const EC_POINT *pub_key = NULL;
+    const BIGNUM *priv_key = NULL;
+    BIGNUM *x = NULL, *y = NULL;
+    unsigned char *x_buf = NULL, *y_buf = NULL, *d_buf = NULL;
+    int x_len = 0, y_len = 0, d_len = 0;
+    int field_size;
+
+    // Extract the EC_KEY
+    ec_key = EVP_PKEY_get1_EC_KEY(key->ec_key);
+    if (!ec_key) {
+        fprintf(stderr, "EVP_PKEY_get1_EC_KEY failed\n");
+        goto done;
+    }
+
+    group = EC_KEY_get0_group(ec_key);
+    pub_key = EC_KEY_get0_public_key(ec_key);
+    priv_key = EC_KEY_get0_private_key(ec_key);
+
+    if (!group || !pub_key || !priv_key) {
+        fprintf(stderr, "EC_KEY missing components\n");
+        goto done;
+    }
+
+    x = BN_new();
+    y = BN_new();
+    if (!x || !y) goto done;
+
+    if (!EC_POINT_get_affine_coordinates(group, pub_key, x, y, NULL)) {
+        fprintf(stderr, "EC_POINT_get_affine_coordinates failed\n");
+        goto done;
+    }
+
+    field_size = (EC_GROUP_get_degree(group) + 7) / 8;
+
+    x_buf = malloc(field_size);
+    y_buf = malloc(field_size);
+    d_buf = malloc(field_size);
+    if (!x_buf || !y_buf || !d_buf) goto done;
+
+    x_len = BN_bn2binpad(x, x_buf, field_size);
+    y_len = BN_bn2binpad(y, y_buf, field_size);
+    d_len = BN_bn2binpad(priv_key, d_buf, field_size);
+
+    if (x_len <= 0 || y_len <= 0 || d_len <= 0) {
+        fprintf(stderr, "BN_bn2binpad failed\n");
+        goto done;
+    }
+
+
+    if (ecc_sign(x_buf, x_len,
+                 y_buf, y_len,
+                 d_buf, d_len,
+                 hash, hash_size,
+                 sig)) {        log_error("ecc_sign failed\n");
+        ret = STATUS_INTERNAL_ERROR;
+        goto done;
+    }
+
+
+        ret = 0;
+    *sig_size = 2 * field_size;  /* for P-256, this will be 64 */
+
+done:
+    BN_free(x);
+    BN_free(y);
+    EC_KEY_free(ec_key);
+    free(x_buf);
+    free(y_buf);
+    free(d_buf);
+    return ret;
+}
+
+    /*
     if(!key->has_private) return WINERR_SET_CODE;
 
     if(sig && *sig_size >= 2*P256_PARAM_SIZE) {
@@ -428,6 +594,7 @@ static NTSTATUS p256_ecdsa_sign_hash(struct bcrypt_ecc_algorithm *algo, struct p
     *sig_size = 2*P256_PARAM_SIZE;
     return STATUS_SUCCESS;
 }
+*/
 
 static NTSTATUS p256_ecdsa_verify_hash(struct bcrypt_ecc_algorithm *algo, struct p256_key *key, const void *hash, size_t hash_size, const void *sig, size_t sig_size) {
     if(!key->has_public) return WINERR_SET_CODE;

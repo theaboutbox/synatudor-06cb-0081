@@ -4,9 +4,6 @@
 #include <sys/time.h>
 #include "internal.h"
 
-typedef struct {
-    DWORD dwLowDateTime, dwHighDateTime;
-} FILETIME;
 
 __winfnc BOOL QueryPerformanceCounter(uint64_t *counter) {
     TRACE();

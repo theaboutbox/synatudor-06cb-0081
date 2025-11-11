@@ -1796,7 +1796,7 @@ bool tudor_init() {
     print_vtable(myDevice->pnphwcb, 5); 
 
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
-    usleep(5000000);
+    usleep(50000000);
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     //
@@ -1808,7 +1808,8 @@ bool tudor_init() {
     printf("about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     printf("OnD0Entry rc = %lx\r\n", rc);
-    usleep(20000);
+    usleep(5000000);
+    fflush(stdout);
 
 
     //Query WINBIO interfaces

@@ -249,6 +249,8 @@ WINAPI(RtlInitUnicodeString)
 
 __winfnc int lstrlenA(const char *str) {
     TRACE();
+    printf("Strlen: %s\n", str);
+    fflush(stdout);
     return (int) strlen(str);
 }
 WINAPI(lstrlenA)

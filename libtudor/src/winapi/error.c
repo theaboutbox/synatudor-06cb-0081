@@ -38,7 +38,7 @@ WINAPI(GetLastError)
 
 __winfnc void SetLastError(DWORD err) {
     WIN_CLOBBER_NONVOL_REGS
+    printf("Set last_error = %x\n", last_error);
     last_error = err;
-    // printf("Set last_error = %d\n", last_error);
 }
 WINAPI(SetLastError)
