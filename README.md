@@ -5,9 +5,10 @@ This project makes the Synaptics Tudor fingerprint reader with USB ID
 Windows biometric driver in a restricted compatibility host and connects it
 to libfprint through the TOD ABI.
 
-The current release targets Arch Linux and [Omarchy](https://omarchy.org/). It
-has been tested on a Lenovo Yoga C930-13IKB. Other laptops with the same USB ID
-are especially useful test cases.
+The current release targets Arch Linux and [Omarchy](https://omarchy.org/).
+Earlier bring-up was tested on a Lenovo Yoga C930-13IKB; the recovery changes
+in this candidate still need the hardware revalidation described below. Other
+laptops with the same USB ID are especially useful test cases.
 
 > [!WARNING]
 > This is experimental system software. Initializing the reader may replace
@@ -35,9 +36,20 @@ $ ./scripts/install
 
 The installer ensures that the exact tested TOD-enabled libfprint package is
 installed, builds the driver as a local Arch package, and guides you through
-reader calibration, fingerprint enrollment, and a test match. On Omarchy it
-can also configure fingerprint authentication for sudo, polkit, and the lock
-screen while preserving password fallback.
+reader initialization, calibration, fingerprint enrollment, and a test match.
+Setup makes one bounded initialization attempt. If that attempt fails and the
+host records that this exact run rejected ownership, setup uses the consent
+prompt to run one explicit ownership reset. The saved vendor failure counter
+is displayed only as a diagnostic. The reset erases every fingerprint on the
+reader, removes this driver's stale references for every local user, and
+backs up and removes legacy pairing records for every reader managed by this
+driver because older installs did not associate those files with a physical
+reader. Old unscoped calibration is backed up, accepted only when its embedded
+identity matches this reader, moved into reader-scoped state, and consumed.
+The helper creates a private backup before clean pairing and enrollment
+continue. It is never retried automatically. On
+Omarchy, setup can also configure fingerprint authentication for sudo, polkit,
+and the lock screen while preserving password fallback.
 
 Enrollment is interactive, so the complete setup cannot run unattended. To
 install the driver now and enroll later:
@@ -64,9 +76,9 @@ embedded form, subject to their vendor terms.
 The installer also builds a pinned, signed `libfprint-tod` release because the
 regular Arch `libfprint` package does not expose the required TOD driver ABI.
 
-## Support status
+## Validation status
 
-The initial hardware port has passed:
+An earlier hardware bring-up on the system listed below passed:
 
 - first initialization and reader-specific calibration
 - enrollment and deletion through `fprintd`
@@ -77,7 +89,13 @@ The initial hardware port has passed:
 - sudo, polkit, and the Omarchy lock screen with password fallback
 - the full automated suite under GCC, Clang, ASan/UBSan, and TSan
 
-The commands, software versions, and limits of those checks are recorded in
+Later reinstall testing reproduced an incompatible ownership state: the vendor
+driver incremented `SetOwnershipFailureCount`, but the earlier bridge still
+advertised the device and a capture then crashed inside the vendor DLL. The
+current release candidate refuses normal startup after that exact failure and
+adds an explicit, one-shot ownership reset. The new recovery path and the
+enroll/verify sequence after it have not yet completed hardware revalidation.
+Treat this tree as a prerelease until that result is recorded in
 [Validation](docs/VALIDATION.md).
 
 Only the following combination has received hardware validation:
@@ -96,10 +114,11 @@ use different firmware, protocols, and driver ABIs.
 
 ## Privacy and device state
 
-Calibration, pairing, the secure-channel identity, cryptographic registry
-state, and enrollment metadata are stored under root-only `/var/lib/tudor`.
-Calibration and the secure-channel identity are specific to one physical
-reader. Never copy or publish files from `/var/lib/tudor` or `/var/lib/fprint`,
+Calibration, pairing, the secure-channel identity, and cryptographic registry
+state are stored under root-only `/var/lib/tudor`. Fingerprint templates live
+on the sensor, while fprintd keeps local enrollment references under root-only
+`/var/lib/fprint`. Calibration and the secure-channel identity are specific to
+one physical reader. Never copy or publish files from either state directory,
 fingerprint captures, or unedited verbose logs.
 
 Keep `~/.cache/synatudor-0081` private as well. It contains Lenovo's downloaded
@@ -111,8 +130,21 @@ The normal uninstaller preserves this state so a reinstall can reuse it:
 $ synatudor-uninstall
 ```
 
+Use `synatudor-reset-ownership` while the driver is installed when you need to
+erase the reader's ownership and its on-sensor fingerprints. The command makes
+a private backup below `/var/lib/tudor/migration-backups`, consumes a one-shot
+request before calling the vendor reset, and removes incompatible local pairing
+state and this driver's fprintd metadata for every local user afterward. It
+also backs up and removes all legacy `.tpd` pairing records managed by the
+driver because that older store did not identify the physical reader. Those
+backups contain private reader state and must not be published. Any older
+unscoped calibration is also backed up; an exact match is migrated into this
+reader's directory and every unscoped calibration value is then removed.
+
 Use `synatudor-uninstall --purge` only when you also want to delete every
-fingerprint fprintd exposes for your user and all Tudor device state.
+fingerprint fprintd exposes for your user and all Tudor state, including
+recovery backups. A local purge alone does not reset ownership stored inside
+the reader.
 
 ## How it works
 

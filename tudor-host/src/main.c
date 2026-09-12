@@ -12,6 +12,7 @@
 #include "sandbox.h"
 #include "ipc.h"
 #include "handler.h"
+#include "reset-ownership.h"
 
 static pthread_t usb_thread;
 static atomic_bool usb_thread_exit = false;
@@ -346,6 +347,36 @@ int main() {
     tudor_get_state_fnc = get_state_cb;
     tudor_set_state_fnc = set_state_cb;
     pdata_ipc_sock = sock;
+
+    /* Ownership recovery is an explicit, reader-scoped one-shot operation.
+     * It runs instead of normal initialization and never exposes a READY
+     * host.  The transaction helper consumes the request before calling any
+     * vendor recovery code and records a durable outcome. */
+    enum tudor_host_reset_ownership_outcome reset_outcome =
+        tudor_host_process_reset_ownership(
+            get_state_cb, set_state_cb, tudor_reset_ownership);
+    if(reset_outcome != TUDOR_HOST_RESET_OWNERSHIP_NOT_REQUESTED) {
+        bool success =
+            reset_outcome == TUDOR_HOST_RESET_OWNERSHIP_SUCCEEDED;
+        if(reset_outcome == TUDOR_HOST_RESET_OWNERSHIP_INVALID_REQUEST) {
+            log_error("Reader ownership-maintenance state is invalid; "
+                      "refusing startup");
+        } else if(reset_outcome ==
+                  TUDOR_HOST_RESET_OWNERSHIP_CLEANUP_PENDING) {
+            log_error("Reader ownership maintenance is awaiting privileged "
+                      "local-state cleanup; refusing startup");
+        } else if(success) {
+            log_info("Reader ownership reset completed successfully");
+        } else {
+            log_error("Reader ownership reset failed");
+        }
+
+        /* Vendor recovery may leave worker state stale or disconnect USB.
+         * Process exit is the safe teardown boundary for this one-shot path. */
+        fflush(NULL);
+        _exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+
     if(!tudor_init()) {
         log_error("Couldn't initialize tudor driver!");
         return EXIT_FAILURE;

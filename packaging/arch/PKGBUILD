@@ -3,7 +3,7 @@
 pkgname=synatudor-0081
 _project=synatudor-06cb-0081
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgdesc='Synaptics Tudor TOD driver for the 06cb:0081 fingerprint sensor'
 arch=(x86_64)
 url='https://github.com/theaboutbox/synatudor-06cb-0081'
@@ -13,7 +13,9 @@ url='https://github.com/theaboutbox/synatudor-06cb-0081'
 license=(LGPL-2.1-only unknown)
 depends=(
   bash
+  coreutils
   dbus
+  findutils
   fprintd
   gcc-libs
   glib2
@@ -66,6 +68,7 @@ build() {
 
 check() {
   meson test -C build --print-errorlogs
+  bash "$_project-$pkgver/tests/reset-ownership.sh"
 }
 
 package() {
@@ -75,6 +78,8 @@ package() {
     "$pkgdir/usr/bin/synatudor-setup"
   install -Dm755 "$_project-$pkgver/scripts/reset" \
     "$pkgdir/usr/bin/synatudor-reset"
+  install -Dm755 "$_project-$pkgver/scripts/reset-ownership" \
+    "$pkgdir/usr/bin/synatudor-reset-ownership"
   install -Dm755 "$_project-$pkgver/scripts/uninstall" \
     "$pkgdir/usr/bin/synatudor-uninstall"
   install -Dm755 "$_project-$pkgver/scripts/omarchy-pam" \

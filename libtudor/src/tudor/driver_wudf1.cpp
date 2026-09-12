@@ -16,9 +16,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <pthread.h>
+#include <time.h>
 
 #include <cryptbridge/registry.h>
 #include <cryptbridge/identity.h>
+#include <tudor/state-properties.h>
 
 #define _Analysis_mode_(...)
 #define _Notliteral_
@@ -77,6 +79,89 @@ struct winwdf_driver *tudor_wdf_driver;
 static constexpr uintptr_t SYNA_CAPTURE_THREAD_RVA = 0x1c40c;
 static constexpr useconds_t SYNA_CAPTURE_RECOVERY_DELAY_US = 250000;
 static constexpr ULONG SYNA_CAPTURE_IOCTL = 0x440014;
+static constexpr ULONG SYNA_RESET_OWNERSHIP_IOCTL = 0x442040;
+static constexpr HRESULT SYNA_OWNERSHIP_FAILURE_CAP_STATUS = 0x800710dfu;
+/* Leave enough room for the host to persist a terminal result before the
+ * surrounding fprintd/helper process deadline. */
+static constexpr unsigned int SYNA_RESET_OWNERSHIP_WAIT_MS = 15000;
+
+/* A restored counter describes an earlier attempt and must not block this
+ * one.  Only an exact VT_UINT write made after OnPrepareHardware starts is
+ * evidence that the current ownership handshake failed.  Latch nonzero
+ * writes so a later zero cannot hide a failure before the init thread checks
+ * it.  uint64_t leaves every possible 32-bit property value available. */
+static constexpr uint64_t OWNERSHIP_FAILURE_NOT_WRITTEN = UINT64_MAX;
+static std::atomic<uint64_t> ownership_failure_write{
+    OWNERSHIP_FAILURE_NOT_WRITTEN
+};
+
+static void ownership_failure_reset(void) {
+    ownership_failure_write.store(OWNERSHIP_FAILURE_NOT_WRITTEN,
+                                  std::memory_order_release);
+}
+
+static void ownership_failure_observe(const std::string& name,
+                                      const PROPVARIANT *value) {
+    if(name != "SetOwnershipFailureCount" || !value ||
+       value->vt != VT_UINT)
+        return;
+
+    const uint64_t count = value->uintVal;
+    if(count != 0) {
+        ownership_failure_write.store(count, std::memory_order_release);
+        return;
+    }
+
+    /* Record an explicit zero only while no failure has been observed. */
+    uint64_t expected = OWNERSHIP_FAILURE_NOT_WRITTEN;
+    ownership_failure_write.compare_exchange_strong(
+        expected, 0, std::memory_order_release, std::memory_order_relaxed);
+}
+
+static uint64_t ownership_failure_observed(void) {
+    return ownership_failure_write.load(std::memory_order_acquire);
+}
+
+static void ownership_failure_store_marker(bool detected) {
+    if(!tudor_set_state_fnc) return;
+
+    const uint8_t value = detected ? 1 : 0;
+    tudor_set_state_fnc(TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED,
+                        TUDOR_STATE_VALUE_BOOL, &value, sizeof(value));
+}
+
+static void ownership_failure_start_init(bool ownership_reset_mode) {
+    /* Clear a stale result at the earliest normal initialization boundary,
+     * before an unrelated DLL or hardware failure can end this run. */
+    if(!ownership_reset_mode) ownership_failure_store_marker(false);
+}
+
+static void ownership_failure_record_prepare_status(
+    HRESULT status, bool ownership_reset_mode) {
+    if(!ownership_reset_mode &&
+       status == SYNA_OWNERSHIP_FAILURE_CAP_STATUS)
+        ownership_failure_store_marker(true);
+}
+
+static bool ownership_failure_should_reject(bool ownership_reset_mode) {
+    if(ownership_reset_mode) return false;
+
+    const uint64_t count = ownership_failure_observed();
+    return count != OWNERSHIP_FAILURE_NOT_WRITTEN && count != 0;
+}
+
+static bool ownership_failure_reject_init(const char *stage,
+                                          bool ownership_reset_mode) {
+    if(!ownership_failure_should_reject(ownership_reset_mode)) return false;
+
+    const uint64_t count = ownership_failure_observed();
+    ownership_failure_store_marker(true);
+    log_error("Vendor ownership handshake failed during %s "
+              "(SetOwnershipFailureCount=%llu); refusing to expose an "
+              "unsafe adapter",
+              stage, (unsigned long long) count);
+    return true;
+}
 
 /* MyRequest is defined below.  This helper atomically validates and claims a
  * stalled request under the lifecycle lock, then invokes vendor code after
@@ -868,6 +953,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             std::cout << "=====================================\n"
                       << "SetNamedValue " << str_u8 << '=' << pv->vt << '\n'
                       << "=====================================" << std::endl;
+            ownership_failure_observe(str_u8, pv);
             switch(pv->vt) {
                 case VT_BOOL: {
                     const uint8_t value = pv->boolVal != 0;
@@ -1531,6 +1617,133 @@ int tudor_internal_test_capture_recovery(void) {
     if(recovered_twice) return 5;
     if(callback_calls != 1) return 6;
     return 0;
+}
+
+extern "C" __attribute__((visibility("hidden")))
+int tudor_internal_test_ownership_failure_guard(void) {
+    PROPVARIANT value = {};
+
+    ownership_failure_reset();
+    if(ownership_failure_observed() != OWNERSHIP_FAILURE_NOT_WRITTEN)
+        return 1;
+
+    value.vt = VT_UINT;
+    value.uintVal = 4;
+    ownership_failure_observe("OtherCounter", &value);
+    if(ownership_failure_observed() != OWNERSHIP_FAILURE_NOT_WRITTEN)
+        return 2;
+
+    value.vt = VT_BOOL;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+    if(ownership_failure_observed() != OWNERSHIP_FAILURE_NOT_WRITTEN)
+        return 3;
+
+    value.vt = VT_UINT;
+    value.uintVal = 0;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+    if(ownership_failure_observed() != 0) return 4;
+
+    value.uintVal = 3;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+    if(ownership_failure_observed() != 3) return 5;
+
+    value.uintVal = 0;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+    if(ownership_failure_observed() != 3) return 6;
+
+    if(!ownership_failure_should_reject(false)) return 7;
+    if(ownership_failure_should_reject(true)) return 8;
+
+    ownership_failure_reset();
+    if(ownership_failure_observed() != OWNERSHIP_FAILURE_NOT_WRITTEN)
+        return 9;
+    return 0;
+}
+
+static unsigned int ownership_marker_test_writes;
+static bool ownership_marker_test_valid;
+static uint8_t ownership_marker_test_values[4];
+static uint64_t ownership_marker_test_observations[4];
+
+static void ownership_marker_test_store(
+    const char *name, enum tudor_state_value_type type,
+    const void *data, size_t data_size) {
+    if(ownership_marker_test_writes >= 4 ||
+       strcmp(name, TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED) != 0 ||
+       type != TUDOR_STATE_VALUE_BOOL || data_size != sizeof(uint8_t) ||
+       !data || *(const uint8_t*) data > 1) {
+        ownership_marker_test_valid = false;
+        return;
+    }
+
+    const unsigned int index = ownership_marker_test_writes++;
+    ownership_marker_test_values[index] = *(const uint8_t*) data;
+    ownership_marker_test_observations[index] =
+        ownership_failure_observed();
+}
+
+extern "C" __attribute__((visibility("hidden")))
+int tudor_internal_test_ownership_failure_marker(void) {
+    auto previous_state_callback = tudor_set_state_fnc;
+    tudor_set_state_fnc = ownership_marker_test_store;
+    ownership_marker_test_writes = 0;
+    ownership_marker_test_valid = true;
+
+    PROPVARIANT value = {};
+    value.vt = VT_UINT;
+    value.uintVal = 3;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+
+    int result = 0;
+    ownership_failure_start_init(false);
+    if(!ownership_marker_test_valid || ownership_marker_test_writes != 1 ||
+       ownership_marker_test_values[0] != 0)
+        result = 1;
+    else if(ownership_marker_test_observations[0] != 3)
+        result = 2;
+    ownership_failure_reset();
+    if(!result && ownership_failure_observed() !=
+                  OWNERSHIP_FAILURE_NOT_WRITTEN)
+        result = 3;
+
+    value.uintVal = 2;
+    ownership_failure_observe("SetOwnershipFailureCount", &value);
+    if(!result && !ownership_failure_reject_init("marker test", false))
+        result = 4;
+    else if(!result &&
+            (ownership_marker_test_writes != 2 ||
+             ownership_marker_test_values[1] != 1))
+        result = 5;
+
+    unsigned int writes_before_maintenance = ownership_marker_test_writes;
+    if(!result && ownership_failure_reject_init("marker test", true))
+        result = 6;
+    ownership_failure_start_init(true);
+    if(!result &&
+       ownership_marker_test_writes != writes_before_maintenance)
+        result = 7;
+
+    ownership_failure_record_prepare_status((HRESULT) 0x80004005u, false);
+    if(!result &&
+       ownership_marker_test_writes != writes_before_maintenance)
+        result = 8;
+
+    ownership_failure_record_prepare_status(
+        SYNA_OWNERSHIP_FAILURE_CAP_STATUS, true);
+    if(!result &&
+       ownership_marker_test_writes != writes_before_maintenance)
+        result = 9;
+
+    ownership_failure_record_prepare_status(
+        SYNA_OWNERSHIP_FAILURE_CAP_STATUS, false);
+    if(!result &&
+       (ownership_marker_test_writes != writes_before_maintenance + 1 ||
+        ownership_marker_test_values[writes_before_maintenance] != 1))
+        result = 10;
+
+    tudor_set_state_fnc = previous_state_callback;
+    ownership_failure_reset();
+    return result;
 }
 #endif
 
@@ -2357,6 +2570,13 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
         printf("[WUDF1-DEVCTRL] -> code 0x%x (size 0x%lx)\r\n", code, in_size);
     }
 
+    /* A very late asynchronous ownership failure can arrive after initial
+     * adapter publication. Guard again before entering the vendor's capture
+     * path, which is where the mismatched-state crash was observed. */
+    if(code == SYNA_CAPTURE_IOCTL &&
+       ownership_failure_reject_init("capture dispatch", false))
+        return STATUS_INTERNAL_ERROR;
+
     if (myQueue && myQueue->ioctl) {
         MyRequest *wudf_req = new MyRequest(WdfRequestTypeOther, code,
                                              out_buf, out_size,
@@ -2369,6 +2589,14 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
 	TRACE_PRINTF("about to ioctl: 0x%x\r\n", code);
         struct winmodule *caller_module = winmodule_get_cur();
         winmodule_set_cur(&tudor_driver_dll->module);
+        if(code == SYNA_CAPTURE_IOCTL &&
+           ownership_failure_reject_init("capture dispatch", false)) {
+            capture_request_finished(wudf_req);
+            winmodule_set_cur(caller_module);
+            *req = nullptr;
+            wudf_req->release_native();
+            return STATUS_INTERNAL_ERROR;
+        }
         myQueue->ioctl->OnDeviceIoControl(myQueue, wudf_req, code,
                                            0, 0);
         winmodule_set_cur(caller_module);
@@ -2427,6 +2655,246 @@ bool tudor_get_sensor_database_size(uint64_t *record_count) {
     return true;
 }
 
+typedef void ownership_reset_dispatch_fnc(MyRequest *request, void *context);
+
+struct ownership_reset_dispatch_context {
+    MyRequest *request;
+    struct winmodule *module;
+    ownership_reset_dispatch_fnc *dispatch;
+    void *dispatch_context;
+    std::atomic<bool> call_returned;
+
+    ownership_reset_dispatch_context(
+        MyRequest *request, struct winmodule *module,
+        ownership_reset_dispatch_fnc *dispatch, void *dispatch_context)
+        : request(request), module(module), dispatch(dispatch),
+          dispatch_context(dispatch_context), call_returned(false) {}
+};
+
+static void *ownership_reset_dispatch_main(void *opaque) {
+    auto *context = static_cast<ownership_reset_dispatch_context*>(opaque);
+
+    /* Raw pthreads do not pass through the Win32 CreateThread shim.  Set the
+     * two pieces of per-thread emulation state that shim establishes before
+     * entering code from the Windows driver. */
+    winmodule_set_cur(context->module);
+    win_init_tib();
+    context->dispatch(context->request, context->dispatch_context);
+    context->call_returned.store(true, std::memory_order_release);
+    return nullptr;
+}
+
+static bool ownership_reset_dispatch_done(
+    const ownership_reset_dispatch_context *context) {
+    return context->call_returned.load(std::memory_order_acquire) &&
+           context->request->complete.load(std::memory_order_acquire);
+}
+
+static uint64_t monotonic_milliseconds(void) {
+    struct timespec now;
+    cant_fail(clock_gettime(CLOCK_MONOTONIC, &now));
+    return (uint64_t) now.tv_sec * 1000 +
+           (uint64_t) now.tv_nsec / 1000000;
+}
+
+static bool ownership_reset_dispatch_wait(
+    const ownership_reset_dispatch_context *context,
+    unsigned int timeout_ms) {
+    uint64_t deadline = monotonic_milliseconds() + timeout_ms;
+
+    for(;;) {
+        if(ownership_reset_dispatch_done(context)) return true;
+
+        uint64_t now = monotonic_milliseconds();
+        if(now >= deadline) return ownership_reset_dispatch_done(context);
+
+        uint64_t remaining_ms = deadline - now;
+        usleep((useconds_t) (remaining_ms > 1 ? 1000 :
+                            remaining_ms * 1000));
+    }
+}
+
+static void ownership_reset_vendor_dispatch(MyRequest *request, void *) {
+    myQueue->ioctl->OnDeviceIoControl(myQueue, request,
+                                      SYNA_RESET_OWNERSHIP_IOCTL, 0, 0);
+}
+
+static bool tudor_dispatch_reset_ownership(void) {
+    if(!myQueue || !myQueue->ioctl) {
+        log_error("WUDF1 IOCTL queue is not initialized for ownership reset");
+        return false;
+    }
+
+    /* The exact vendor unpairing callback can block synchronously.  Dispatch
+     * it from an initialized Windows-emulation thread so this function can
+     * enforce its deadline while the USB event thread continues to run. */
+    MyRequest *req = new MyRequest(WdfRequestTypeOther,
+                                   SYNA_RESET_OWNERSHIP_IOCTL,
+                                   nullptr, 0, nullptr, 0, nullptr);
+    auto *dispatch = new ownership_reset_dispatch_context(
+        req, &tudor_driver_dll->module,
+        ownership_reset_vendor_dispatch, nullptr);
+    pthread_t dispatch_thread;
+    int thread_error = pthread_create(&dispatch_thread, nullptr,
+                                      ownership_reset_dispatch_main,
+                                      dispatch);
+    if(thread_error != 0) {
+        log_error("Could not start vendor ownership-reset dispatch: %s",
+                  strerror(thread_error));
+        delete dispatch;
+        req->release_native();
+        return false;
+    }
+
+    bool completed = ownership_reset_dispatch_wait(
+        dispatch, SYNA_RESET_OWNERSHIP_WAIT_MS);
+    bool call_returned =
+        dispatch->call_returned.load(std::memory_order_acquire);
+    if(call_returned) {
+        cant_fail_ret(pthread_join(dispatch_thread, nullptr));
+    } else {
+        /* The host exits immediately after a maintenance result.  If vendor
+         * code is still running, detach it and retain both heap objects until
+         * that process boundary rather than racing a late access. */
+        int detach_error = pthread_detach(dispatch_thread);
+        if(detach_error != 0)
+            log_warn("Could not detach timed-out ownership-reset dispatch: %s",
+                     strerror(detach_error));
+    }
+
+    if(!completed) {
+        log_error("Vendor ownership-reset dispatch and completion did not "
+                  "both finish within %u ms; outcome is indeterminate",
+                  SYNA_RESET_OWNERSHIP_WAIT_MS);
+        if(call_returned) delete dispatch;
+        /* Keep the request's sole native reference: completion can still
+         * arrive from a vendor worker after OnDeviceIoControl returns. */
+        return false;
+    }
+
+    HRESULT status = req->completionStatus.load(std::memory_order_acquire);
+    req->release_native();
+    delete dispatch;
+    if(status != ERROR_SUCCESS) {
+        log_error("Vendor ownership-reset request failed [status 0x%x]",
+                  (unsigned int) status);
+        return false;
+    }
+
+    log_info("Vendor ownership-reset request completed successfully");
+    return true;
+}
+
+#ifdef TUDOR_RECOVERY_TEST_HOOK
+struct ownership_reset_dispatch_test_context {
+    struct winmodule *expected_module;
+    pthread_t caller_thread;
+    std::atomic<bool> invoked{false};
+    std::atomic<bool> module_valid{false};
+    std::atomic<bool> separate_thread{false};
+    std::atomic<bool> release{false};
+    bool block_after_completion;
+
+    ownership_reset_dispatch_test_context(struct winmodule *module,
+                                          bool block)
+        : expected_module(module), caller_thread(pthread_self()),
+          block_after_completion(block) {}
+};
+
+static void ownership_reset_test_dispatch(MyRequest *request, void *opaque) {
+    auto *test =
+        static_cast<ownership_reset_dispatch_test_context*>(opaque);
+    test->module_valid.store(
+        winmodule_get_cur() == test->expected_module,
+        std::memory_order_relaxed);
+    test->separate_thread.store(
+        !pthread_equal(pthread_self(), test->caller_thread),
+        std::memory_order_relaxed);
+    request->Complete(ERROR_SUCCESS);
+    test->invoked.store(true, std::memory_order_release);
+
+    while(test->block_after_completion &&
+          !test->release.load(std::memory_order_acquire))
+        usleep(1000);
+}
+
+static bool ownership_reset_test_wait_invoked(
+    const ownership_reset_dispatch_test_context *test) {
+    uint64_t deadline = monotonic_milliseconds() + 500;
+    while(!test->invoked.load(std::memory_order_acquire)) {
+        if(monotonic_milliseconds() >= deadline) return false;
+        usleep(1000);
+    }
+    return true;
+}
+
+extern "C" __attribute__((visibility("hidden")))
+int tudor_internal_test_ownership_reset_dispatch(void) {
+    /* Completion alone is insufficient: model a synchronous vendor callback
+     * which completes its request and then stalls before returning. */
+    MyRequest *blocked_request = new MyRequest(
+        WdfRequestTypeOther, SYNA_RESET_OWNERSHIP_IOCTL,
+        nullptr, 0, nullptr, 0, nullptr);
+    ownership_reset_dispatch_test_context blocked_test(&ntdll_module, true);
+    ownership_reset_dispatch_context blocked_dispatch(
+        blocked_request, &ntdll_module,
+        ownership_reset_test_dispatch, &blocked_test);
+    pthread_t blocked_thread;
+    int error = pthread_create(&blocked_thread, nullptr,
+                               ownership_reset_dispatch_main,
+                               &blocked_dispatch);
+    if(error != 0) {
+        blocked_request->release_native();
+        return 1;
+    }
+
+    bool invoked = ownership_reset_test_wait_invoked(&blocked_test);
+    bool completed_before_return = invoked &&
+        ownership_reset_dispatch_wait(&blocked_dispatch, 20);
+    blocked_test.release.store(true, std::memory_order_release);
+    cant_fail_ret(pthread_join(blocked_thread, nullptr));
+    bool blocked_done = ownership_reset_dispatch_done(&blocked_dispatch);
+    bool blocked_module_valid =
+        blocked_test.module_valid.load(std::memory_order_relaxed);
+    bool blocked_separate_thread =
+        blocked_test.separate_thread.load(std::memory_order_relaxed);
+    blocked_request->release_native();
+
+    if(!invoked) return 2;
+    if(completed_before_return) return 3;
+    if(!blocked_done) return 4;
+    if(!blocked_module_valid) return 5;
+    if(!blocked_separate_thread) return 6;
+
+    /* The ordinary path must observe both completion and callback return. */
+    MyRequest *request = new MyRequest(
+        WdfRequestTypeOther, SYNA_RESET_OWNERSHIP_IOCTL,
+        nullptr, 0, nullptr, 0, nullptr);
+    ownership_reset_dispatch_test_context test(&ntdll_module, false);
+    ownership_reset_dispatch_context dispatch(
+        request, &ntdll_module, ownership_reset_test_dispatch, &test);
+    pthread_t thread;
+    error = pthread_create(&thread, nullptr,
+                           ownership_reset_dispatch_main, &dispatch);
+    if(error != 0) {
+        request->release_native();
+        return 7;
+    }
+
+    bool completed = ownership_reset_dispatch_wait(&dispatch, 500);
+    cant_fail_ret(pthread_join(thread, nullptr));
+    bool module_valid = test.module_valid.load(std::memory_order_relaxed);
+    bool separate_thread =
+        test.separate_thread.load(std::memory_order_relaxed);
+    request->release_native();
+
+    if(!completed) return 8;
+    if(!module_valid) return 9;
+    if(!separate_thread) return 10;
+    return 0;
+}
+#endif
+
 void print_vtable(void* obj, int N) {
     void** vtable = *reinterpret_cast<void***>(obj);
     for (int i = 0; i < N; i++) {
@@ -2436,7 +2904,9 @@ void print_vtable(void* obj, int N) {
 }
 
 
-bool tudor_init() {
+static bool tudor_init_internal(bool ownership_reset_mode) {
+
+    ownership_failure_start_init(ownership_reset_mode);
 
     /* The sandbox has no writable filesystem. Install the per-device state
      * backends before the vendor can create its pairing identity or acquire
@@ -2547,20 +3017,42 @@ bool tudor_init() {
     printf("about to prepare hw\r\n");
     print_vtable(myDevice->pnphwcb, 5); 
 
+    ownership_failure_reset();
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     if(rc != 0) {
+        ownership_failure_record_prepare_status(rc, ownership_reset_mode);
+        (void) ownership_failure_reject_init(
+            "failing OnPrepareHardware", ownership_reset_mode);
         log_error("Vendor OnPrepareHardware failed: 0x%x",
                   (unsigned int) rc);
         return false;
     }
     usleep(1000000);
+    if(ownership_failure_reject_init("OnPrepareHardware",
+                                     ownership_reset_mode))
+        return false;
+
     printf("about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     printf("OnD0Entry rc = %lx\r\n", rc);
-    usleep(5000000);
     fflush(stdout);
+    if(rc != 0) {
+        (void) ownership_failure_reject_init(
+            "failing OnD0Entry", ownership_reset_mode);
+        log_error("Vendor OnD0Entry failed: 0x%x", (unsigned int) rc);
+        return false;
+    }
+
+    /* Reset before the normal post-D0 delay: a mismatched pairing identity
+     * otherwise causes the vendor's automatic recovery loop to start about
+     * one second after D0 entry.  This explicit maintenance path never
+     * queries or exposes the WinBio adapters. */
+    if(ownership_reset_mode) return tudor_dispatch_reset_ownership();
+
+    usleep(5000000);
+    if(ownership_failure_reject_init("OnD0Entry", false)) return false;
 
 
     //Query WINBIO interfaces
@@ -2647,11 +3139,29 @@ bool tudor_init() {
              storage_id[8], storage_id[9], storage_id[10], storage_id[11],
              storage_id[12], storage_id[13], storage_id[14], storage_id[15]);
 
+    if(ownership_failure_reject_init("adapter publication", false))
+        return false;
     if(!capture_relay_start()) return false;
 
     printf("tudor_init finish!\n");
     return true;
 
+}
+
+bool tudor_init() {
+    return tudor_init_internal(false);
+}
+
+bool tudor_reset_ownership(void) {
+    static std::atomic<bool> started{false};
+    bool expected = false;
+    if(!started.compare_exchange_strong(expected, true,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_acquire)) {
+        log_error("Ownership reset was already attempted in this process");
+        return false;
+    }
+    return tudor_init_internal(true);
 }
 
 bool tudor_shutdown() {
@@ -2806,6 +3316,8 @@ static void tudor_unwind_failed_open(struct tudor_device *device,
 
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state)
 {
+    if(ownership_failure_reject_init("pipeline open", false)) return false;
+
     tudor_open_progress progress;
     device->state = state ? *state : (struct tudor_device_state) {0};
     device->enrolling = false;
@@ -2940,6 +3452,11 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     if(sensor_status != WINBIO_SENSOR_READY) {
         log_error("Sensor didn't return ready status! [status 0x%x]",
                   sensor_status);
+        tudor_unwind_failed_open(device, progress);
+        return false;
+    }
+
+    if(ownership_failure_reject_init("pipeline publication", false)) {
         tudor_unwind_failed_open(device, progress);
         return false;
     }

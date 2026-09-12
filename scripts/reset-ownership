@@ -1,0 +1,979 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+
+readonly TUDOR_STATE_ROOT=/var/lib/tudor
+readonly FPRINT_STATE_ROOT=/var/lib/fprint
+readonly RESET_RESULT_NONE=0
+readonly RESET_RESULT_IN_PROGRESS=1
+readonly RESET_RESULT_SUCCEEDED=2
+readonly RESET_RESULT_FAILED=3
+SERVICE_MASK_OWNER_FILE=/run/synatudor-0081-runtime-masks
+readonly -a FINGERPRINT_UNITS=(
+  fprintd.service
+  tudor-host-launcher.service
+)
+
+sensor_serial=
+sensor_state_id=
+sensor_calibration_id=
+device_state_dir=
+request_file=
+result_file=
+reset_result=
+target_user=
+trigger_pid=
+recovery_armed=0
+reset_completed=0
+cleanup_completed=0
+services_stopped=0
+maintenance_lock_fd=
+activation_inhibited=0
+service_management_armed=0
+declare -a temporary_runtime_masks=()
+declare -a legacy_pairing_files=()
+declare -a legacy_calibration_files=()
+
+acquire_maintenance_lock() {
+  local lock_file=/run/synatudor-0081-maintenance.lock
+
+  exec {maintenance_lock_fd}>"$lock_file"
+  chown root:root "$lock_file"
+  chmod 0600 "$lock_file"
+  flock --exclusive --nonblock "$maintenance_lock_fd" ||
+    die 'another Synaptics fingerprint maintenance operation is already running'
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: synatudor-reset-ownership [--yes]
+
+Resets ownership of exactly one connected Synaptics 06cb:0081 fingerprint
+reader. This permanently erases every fingerprint stored on that reader,
+including Windows Hello enrollments, and requires Linux fingerprints to be
+enrolled again. Matching Linux fingerprint references for every local user
+are also removed. Legacy pairing records for every reader managed by this
+driver are cleared because older installs did not record which reader owned
+each file. Old unscoped calibration is migrated only when it identifies this
+reader, then removed. Reader state is backed up privately before the reset.
+
+Run this command as the regular desktop user. It asks for confirmation before
+using sudo to perform the protected state and service operations.
+
+  --yes      Accept the destructive reset without an interactive prompt.
+  -h, --help Show this help text.
+EOF
+}
+
+find_sensor() {
+  local usb_devices=${1:-/sys/bus/usb/devices}
+  local vendor product
+  local -a sensors=()
+
+  for vendor in "$usb_devices"/*/idVendor; do
+    [[ -r $vendor ]] || continue
+    [[ $(<"$vendor") == 06cb ]] || continue
+    product=${vendor%/idVendor}/idProduct
+    [[ -r $product && $(<"$product") == 0081 ]] || continue
+    sensors+=("${vendor%/idVendor}")
+  done
+
+  (( ${#sensors[@]} == 1 )) ||
+    die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+  printf '%s\n' "${sensors[0]}"
+}
+
+derive_sensor_identity() {
+  local sensor_path=$1 swapped='' i
+
+  [[ -r $sensor_path/serial ]] ||
+    die 'the fingerprint reader has no readable USB serial; refusing to guess its saved-state directory'
+  sensor_serial=$(<"$sensor_path/serial")
+  [[ $sensor_serial =~ ^[0-9A-Fa-f]{12}$ ]] ||
+    die 'the fingerprint reader has an unsupported USB serial format; refusing to guess its saved-state directory'
+
+  # This is the exact state ID constructed by make_state_id() in
+  # libfprint-tod/src/open.c for the supported reader.
+  sensor_state_id=06cb-0081-$sensor_serial
+
+  # The 0081 calibration blob carries this reader ID at offset 32 with the
+  # nibbles in each USB-serial byte exchanged.
+  for (( i=0; i<${#sensor_serial}; i+=2 )); do
+    swapped+=${sensor_serial:i+1:1}${sensor_serial:i:1}
+  done
+  sensor_calibration_id=${swapped,,}
+  unset swapped
+}
+
+confirm_reset() {
+  local answer expected="RESET $sensor_state_id"
+
+  [[ -t 0 && -t 1 ]] ||
+    die 'ownership reset needs an interactive terminal unless --yes is supplied'
+  cat <<EOF
+
+WARNING: this will reset ownership of Synaptics reader $sensor_state_id.
+
+It will permanently erase every fingerprint stored on the reader, including
+Windows Hello fingerprints. Existing Linux fingerprint references for every
+local user of this driver will also be removed. You must run synatudor-setup
+and enroll again when the reset finishes. Legacy pairing records for every
+reader managed by this driver will be backed up and removed. Old unscoped
+calibration will also be backed up, migrated only if it matches this reader,
+and removed from its legacy location.
+
+EOF
+  read -r -p "Type '$expected' to continue: " answer
+  [[ $answer == "$expected" ]] || die 'ownership reset canceled'
+}
+
+assert_secure_dir() {
+  local path=$1 mode mode_num owner
+  [[ -d $path && ! -L $path ]] || die "$path is not a real directory"
+  owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+  [[ $owner == 0 ]] || die "$path is not owned by root"
+  mode=$(stat -Lc '%a' -- "$path") || die "could not inspect $path"
+  mode_num=$((8#$mode))
+  (( (mode_num & 0077) == 0 )) ||
+    die "$path is accessible by group or other"
+}
+
+assert_secure_tree() {
+  local path=$1 bad
+  assert_secure_dir "$path"
+
+  bad=$(find -P "$path" -xdev \
+    \( \( ! -type d ! -type f \) -o ! -user root -o -perm /077 \) \
+    -print -quit) || die "could not inspect $path"
+  [[ -z $bad ]] ||
+    die "$path contains a link, special file, non-root-owned entry, or non-private entry"
+}
+
+assert_status_file() {
+  local path=$1 mode owner group size
+  [[ -f $path && ! -L $path ]] || die "$path is not a regular file"
+  owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+  group=$(stat -Lc '%g' -- "$path") || die "could not inspect $path"
+  mode=$(stat -Lc '%a' -- "$path") || die "could not inspect $path"
+  size=$(stat -Lc '%s' -- "$path") || die "could not inspect $path"
+  [[ $owner == 0 && $group == 0 && $mode == 600 && $size == 2 ]] ||
+    die "$path does not have the required root:root, mode 0600 status-file format"
+}
+
+atomic_write_status() {
+  local path=$1 value=$2 dir base tmp
+  dir=${path%/*}
+  base=${path##*/}
+  tmp=$(mktemp "$dir/.$base.tmp.XXXXXX") ||
+    die "could not create a temporary status file under $dir"
+  if ! printf '%s\n' "$value" >"$tmp"; then
+    rm -f -- "$tmp" || true
+    die "could not write temporary status file for $path"
+  fi
+  if ! chown root:root "$tmp"; then
+    rm -f -- "$tmp" || true
+    die "could not set ownership on temporary status file for $path"
+  fi
+  if ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp" || true
+    die "could not protect temporary status file for $path"
+  fi
+  if ! mv -fT -- "$tmp" "$path"; then
+    rm -f -- "$tmp" || true
+    die "could not install status file $path"
+  fi
+  sync -f -- "$dir" ||
+    die "could not synchronize status file $path"
+  assert_status_file "$path"
+  [[ $(<"$path") == "$value" ]] ||
+    die "status-file read-back failed for $path"
+}
+
+legacy_pairing_name_is_valid() {
+  local path=$1 base name
+  base=${path##*/}
+  name=${base%.tpd}
+  [[ $base == "$name.tpd" && $name =~ ^[[:alnum:]]+$ &&
+     ${#name} -le 128 ]]
+}
+
+assert_legacy_pairing_file() {
+  local path=$1 mode owner group size
+  legacy_pairing_name_is_valid "$path" ||
+    die "$path has an invalid legacy pairing-state name"
+  [[ -f $path && ! -L $path ]] || die "$path is not a regular file"
+  owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+  group=$(stat -Lc '%g' -- "$path") || die "could not inspect $path"
+  mode=$(stat -Lc '%a' -- "$path") || die "could not inspect $path"
+  size=$(stat -Lc '%s' -- "$path") || die "could not inspect $path"
+  [[ $owner == 0 && $group == 0 && $mode == 600 && $size -le 16384 ]] ||
+    die "$path does not have the required private legacy pairing-state format"
+}
+
+assert_legacy_calibration_file() {
+  local path=$1 mode owner group size
+  [[ -f $path && ! -L $path ]] || die "$path is not a regular file"
+  owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+  group=$(stat -Lc '%g' -- "$path") || die "could not inspect $path"
+  mode=$(stat -Lc '%a' -- "$path") || die "could not inspect $path"
+  size=$(stat -Lc '%s' -- "$path") || die "could not inspect $path"
+  [[ $owner == 0 && $group == 0 && $mode == 600 && $size -le 65536 ]] ||
+    die "$path does not have the required private legacy calibration format"
+}
+
+find_legacy_calibration_files() {
+  local root=$1 extension path
+  legacy_calibration_files=()
+  for extension in blob uint bool; do
+    path=$root/CalibrationData.$extension
+    [[ -e $path || -L $path ]] || continue
+    assert_legacy_calibration_file "$path"
+    legacy_calibration_files+=("$path")
+  done
+}
+
+find_legacy_pairing_files() {
+  local root=$1 path nullglob_was_set=0 dotglob_was_set=0
+  local -a candidates
+  legacy_pairing_files=()
+
+  if shopt -q nullglob; then nullglob_was_set=1; fi
+  if shopt -q dotglob; then dotglob_was_set=1; fi
+  shopt -s nullglob dotglob
+  candidates=("$root"/*.tpd)
+  (( nullglob_was_set )) || shopt -u nullglob
+  (( dotglob_was_set )) || shopt -u dotglob
+
+  for path in "${candidates[@]}"; do
+    assert_legacy_pairing_file "$path"
+    legacy_pairing_files+=("$path")
+  done
+}
+
+read_reset_result() {
+  local value
+  reset_result=
+  [[ -e $result_file ]] || return 1
+  assert_status_file "$result_file"
+  value=$(<"$result_file")
+  case $value in
+    "$RESET_RESULT_NONE"|"$RESET_RESULT_IN_PROGRESS"|\
+    "$RESET_RESULT_SUCCEEDED"|"$RESET_RESULT_FAILED")
+      reset_result=$value
+      ;;
+    *) die 'the ownership-reset result contains an unknown value' ;;
+  esac
+}
+
+reset_request_is_disabled() {
+  local value
+  # A missing request is disabled. This also makes a durable SUCCEEDED result
+  # resumable after a crash that removed the request marker first.
+  [[ -e $request_file || -L $request_file ]] || return 0
+  assert_status_file "$request_file"
+  value=$(<"$request_file")
+  [[ $value == 0 ]]
+}
+
+reset_result_blocks_startup() {
+  read_reset_result || return 1
+  [[ $reset_result != "$RESET_RESULT_NONE" ]]
+}
+
+calibration_is_valid() {
+  local path=$1 expected_id=$2 size stored_id
+  [[ -f $path && ! -L $path ]] || return 1
+  size=$(stat -Lc '%s' -- "$path") || return 1
+  [[ $size == 40780 ]] || return 1
+  stored_id=$(od -An -v -j 32 -N 6 -t x1 -- "$path" 2>/dev/null |
+    tr -d '[:space:]') || return 1
+  [[ ${stored_id,,} == "$expected_id" ]]
+}
+
+make_private_backup() {
+  local migrations timestamp backup_dir suffix=0
+
+  migrations=$TUDOR_STATE_ROOT/migration-backups
+  if [[ -e $migrations ]]; then
+    assert_secure_dir "$migrations"
+  else
+    install -d -o root -g root -m 0700 -- "$migrations"
+  fi
+
+  timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+  backup_dir=$migrations/$sensor_state_id-$timestamp
+  while ! mkdir -m 0700 -- "$backup_dir" 2>/dev/null; do
+    ((++suffix))
+    (( suffix <= 100 )) || die 'could not allocate a unique migration backup directory'
+    backup_dir=$migrations/$sensor_state_id-$timestamp-$suffix
+  done
+  chown root:root "$backup_dir"
+
+  if [[ -e $device_state_dir ]]; then
+    assert_secure_tree "$device_state_dir"
+    install -d -o root -g root -m 0700 -- "$backup_dir/device-state"
+    cp -a --no-dereference -- "$device_state_dir/." "$backup_dir/device-state/"
+  fi
+
+  backup_libfprint_metadata "$FPRINT_STATE_ROOT" \
+    "$backup_dir/fprint-metadata"
+  backup_legacy_pairing_data "$TUDOR_STATE_ROOT" \
+    "$backup_dir/legacy-pairing-data"
+  backup_legacy_calibration_data "$TUDOR_STATE_ROOT" \
+    "$backup_dir/legacy-calibration-data"
+
+  # The backup must reach stable storage before the sensor is changed.
+  sync -f -- "$backup_dir" ||
+    die "could not synchronize private backup $backup_dir"
+
+  printf 'Backed up the current reader state at %s\n' "$backup_dir"
+}
+
+backup_libfprint_metadata() {
+  local root=$1 destination=$2 user_dir user_name driver_dir user_backup
+  local found=0
+
+  [[ -e $root || -L $root ]] || return 0
+  assert_secure_dir "$root"
+  for user_dir in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [[ -e $user_dir || -L $user_dir ]] || continue
+    assert_secure_dir "$user_dir"
+    user_name=${user_dir##*/}
+    driver_dir=$user_dir/syna_tudor_relink
+    [[ -e $driver_dir || -L $driver_dir ]] || continue
+    assert_secure_tree "$driver_dir"
+
+    if (( ! found )); then
+      install -d -m 0700 -- "$destination"
+      found=1
+    fi
+    user_backup=$destination/$user_name/syna_tudor_relink
+    install -d -m 0700 -- "$user_backup"
+    cp -a --no-dereference -- "$driver_dir/." "$user_backup/"
+  done
+}
+
+backup_legacy_pairing_data() {
+  local root=$1 destination=$2 path
+
+  find_legacy_pairing_files "$root"
+  (( ${#legacy_pairing_files[@]} )) || return 0
+  install -d -m 0700 -- "$destination"
+  for path in "${legacy_pairing_files[@]}"; do
+    cp -a --no-dereference -- "$path" "$destination/"
+  done
+}
+
+backup_legacy_calibration_data() {
+  local root=$1 destination=$2 path
+
+  find_legacy_calibration_files "$root"
+  (( ${#legacy_calibration_files[@]} )) || return 0
+  install -d -m 0700 -- "$destination"
+  for path in "${legacy_calibration_files[@]}"; do
+    cp -a --no-dereference -- "$path" "$destination/"
+  done
+}
+
+clear_legacy_pairing_data() {
+  local root=$1 path
+
+  find_legacy_pairing_files "$root"
+  for path in "${legacy_pairing_files[@]}"; do
+    rm -f -- "$path"
+  done
+}
+
+clear_legacy_calibration_data() {
+  local root=$1 path
+
+  find_legacy_calibration_files "$root"
+  for path in "${legacy_calibration_files[@]}"; do
+    rm -f -- "$path"
+  done
+}
+
+migrate_legacy_calibration_data() {
+  local root=$1 dir=$2 expected_id=$3
+  local source=$root/CalibrationData.blob
+  local destination=$dir/CalibrationData.blob
+
+  calibration_is_valid "$source" "$expected_id" ||
+    die 'the selected unscoped calibration no longer matches this reader'
+  cp -a --no-dereference -- "$source" "$destination" ||
+    die 'could not migrate matching calibration into reader-scoped state'
+  calibration_is_valid "$destination" "$expected_id" ||
+    die 'the reader-scoped calibration failed validation after migration'
+}
+
+clear_incompatible_reader_state() {
+  local dir=$1 preserve_calibration=$2 name extension
+  local -a incompatible=(
+    CryptoRegistry
+    PairingContext
+    PairingData
+    OwnershipFailureDetected
+    SecureChannelIdentity
+    SetOwnershipFailureCount
+    UnpairingContext
+    deviceInitializeFailures
+  )
+
+  for name in "${incompatible[@]}"; do
+    for extension in blob uint bool; do
+      rm -f -- "$dir/$name.$extension"
+    done
+  done
+
+  if (( ! preserve_calibration )); then
+    rm -f -- "$dir/CalibrationData.blob" \
+      "$dir/CalibrationData.uint" "$dir/CalibrationData.bool"
+  else
+    rm -f -- "$dir/CalibrationData.uint" "$dir/CalibrationData.bool"
+  fi
+}
+
+clear_reset_markers() {
+  local dir=$1 extension
+
+  # Consume every request name first and make that deletion durable while the
+  # SUCCEEDED result still blocks startup. If interrupted here, the next helper
+  # recognizes the result and resumes cleanup without issuing another reset.
+  for extension in blob uint bool; do
+    rm -f -- "$dir/ResetOwnershipRequest.$extension"
+  done
+  sync -f -- "$dir" ||
+    die 'could not synchronize ownership-reset request removal'
+
+  # Result is the final barrier. Once it is gone, local cleanup is complete and
+  # no request remains that a newly started host could dispatch.
+  for extension in blob uint bool; do
+    rm -f -- "$dir/ResetOwnershipResult.$extension"
+  done
+}
+
+resume_successful_reset_cleanup() {
+  # A previous recovery may have persisted the success barrier but failed
+  # before consuming its request. The success result already blocks every
+  # host, so completing Request=0 cannot dispatch another vendor reset.
+  recovery_armed=1
+  reset_completed=1
+  rm -f -- "$device_state_dir/ResetOwnershipRequest.blob" \
+    "$device_state_dir/ResetOwnershipRequest.uint"
+  atomic_write_status "$request_file" 0
+}
+
+clear_libfprint_metadata() {
+  local root=${1:-$FPRINT_STATE_ROOT} user_dir driver_dir
+
+  [[ -e $root || -L $root ]] || return 0
+  assert_secure_dir "$root"
+  for user_dir in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [[ -e $user_dir || -L $user_dir ]] || continue
+    assert_secure_dir "$user_dir"
+    driver_dir=$user_dir/syna_tudor_relink
+    [[ -e $driver_dir || -L $driver_dir ]] || continue
+    assert_secure_tree "$driver_dir"
+    rm -rf --one-file-system -- "$driver_dir"
+  done
+}
+
+service_mask_owner_file_is_valid() {
+  local owner group mode size value
+  [[ -f $SERVICE_MASK_OWNER_FILE && ! -L $SERVICE_MASK_OWNER_FILE ]] ||
+    return 1
+  owner=$(stat -Lc '%u' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  group=$(stat -Lc '%g' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  mode=$(stat -Lc '%a' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  size=$(stat -Lc '%s' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  [[ $owner == 0 && $group == 0 && $mode == 600 && $size == 15 ]] ||
+    return 1
+  value=$(<"$SERVICE_MASK_OWNER_FILE") || return 1
+  [[ $value == synatudor-0081 ]]
+}
+
+create_service_mask_owner_file() {
+  local tmp owner_dir owner_base
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || {
+      printf 'error: refusing malformed service-mask owner file %s\n' \
+        "$SERVICE_MASK_OWNER_FILE" >&2
+      return 1
+    }
+    return 0
+  fi
+
+  owner_dir=${SERVICE_MASK_OWNER_FILE%/*}
+  owner_base=${SERVICE_MASK_OWNER_FILE##*/}
+  tmp=$(mktemp "$owner_dir/.$owner_base.XXXXXX") || return 1
+  if ! printf 'synatudor-0081\n' >"$tmp" ||
+     ! chown root:root "$tmp" || ! chmod 0600 "$tmp" ||
+     ! mv -fT -- "$tmp" "$SERVICE_MASK_OWNER_FILE"; then
+    rm -f -- "$tmp" || true
+    return 1
+  fi
+  service_mask_owner_file_is_valid
+}
+
+read_service_unit_state() {
+  local unit=$1 status=0
+  service_unit_state=
+  if service_unit_state=$(timeout --kill-after=2s 10s \
+      systemctl is-enabled "$unit" 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  case $service_unit_state in
+    enabled|enabled-runtime|linked|linked-runtime|alias|static|indirect|\
+    disabled|generated|transient|masked|masked-runtime)
+      return 0
+      ;;
+    *)
+      printf 'error: could not determine enablement state for %s (status %s)\n' \
+        "$unit" "$status" >&2
+      return 1
+      ;;
+  esac
+}
+
+adopt_or_create_service_masks() {
+  local unit
+
+  if (( ${#temporary_runtime_masks[@]} )); then return 0; fi
+
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || {
+      printf 'error: refusing malformed service-mask owner file %s\n' \
+        "$SERVICE_MASK_OWNER_FILE" >&2
+      return 1
+    }
+  else
+    # Do not disturb a mask created by an administrator. A valid owner file
+    # is written before our first mask so a killed helper can be resumed.
+    for unit in "${FINGERPRINT_UNITS[@]}"; do
+      read_service_unit_state "$unit" || return 1
+      case $service_unit_state in
+        masked|masked-runtime)
+          printf 'error: %s was already masked; preserving the administrator state\n' \
+            "$unit" >&2
+          return 1
+          ;;
+      esac
+    done
+    create_service_mask_owner_file || return 1
+  fi
+
+  temporary_runtime_masks=("${FINGERPRINT_UNITS[@]}")
+  service_management_armed=1
+}
+
+inhibit_service_activation() {
+  local unit
+  adopt_or_create_service_masks || return 1
+
+  # A stopped D-Bus service can otherwise be reactivated by another local
+  # client during backup or state replacement. Repair any partial prior mask
+  # attempt, then verify both units before treating the state as protected.
+  for unit in "${temporary_runtime_masks[@]}"; do
+    read_service_unit_state "$unit" || return 1
+    if [[ $service_unit_state != masked-runtime ]]; then
+      [[ $service_unit_state != masked ]] || {
+        printf 'error: %s acquired a persistent administrative mask\n' \
+          "$unit" >&2
+        return 1
+      }
+      timeout --kill-after=2s 10s systemctl mask --runtime "$unit" \
+        >/dev/null || return 1
+      read_service_unit_state "$unit" || return 1
+      [[ $service_unit_state == masked-runtime ]] || return 1
+    fi
+  done
+  activation_inhibited=1
+}
+
+allow_service_activation() {
+  local unit failed=0
+  (( ${#temporary_runtime_masks[@]} )) || {
+    activation_inhibited=0
+    if (( service_management_armed )) &&
+       [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+      service_mask_owner_file_is_valid || return 1
+      rm -f -- "$SERVICE_MASK_OWNER_FILE" || return 1
+    fi
+    return 0
+  }
+
+  for unit in "${temporary_runtime_masks[@]}"; do
+    if ! timeout --kill-after=2s 10s \
+        systemctl unmask --runtime "$unit" >/dev/null; then
+      failed=1
+    fi
+  done
+  (( ! failed )) || return 1
+
+  for unit in "${temporary_runtime_masks[@]}"; do
+    read_service_unit_state "$unit" || return 1
+    [[ $service_unit_state != masked-runtime ]] || return 1
+  done
+  temporary_runtime_masks=()
+  activation_inhibited=0
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || return 1
+    rm -f -- "$SERVICE_MASK_OWNER_FILE" || return 1
+  fi
+}
+
+services_are_quiescent() {
+  local unit active_state
+  for unit in "${FINGERPRINT_UNITS[@]}"; do
+    active_state=$(timeout --kill-after=2s 5s systemctl show \
+      --property=ActiveState --value "$unit") || return 1
+    case $active_state in
+      inactive|failed) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+stop_services() {
+  inhibit_service_activation || return 1
+  if ! timeout --kill-after=3s 20s systemctl stop \
+      "${FINGERPRINT_UNITS[@]}"; then
+    timeout --kill-after=2s 5s systemctl kill --kill-whom=all \
+      --signal=KILL "${FINGERPRINT_UNITS[@]}" >/dev/null 2>&1 || true
+    timeout --kill-after=2s 5s systemctl stop \
+      "${FINGERPRINT_UNITS[@]}" || return 1
+  fi
+  services_are_quiescent || return 1
+  services_stopped=1
+}
+
+start_services() {
+  allow_service_activation || return 1
+  services_stopped=0
+  if ! timeout --kill-after=3s 20s \
+      systemctl start tudor-host-launcher.service; then
+    return 1
+  fi
+  systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+  timeout --kill-after=3s 20s systemctl start fprintd.service
+}
+
+stop_trigger() {
+  [[ -n $trigger_pid ]] || return 0
+  if kill -0 "$trigger_pid" 2>/dev/null; then
+    kill "$trigger_pid" 2>/dev/null || true
+  fi
+  wait "$trigger_pid" 2>/dev/null || true
+  trigger_pid=
+}
+
+recover_after_failure() {
+  local status=$? safe_to_restart=0 barrier_is_safe=0
+  trap - EXIT INT TERM
+  stop_trigger
+
+  if (( status != 0 && recovery_armed )); then
+    if ! stop_services >/dev/null 2>&1; then
+      printf '%s\n' \
+        'Could not prove that both fingerprint services stopped. Protected reset state was left unchanged, and the helper-owned runtime masks remain in place. Rerun synatudor-reset-ownership after resolving the service stop failure.' >&2
+      exit "$status"
+    fi
+
+    # The host can finish the reset after this shell starts waiting but before
+    # the polling loop observes its terminal result (or while start_services
+    # is still returning).  The protected result is authoritative: recover a
+    # just-written success before deciding whether it is safe to downgrade the
+    # transaction to FAILED.  Services were stopped first so a normal host
+    # cannot change the result after this read.
+    if (( ! reset_completed )) && read_reset_result &&
+       [[ $reset_result == "$RESET_RESULT_SUCCEEDED" ]]; then
+      reset_completed=1
+    fi
+
+    if (( reset_completed && cleanup_completed )); then
+      # The sensor reset and all state cleanup are complete, and the barrier
+      # has already been released. Never recreate it here: normal startup may
+      # already have generated a replacement pairing identity.
+      printf '%s\n' \
+        'Ownership reset and local cleanup succeeded, but USB or service restart did not finish. Run synatudor-reset to retry only the transport and services.' >&2
+    elif (( reset_completed )); then
+      # Keep a durable barrier that blocks normal initialization with stale
+      # state. A later invocation recognizes this pair and resumes cleanup
+      # without dispatching the vendor reset again.
+      (atomic_write_status "$result_file" "$RESET_RESULT_SUCCEEDED") || true
+      (atomic_write_status "$request_file" 0) || true
+      if (reset_result_blocks_startup); then barrier_is_safe=1; fi
+      printf '%s\n' \
+        'The reader reset succeeded, but local cleanup did not finish. Rerun synatudor-reset-ownership to resume cleanup without resetting the reader again.' >&2
+    else
+      (atomic_write_status "$result_file" "$RESET_RESULT_FAILED") || true
+      (atomic_write_status "$request_file" 0) || true
+      printf '%s\n' \
+        'The ownership reset did not report successful completion. Its physical outcome may be indeterminate, and it will not be retried automatically.' >&2
+    fi
+  fi
+
+  if (( status != 0 && services_stopped && ! reset_completed )); then
+    # Starting a host is safe only when the request is durably disabled or a
+    # nonzero result blocks request processing. This check also protects an
+    # early failure encountered before this invocation armed recovery.
+    if (reset_request_is_disabled) || (reset_result_blocks_startup); then
+      safe_to_restart=1
+    else
+      printf '%s\n' \
+        'Could not prove that the ownership-reset request is disabled. Fingerprint services remain stopped to prevent an automatic destructive retry; repair the protected status files or restore the private backup before starting them.' >&2
+    fi
+  fi
+  if (( safe_to_restart )); then
+    start_services >/dev/null 2>&1 || true
+  elif (( status != 0 && ! recovery_armed && service_management_armed &&
+          ! services_stopped )); then
+    # This invocation has not written a request, but an adopted mask may belong
+    # to an interrupted earlier invocation. Release it only after the protected
+    # state proves that startup cannot dispatch a pending destructive request.
+    if (reset_request_is_disabled) || (reset_result_blocks_startup); then
+      start_services >/dev/null 2>&1 || true
+    else
+      printf '%s\n' \
+        'Could not prove that an earlier ownership-reset request is disabled. Helper-owned runtime masks remain in place; rerun synatudor-reset-ownership to recover it safely.' >&2
+    fi
+  elif (( status != 0 && reset_completed )); then
+    # Completed cleanup or a verified terminal barrier makes activation safe.
+    # Leave services stopped for the recovery named above, but release only
+    # the runtime masks carrying this helper's owner marker.
+    if (( cleanup_completed || barrier_is_safe )); then
+      allow_service_activation >/dev/null 2>&1 || true
+    else
+      printf '%s\n' \
+        'Could not reconstruct the successful-reset barrier. Helper-owned runtime masks remain in place to prevent startup with stale pairing state.' >&2
+    fi
+  fi
+  exit "$status"
+}
+
+run_recovery() {
+  local sensor_path result='' i preserve_calibration=0
+  local migrate_legacy_calibration=0
+
+  for command in cp date find flock fprintd-list install mktemp od runuser \
+                 stat sync systemctl timeout tr udevadm usbreset; do
+    command -v "$command" >/dev/null || die "$command is required"
+  done
+  [[ $(uname -m) == x86_64 ]] ||
+    die 'the pinned Windows driver requires x86-64 Linux'
+  [[ -x /usr/bin/tudor/tudor_host ]] || die 'the Tudor host is not installed'
+
+  # Serialize the destructive transaction with ordinary USB reset. The open
+  # descriptor holds this lock through every EXIT/INT/TERM recovery path.
+  acquire_maintenance_lock
+
+  sensor_path=$(find_sensor)
+  derive_sensor_identity "$sensor_path"
+  unset sensor_path
+  device_state_dir=$TUDOR_STATE_ROOT/devices/$sensor_state_id
+  request_file=$device_state_dir/ResetOwnershipRequest.bool
+  result_file=$device_state_dir/ResetOwnershipResult.uint
+
+  if [[ -e $TUDOR_STATE_ROOT ]]; then
+    assert_secure_dir "$TUDOR_STATE_ROOT"
+  else
+    install -d -o root -g root -m 0700 -- "$TUDOR_STATE_ROOT"
+  fi
+  install -d -o root -g root -m 0700 -- "$TUDOR_STATE_ROOT/devices"
+  assert_secure_dir "$TUDOR_STATE_ROOT/devices"
+
+  trap recover_after_failure EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  stop_services || die 'could not stop the fingerprint services cleanly'
+  make_private_backup
+
+  if [[ -e $device_state_dir ]]; then
+    assert_secure_tree "$device_state_dir"
+  else
+    install -d -o root -g root -m 0700 -- "$device_state_dir"
+  fi
+
+  # A prior invocation can be interrupted after the sensor reset but before
+  # local identity cleanup. The host leaves this durable barrier and refuses
+  # normal initialization. Resume at cleanup instead of dispatching a second
+  # destructive request.
+  if read_reset_result; then
+    case $reset_result in
+      "$RESET_RESULT_SUCCEEDED")
+        resume_successful_reset_cleanup
+        printf 'A previous ownership reset succeeded; resuming local cleanup.\n'
+        ;;
+      "$RESET_RESULT_IN_PROGRESS")
+        atomic_write_status "$result_file" "$RESET_RESULT_FAILED"
+        atomic_write_status "$request_file" 0
+        die 'a previous ownership reset was interrupted while in progress; it was marked failed and will not retry automatically'
+        ;;
+    esac
+  fi
+
+  if (( ! reset_completed )); then
+    # Arm failure cleanup before writing the one-shot request. From this point
+    # onward every exit disables the request before allowing services to run.
+    recovery_armed=1
+
+    # The vendor refuses initialization after its ownership-failure counter
+    # reaches five. Reset the saved counter before asking for the explicit
+    # recovery path. The complete previous value is already in the backup.
+    rm -f -- "$device_state_dir/SetOwnershipFailureCount.blob" \
+      "$device_state_dir/SetOwnershipFailureCount.bool" \
+      "$device_state_dir/ResetOwnershipRequest.blob" \
+      "$device_state_dir/ResetOwnershipRequest.uint" \
+      "$device_state_dir/ResetOwnershipResult.blob" \
+      "$device_state_dir/ResetOwnershipResult.bool"
+    atomic_write_status "$device_state_dir/SetOwnershipFailureCount.uint" 0
+    atomic_write_status "$result_file" "$RESET_RESULT_NONE"
+    atomic_write_status "$request_file" 1
+
+    printf 'Requesting one ownership reset from the reader...\n'
+    start_services || die 'could not start the fingerprint services for recovery'
+    services_stopped=0
+
+    # Starting fprintd normally probes the reader. This additional read-only
+    # request makes the trigger deterministic on installations that defer
+    # enumeration. The host consumes the marker before doing anything
+    # destructive, so service retries cannot repeat the ownership reset.
+    timeout --kill-after=2s 45s runuser -u "$target_user" -- \
+      fprintd-list "$target_user" >/dev/null 2>&1 &
+    trigger_pid=$!
+
+    for (( i=0; i<225; i++ )); do
+      if read_reset_result; then
+        result=$reset_result
+        case $result in
+          "$RESET_RESULT_SUCCEEDED")
+            reset_completed=1
+            break
+            ;;
+          "$RESET_RESULT_FAILED")
+            die 'the ownership reset did not report successful completion; its physical outcome may be indeterminate and it will not retry automatically'
+            ;;
+        esac
+      fi
+      sleep 0.2
+    done
+    stop_trigger
+    [[ $result == "$RESET_RESULT_SUCCEEDED" ]] ||
+      die 'timed out waiting for the reader to finish ownership reset'
+
+    reset_request_is_disabled ||
+      die 'the host reported success without disabling the one-shot reset request'
+
+    # The terminal result blocks ordinary host initialization. Stop services
+    # before replacing the now-incompatible identity and enrollment records.
+    stop_services ||
+      die 'could not stop the fingerprint services after ownership reset'
+    services_stopped=1
+  fi
+
+  if calibration_is_valid \
+      "$device_state_dir/CalibrationData.blob" "$sensor_calibration_id"; then
+    preserve_calibration=1
+  fi
+  if calibration_is_valid \
+      "$TUDOR_STATE_ROOT/CalibrationData.blob" "$sensor_calibration_id"; then
+    migrate_legacy_calibration=1
+  fi
+
+  assert_secure_tree "$device_state_dir"
+  clear_incompatible_reader_state "$device_state_dir" "$preserve_calibration"
+  if (( ! preserve_calibration && migrate_legacy_calibration )); then
+    migrate_legacy_calibration_data \
+      "$TUDOR_STATE_ROOT" "$device_state_dir" "$sensor_calibration_id"
+  fi
+  clear_legacy_pairing_data "$TUDOR_STATE_ROOT"
+  clear_legacy_calibration_data "$TUDOR_STATE_ROOT"
+  clear_libfprint_metadata "$FPRINT_STATE_ROOT"
+
+  # Make every incompatible-state deletion persistent before removing the
+  # terminal result that blocks normal initialization.
+  sync -f -- "$TUDOR_STATE_ROOT" ||
+    die 'could not synchronize Tudor state cleanup'
+  if [[ -e $FPRINT_STATE_ROOT ]]; then
+    sync -f -- "$FPRINT_STATE_ROOT" ||
+      die 'could not synchronize fprint metadata cleanup'
+  fi
+
+  # Removing the terminal marker releases normal initialization only after
+  # every incompatible local value is durably gone while services are down.
+  clear_reset_markers "$device_state_dir"
+  sync -f -- "$TUDOR_STATE_ROOT" ||
+    die 'could not synchronize ownership-reset barrier removal'
+
+  # The cleanup and barrier removal both succeeded while services were down.
+  # A later transport/service failure must never recreate the barrier over a
+  # replacement identity that normal startup may generate.
+  cleanup_completed=1
+
+  /usr/bin/usbreset 06cb:0081
+  udevadm settle --timeout=10
+  start_services || die 'ownership reset succeeded, but the fingerprint services did not restart'
+  services_stopped=0
+
+  recovery_armed=0
+  trap - EXIT INT TERM
+  printf '%s\n' \
+    'Ownership reset succeeded and incompatible local pairing data was removed.' \
+    'Every fingerprint formerly stored on this reader has been erased.' \
+    'Stale Linux references were removed for every local user of this driver.' \
+    'Legacy pairing records were removed for every reader managed by this driver.' \
+    'Legacy calibration was backed up, migrated only if it matched this reader, and removed from its unscoped location.' \
+    'Run synatudor-setup as your regular user to enroll again.'
+}
+
+main() {
+  local assume_yes=0 sensor_path invoking_uid
+
+  while (( $# )); do
+    case $1 in
+      --yes) assume_yes=1 ;;
+      -h|--help) usage; return 0 ;;
+      *) usage >&2; die "unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  sensor_path=$(find_sensor)
+  derive_sensor_identity "$sensor_path"
+  unset sensor_path
+
+  if (( EUID == 0 )); then
+    [[ ${SUDO_UID:-} =~ ^[0-9]+$ && ${SUDO_UID:-0} != 0 &&
+       -n ${SUDO_USER:-} && ${SUDO_USER:-root} != root ]] ||
+      die 'run synatudor-reset-ownership as the regular desktop user, without sudo'
+    invoking_uid=$(id -u "$SUDO_USER") ||
+      die 'could not identify the desktop user who invoked sudo'
+    [[ $invoking_uid == "$SUDO_UID" ]] ||
+      die 'sudo user identity is inconsistent; refusing to choose fingerprint metadata'
+    target_user=$SUDO_USER
+    [[ $target_user != . && $target_user != .. &&
+       $target_user != */* && $target_user != *$'\n'* ]] ||
+      die 'the desktop user name is unsafe for a state-directory component'
+    (( assume_yes )) || confirm_reset
+    run_recovery
+    return
+  fi
+
+  target_user=$(id -un) || die 'could not determine the current desktop user'
+  (( assume_yes )) || confirm_reset
+  self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+  exec sudo -- "$self" --yes
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

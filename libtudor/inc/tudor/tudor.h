@@ -34,6 +34,11 @@ extern bool tudor_log_traces;
  * closing it.  Passing NULL restores the discovery-based CLI fallback. */
 void tudor_set_usb_device(libusb_device_handle *usb_dev);
 bool tudor_init();
+/* Perform the reader ownership-reset recovery path once.  This is a
+ * self-contained alternative to tudor_init(); callers must terminate the
+ * process after it returns and must not enter the normal device-open or
+ * tudor_shutdown paths. */
+bool tudor_reset_ownership(void);
 bool tudor_shutdown();
 
 typedef struct _async_res *tudor_async_res_t;

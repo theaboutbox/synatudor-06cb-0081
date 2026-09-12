@@ -5,6 +5,7 @@
 /subprojects/.wraplock
 
 *.blob
+*.bool
 *.cab
 *.cat
 *.dll
@@ -20,6 +21,7 @@
 *.sys
 *.tar.zst
 *.tupd
+*.tpd
 *.uint
 
 compile_commands.json

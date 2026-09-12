@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+
+SERVICE_MASK_OWNER_FILE=/run/synatudor-0081-runtime-masks
+readonly -a FINGERPRINT_UNITS=(
+  fprintd.service
+  tudor-host-launcher.service
+)
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -11,20 +20,51 @@ usage() {
 Usage: synatudor-reset
 
 Resets one connected Synaptics 06cb:0081 reader and restarts its fingerprint
-services. No enrollment or saved Tudor state is removed.
+services. No enrollment, pairing, identity, or calibration state is removed;
+only the transient ownership-failure marker is cleared.
 EOF
 }
 
-sensor_count() {
-  local vendor product count=0
+find_sensor() {
+  local vendor product
+  local -a sensors=()
+
   shopt -s nullglob
   for vendor in /sys/bus/usb/devices/*/idVendor; do
     [[ $(<"$vendor") == 06cb ]] || continue
     product=${vendor%/idVendor}/idProduct
     [[ -r $product && $(<"$product") == 0081 ]] || continue
-    ((++count))
+    sensors+=("${vendor%/idVendor}")
   done
-  printf '%d\n' "$count"
+
+  (( ${#sensors[@]} == 1 )) ||
+    die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+  printf '%s\n' "${sensors[0]}"
+}
+
+clear_ownership_failure_marker() {
+  local state_dir=$1 path=$state_dir/OwnershipFailureDetected.bool
+  local dir owner group mode value
+
+  [[ -e $path || -L $path ]] || return 0
+  for dir in /var/lib/tudor /var/lib/tudor/devices "$state_dir"; do
+    [[ -d $dir && ! -L $dir ]] || die "$dir is not a real directory"
+    owner=$(stat -Lc '%u' -- "$dir") || die "could not inspect $dir"
+    group=$(stat -Lc '%g' -- "$dir") || die "could not inspect $dir"
+    mode=$(stat -Lc '%a' -- "$dir") || die "could not inspect $dir"
+    [[ $owner == 0 && $group == 0 && $mode == 700 ]] ||
+      die "$dir must be root:root with mode 0700"
+  done
+
+  [[ -f $path && ! -L $path ]] || die "$path is not a regular file"
+  owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+  group=$(stat -Lc '%g' -- "$path") || die "could not inspect $path"
+  mode=$(stat -Lc '%a' -- "$path") || die "could not inspect $path"
+  [[ $owner == 0 && $group == 0 && $mode == 600 ]] ||
+    die "$path must be root:root with mode 0600"
+  value=$(<"$path")
+  [[ $value == 0 || $value == 1 ]] || die "$path is malformed"
+  rm -f -- "$path"
 }
 
 if (( $# == 1 )) && [[ $1 == -h || $1 == --help ]]; then
@@ -41,21 +81,227 @@ if (( EUID != 0 )); then
   exec sudo -- "$self"
 fi
 
-[[ $(sensor_count) == 1 ]] || die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+sensor_path=$(find_sensor)
+[[ -r $sensor_path/serial ]] || die 'the fingerprint reader has no readable USB serial'
+sensor_serial=$(<"$sensor_path/serial")
+[[ $sensor_serial =~ ^[0-9A-Fa-f]{12}$ ]] ||
+  die 'the fingerprint reader has an unsupported USB serial format'
+sensor_state_dir=/var/lib/tudor/devices/06cb-0081-$sensor_serial
+unset sensor_path sensor_serial
+
 [[ -x /usr/bin/usbreset ]] || die 'usbreset is unavailable; install usbutils'
+for command in flock mktemp stat sync systemctl timeout; do
+  command -v "$command" >/dev/null || die "$command is required"
+done
 
-restart_fprintd_on_exit() {
-  systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
-  systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
+# Do not reset/restart the USB device while an ownership-reset transaction is
+# using it. The descriptor remains open until this process and its EXIT trap
+# have finished.
+exec {maintenance_lock_fd}>/run/synatudor-0081-maintenance.lock
+chown root:root /run/synatudor-0081-maintenance.lock
+chmod 0600 /run/synatudor-0081-maintenance.lock
+flock --exclusive --nonblock "$maintenance_lock_fd" ||
+  die 'another Synaptics fingerprint maintenance operation is already running'
+
+activation_inhibited=0
+service_management_armed=0
+service_unit_state=
+declare -a temporary_runtime_masks=()
+
+service_mask_owner_file_is_valid() {
+  local owner group mode size value
+  [[ -f $SERVICE_MASK_OWNER_FILE && ! -L $SERVICE_MASK_OWNER_FILE ]] ||
+    return 1
+  owner=$(stat -Lc '%u' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  group=$(stat -Lc '%g' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  mode=$(stat -Lc '%a' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  size=$(stat -Lc '%s' -- "$SERVICE_MASK_OWNER_FILE") || return 1
+  [[ $owner == 0 && $group == 0 && $mode == 600 && $size == 15 ]] ||
+    return 1
+  value=$(<"$SERVICE_MASK_OWNER_FILE") || return 1
+  [[ $value == synatudor-0081 ]]
 }
-trap restart_fprintd_on_exit EXIT
 
-systemctl stop fprintd.service tudor-host-launcher.service 2>/dev/null || true
+create_service_mask_owner_file() {
+  local tmp owner_dir owner_base
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || return 1
+    return 0
+  fi
+  owner_dir=${SERVICE_MASK_OWNER_FILE%/*}
+  owner_base=${SERVICE_MASK_OWNER_FILE##*/}
+  tmp=$(mktemp "$owner_dir/.$owner_base.XXXXXX") || return 1
+  if ! printf 'synatudor-0081\n' >"$tmp" ||
+     ! chown root:root "$tmp" || ! chmod 0600 "$tmp" ||
+     ! mv -fT -- "$tmp" "$SERVICE_MASK_OWNER_FILE"; then
+    rm -f -- "$tmp" || true
+    return 1
+  fi
+  service_mask_owner_file_is_valid
+}
+
+read_service_unit_state() {
+  local unit=$1 status=0
+  service_unit_state=
+  if service_unit_state=$(timeout --kill-after=2s 10s \
+      systemctl is-enabled "$unit" 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  case $service_unit_state in
+    enabled|enabled-runtime|linked|linked-runtime|alias|static|indirect|\
+    disabled|generated|transient|masked|masked-runtime)
+      return 0
+      ;;
+    *)
+      printf 'error: could not determine enablement state for %s (status %s)\n' \
+        "$unit" "$status" >&2
+      return 1
+      ;;
+  esac
+}
+
+ownership_transaction_is_absent() {
+  local path
+  for path in \
+    "$sensor_state_dir"/ResetOwnershipRequest.{blob,uint,bool} \
+    "$sensor_state_dir"/ResetOwnershipResult.{blob,uint,bool}; do
+    [[ ! -e $path && ! -L $path ]] || return 1
+  done
+}
+
+adopt_or_create_service_masks() {
+  local unit
+  if (( ${#temporary_runtime_masks[@]} )); then return 0; fi
+
+  ownership_transaction_is_absent || {
+    printf '%s\n' \
+      'error: an ownership-reset transaction is pending; run synatudor-reset-ownership instead' >&2
+    return 1
+  }
+
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || {
+      printf 'error: refusing malformed service-mask owner file %s\n' \
+        "$SERVICE_MASK_OWNER_FILE" >&2
+      return 1
+    }
+  else
+    for unit in "${FINGERPRINT_UNITS[@]}"; do
+      read_service_unit_state "$unit" || return 1
+      case $service_unit_state in
+        masked|masked-runtime)
+          printf 'error: %s was already masked; preserving the administrator state\n' \
+            "$unit" >&2
+          return 1
+          ;;
+      esac
+    done
+    create_service_mask_owner_file || return 1
+  fi
+
+  temporary_runtime_masks=("${FINGERPRINT_UNITS[@]}")
+  service_management_armed=1
+}
+
+inhibit_service_activation() {
+  local unit
+  adopt_or_create_service_masks || return 1
+  for unit in "${temporary_runtime_masks[@]}"; do
+    read_service_unit_state "$unit" || return 1
+    if [[ $service_unit_state != masked-runtime ]]; then
+      [[ $service_unit_state != masked ]] || return 1
+      timeout --kill-after=2s 10s systemctl mask --runtime "$unit" \
+        >/dev/null || return 1
+      read_service_unit_state "$unit" || return 1
+      [[ $service_unit_state == masked-runtime ]] || return 1
+    fi
+  done
+  activation_inhibited=1
+}
+
+allow_service_activation() {
+  local unit failed=0
+  (( ${#temporary_runtime_masks[@]} )) || {
+    activation_inhibited=0
+    if (( service_management_armed )) &&
+       [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+      service_mask_owner_file_is_valid || return 1
+      rm -f -- "$SERVICE_MASK_OWNER_FILE" || return 1
+    fi
+    return 0
+  }
+  for unit in "${temporary_runtime_masks[@]}"; do
+    if ! timeout --kill-after=2s 10s \
+        systemctl unmask --runtime "$unit" >/dev/null; then
+      failed=1
+    fi
+  done
+  (( ! failed )) || return 1
+  for unit in "${temporary_runtime_masks[@]}"; do
+    read_service_unit_state "$unit" || return 1
+    [[ $service_unit_state != masked-runtime ]] || return 1
+  done
+  temporary_runtime_masks=()
+  activation_inhibited=0
+  if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
+    service_mask_owner_file_is_valid || return 1
+    rm -f -- "$SERVICE_MASK_OWNER_FILE" || return 1
+  fi
+}
+
+services_are_quiescent() {
+  local unit active_state
+  for unit in "${FINGERPRINT_UNITS[@]}"; do
+    active_state=$(timeout --kill-after=2s 5s systemctl show \
+      --property=ActiveState --value "$unit") || return 1
+    case $active_state in
+      inactive|failed) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+stop_services() {
+  inhibit_service_activation || return 1
+  if ! timeout --kill-after=3s 20s systemctl stop \
+      "${FINGERPRINT_UNITS[@]}" 2>/dev/null; then
+    timeout --kill-after=2s 5s systemctl kill --kill-whom=all \
+      --signal=KILL "${FINGERPRINT_UNITS[@]}" >/dev/null 2>&1 || true
+    timeout --kill-after=2s 5s systemctl stop \
+      "${FINGERPRINT_UNITS[@]}" 2>/dev/null || return 1
+  fi
+  services_are_quiescent
+}
+
+restart_services_on_exit() {
+  (( service_management_armed )) || return 0
+  if allow_service_activation >/dev/null 2>&1; then
+    systemctl start --no-block tudor-host-launcher.service \
+      >/dev/null 2>&1 || true
+    systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+    systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
+  fi
+}
+trap restart_services_on_exit EXIT
+
+stop_services || die 'could not stop the fingerprint services'
+
+# Setup uses the next probe's exact marker to decide whether ownership was
+# rejected. Remove any prior-run value only while no host can rewrite it.
+clear_ownership_failure_marker "$sensor_state_dir"
+if [[ -d $sensor_state_dir ]]; then
+  sync -f -- "$sensor_state_dir" ||
+    die 'could not synchronize ownership-failure marker removal'
+fi
 /usr/bin/usbreset 06cb:0081
 udevadm settle --timeout=10
-systemctl start tudor-host-launcher.service
+allow_service_activation ||
+  die 'could not restore fingerprint service activation'
+timeout --kill-after=3s 20s systemctl start tudor-host-launcher.service
 systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
-systemctl start fprintd.service
+timeout --kill-after=3s 20s systemctl start fprintd.service
 
 trap - EXIT
 printf 'Reset 06cb:0081 and restarted the fingerprint services.\n'

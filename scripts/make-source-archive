@@ -57,8 +57,10 @@ archive_paths=(
   tudor-host-launcher
   scripts/setup
   scripts/reset
+  scripts/reset-ownership
   scripts/uninstall
   scripts/omarchy-pam
+  tests/reset-ownership.sh
 )
 
 for required in LICENSE NOTICE meson.build meson_options.txt; do
@@ -70,8 +72,8 @@ file_count=0
 while IFS= read -r -d '' path; do
   ((++file_count))
   case ${path,,} in
-    *.a|*.blob|*.cab|*.cat|*.dll|*.exe|*.gzf|*.key|*.log|*.o|*.p12|\
-    *.pcap|*.pcapng|*.pem|*.pfx|*.pkg.tar*|*.so|*.sys|*.tupd|*.uint)
+    *.a|*.blob|*.bool|*.cab|*.cat|*.dll|*.exe|*.gzf|*.key|*.log|*.o|*.p12|\
+    *.pcap|*.pcapng|*.pem|*.pfx|*.pkg.tar*|*.so|*.sys|*.tpd|*.tupd|*.uint)
       die "refusing to archive private or proprietary file: $path"
       ;;
   esac
@@ -100,7 +102,7 @@ tar -C "$stage_dir" \
   --transform="s,^,$prefix/," \
   -cf - "${archive_paths[@]}" | gzip -n -9 >"$archive_tmp"
 
-if tar -tzf "$archive_tmp" | grep -Eiq '\.(a|blob|cab|cat|dll|exe|gzf|key|log|o|p12|pcap|pcapng|pem|pfx|pkg\.tar[^/]*|so|sys|tupd|uint)$'; then
+if tar -tzf "$archive_tmp" | grep -Eiq '\.(a|blob|bool|cab|cat|dll|exe|gzf|key|log|o|p12|pcap|pcapng|pem|pfx|pkg\.tar[^/]*|so|sys|tpd|tupd|uint)$'; then
   die 'archive audit found a private or proprietary file'
 fi
 

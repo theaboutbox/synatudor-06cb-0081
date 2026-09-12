@@ -2,7 +2,8 @@ tudor_host_src = [
     'src/main.c',
     'src/sandbox.c',
     'src/ipc.c',
-    'src/handler.c'
+    'src/handler.c',
+    'src/reset-ownership.c'
 ]
 
 tudor_host_flags = []
@@ -36,3 +37,10 @@ native_storage_ipc_test = executable('native-storage-ipc-test',
     include_directories: ['src', tudor_host_inc, libtudor_inc],
     install: false)
 test('native-storage-ipc', native_storage_ipc_test, timeout: 5)
+
+reset_ownership_test = executable('reset-ownership-test',
+    ['tests/reset-ownership.c', 'src/reset-ownership.c'],
+    dependencies: dependency('glib-2.0'),
+    include_directories: ['src', tudor_host_inc, libtudor_inc],
+    install: false)
+test('reset-ownership', reset_ownership_test, timeout: 5)

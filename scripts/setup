@@ -5,6 +5,7 @@ umask 077
 finger=right-index-finger
 configure_pam=1
 calibrate_only=0
+sensor_state_dir=
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -15,8 +16,9 @@ usage() {
   cat <<'EOF'
 Usage: synatudor-setup [--finger FINGER] [--no-pam] [--calibrate-only]
 
-Initializes a Synaptics 06cb:0081 reader, enrolls and verifies one finger,
-then configures PAM when running on Omarchy. Password fallback is retained.
+Initializes a Synaptics 06cb:0081 reader, recovers incompatible ownership with
+explicit consent when necessary, enrolls and verifies one finger, then
+configures PAM on Omarchy. Password fallback is retained.
 
 Options:
   --finger FINGER    Finger to enroll (default: right-index-finger).
@@ -61,9 +63,74 @@ sensor_identity() {
     swapped+=${serial:i+1:1}${serial:i:1}
   done
 
-  sensor_state_file=/var/lib/tudor/devices/06cb-0081-$serial/CalibrationData.blob
+  sensor_state_dir=/var/lib/tudor/devices/06cb-0081-$serial
+  sensor_state_file=$sensor_state_dir/CalibrationData.blob
   sensor_calibration_id=${swapped,,}
   unset serial swapped
+}
+
+ownership_failure_count() {
+  local path=$sensor_state_dir/SetOwnershipFailureCount.uint
+  local metadata value
+
+  if ! sudo test ! -L "$path" 2>/dev/null; then
+    printf 'unavailable\n'
+    return
+  fi
+  if ! sudo test -e "$path" 2>/dev/null; then
+    printf 'unavailable\n'
+    return
+  fi
+  if ! sudo test -f "$path" 2>/dev/null; then
+    printf 'unavailable\n'
+    return
+  fi
+  metadata=$(sudo stat -Lc '%u:%g:%a' -- "$path" 2>/dev/null) || true
+  if [[ $metadata != 0:0:600 ]]; then
+    printf 'unavailable\n'
+    return
+  fi
+  value=$(sudo cat -- "$path" 2>/dev/null) || true
+  if [[ ! $value =~ ^(0|[1-9][0-9]{0,9})$ ]]; then
+    printf 'unavailable\n'
+    return
+  fi
+  if (( ${#value} == 10 )) && [[ $value > 4294967295 ]]; then
+    printf 'unavailable\n'
+    return
+  fi
+  printf '%s\n' "$value"
+}
+
+ownership_failure_detected() {
+  local path=$sensor_state_dir/OwnershipFailureDetected.bool
+  local metadata size value
+
+  sudo test ! -L "$path" 2>/dev/null || \
+    die 'the ownership-failure status must not be a symbolic link'
+  if ! sudo test -e "$path" 2>/dev/null; then
+    printf 'missing\n'
+    return
+  fi
+  sudo test -f "$path" 2>/dev/null || \
+    die 'the ownership-failure status is not a regular file'
+  metadata=$(sudo stat -Lc '%u:%g:%a' -- "$path" 2>/dev/null) || \
+    die 'could not inspect the ownership-failure status'
+  [[ $metadata == 0:0:600 ]] || \
+    die 'the ownership-failure status must be root:root with mode 0600'
+  size=$(sudo stat -Lc '%s' -- "$path" 2>/dev/null) || \
+    die 'could not inspect the ownership-failure status size'
+  [[ $size == 2 ]] || die 'the ownership-failure status is malformed'
+  value=$(sudo cat -- "$path" 2>/dev/null) || \
+    die 'could not read the ownership-failure status'
+  [[ $value == 0 || $value == 1 ]] || \
+    die 'the ownership-failure status is malformed'
+  printf '%s\n' "$value"
+}
+
+probe_reader_once() {
+  printf 'Initializing the reader once; this can take up to 30 seconds...\n'
+  timeout --kill-after=2s 30s fprintd-list "$target_user"
 }
 
 calibration_status() {
@@ -164,15 +231,24 @@ pacman -Q synatudor-0081 libfprint-tod fprintd >/dev/null || \
 command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
 command -v fprintd-enroll >/dev/null || die 'fprintd-enroll is unavailable'
 command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
+command -v timeout >/dev/null || die 'timeout is unavailable'
 command -v od >/dev/null || die 'od is unavailable'
 [[ -x /usr/bin/synatudor-reset ]] || die 'synatudor-reset is unavailable'
+[[ -x /usr/bin/synatudor-reset-ownership ]] || \
+  die 'synatudor-reset-ownership is unavailable'
 
 printf '%s\n' \
   'The first initialization calibrates this individual reader.' \
   'Keep the fingerprint sensor completely uncovered until enrollment starts.' \
-  'Initialization may replace fingerprints previously enrolled with Windows Hello.'
+  'Continuing authorizes one ownership reset if the reader rejects its saved identity.' \
+  'That reset permanently erases every fingerprint on the reader, including Windows Hello fingerprints.' \
+  "It also removes this driver's saved fingerprint references for every local user." \
+  'Older installs did not tie legacy pairing files to a reader, so it backs up and removes those records for every reader managed by this driver.' \
+  'It also backs up old unscoped calibration and reuses it only when it identifies this physical reader.'
+read -r -p 'Remove your finger, then type YES to continue and allow that reset if required: ' consent
+[[ $consent == YES ]] || die 'setup canceled'
+unset consent
 sudo -v
-read -r -p 'Remove your finger from the sensor, then press Enter to continue. ' _
 
 calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
 case $calibration in
@@ -205,27 +281,47 @@ fi
 
 sudo /usr/bin/synatudor-reset
 
-calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
-if [[ $calibration != valid ]]; then
-  printf 'Generating reader-specific calibration; keep the sensor uncovered...\n'
-  list_log=$(mktemp)
-  trap 'rm -f -- "$list_log"' EXIT
+probe_status=0
+probe_reader_once || probe_status=$?
+failure_detected=$(ownership_failure_detected)
+if (( probe_status != 0 )) && [[ $failure_detected == 1 ]]; then
+  failure_count=$(ownership_failure_count)
+  printf '%s\n' \
+    "The reader rejected its saved ownership identity (saved failure count: $failure_count)." \
+    'Running the one ownership reset approved above before any enrollment attempt.'
+  sudo /usr/bin/synatudor-reset-ownership --yes
 
-  for _ in {1..6}; do
-    timeout 15s fprintd-list "$target_user" >"$list_log" 2>&1 || true
-    calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
-    [[ $calibration == valid ]] && break
-    sleep 1
-  done
+  # The reset re-enumerates USB and removes the incompatible reader-scoped
+  # identity. Refresh the sysfs path before making exactly one clean attempt.
+  sensor_path=$(find_sensor)
+  sensor_identity "$sensor_path"
+  unset sensor_path
 
-  [[ $calibration == valid ]] || \
-    die 'the reader did not produce calibration for the attached physical reader'
-  rm -f -- "$list_log"
-  trap - EXIT
-  printf 'Calibration completed and was stored privately under /var/lib/tudor.\n'
-else
-  printf 'Existing reader calibration is valid.\n'
+  probe_status=0
+  probe_reader_once || probe_status=$?
+  failure_detected=$(ownership_failure_detected)
+  if [[ $failure_detected == 1 ]]; then
+    failure_count=$(ownership_failure_count)
+    die "the reader still rejected its new identity after ownership reset (saved failure count: $failure_count); refusing to repeat the destructive reset"
+  fi
 fi
+[[ $probe_status == 0 ]] || \
+  die 'reader initialization failed; the ownership reset was not repeated'
+[[ $failure_detected == 0 ]] || \
+  die 'reader initialization returned success without a valid current-run ownership status; refusing to continue'
+
+calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+if [[ $calibration == missing || $calibration == incomplete ]]; then
+  printf 'Waiting for reader-specific calibration to finish...\n'
+  for _ in {1..30}; do
+    sleep 1
+    calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+    [[ $calibration == missing || $calibration == incomplete ]] || break
+  done
+fi
+[[ $calibration == valid ]] || \
+  die 'the single initialization attempt did not produce calibration for the attached physical reader'
+printf 'Reader-specific calibration is valid and stored privately under /var/lib/tudor.\n'
 
 if (( calibrate_only )); then
   printf 'Calibration-only setup completed. PAM was not changed.\n'

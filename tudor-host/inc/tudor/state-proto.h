@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include <tudor/state.h>
+#include <tudor/state-properties.h>
 
 #define TUDOR_STATE_SOCKET_FD 3
 #define TUDOR_STATE_ID_SIZE 128
@@ -11,6 +12,16 @@
 #define TUDOR_STATE_MAX_VALUE_SIZE (64 * 1024)
 #define TUDOR_STATE_MAX_MESSAGE_SIZE \
     (sizeof(struct tudor_state_store_request) + TUDOR_STATE_MAX_VALUE_SIZE)
+
+#define TUDOR_STATE_RESET_OWNERSHIP_REQUEST "ResetOwnershipRequest"
+#define TUDOR_STATE_RESET_OWNERSHIP_RESULT "ResetOwnershipResult"
+
+enum tudor_reset_ownership_result {
+    TUDOR_RESET_OWNERSHIP_RESULT_NONE = 0,
+    TUDOR_RESET_OWNERSHIP_RESULT_IN_PROGRESS = 1,
+    TUDOR_RESET_OWNERSHIP_RESULT_SUCCEEDED = 2,
+    TUDOR_RESET_OWNERSHIP_RESULT_FAILED = 3
+};
 
 enum tudor_state_msg_type {
     TUDOR_STATE_MSG_LOAD = 0x54530001,

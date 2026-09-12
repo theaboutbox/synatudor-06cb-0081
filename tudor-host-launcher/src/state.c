@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -6,6 +7,7 @@
 #include <unistd.h>
 
 #include <gio/gio.h>
+#include <gio/gfiledescriptorbased.h>
 #include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <tudor/state-proto.h>
@@ -13,6 +15,11 @@
 #include "state.h"
 
 static gchar *state_root;
+
+#define TUDOR_0081_STATE_PREFIX "06cb-0081-"
+#define TUDOR_0081_SERIAL_HEX_SIZE 12
+#define TUDOR_0081_CALIBRATION_SIZE 40780
+#define TUDOR_0081_CALIBRATION_ID_OFFSET 32
 
 static void wipe_bytes(void *data, size_t size) {
     volatile unsigned char *bytes = data;
@@ -25,8 +32,11 @@ static const char *const allowed_properties[] = {
     "IdleInWorkingState",
     "LastUpdateSystemTimeStamp",
     "OldCalDataDeleted",
+    TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED,
     "PairingContext",
     "PairingData",
+    TUDOR_STATE_RESET_OWNERSHIP_REQUEST,
+    TUDOR_STATE_RESET_OWNERSHIP_RESULT,
     "SecureChannelIdentity",
     "SetOwnershipFailureCount",
     "SystemWakeEnabled",
@@ -80,8 +90,48 @@ static gchar *state_file_path(const char *state_id, const char *name,
     return path;
 }
 
-static gboolean write_private_file(const char *path, const void *data,
-                                   gsize size, GError **error) {
+static gboolean sync_file_descriptor(int fd, const char *path,
+                                     GError **error) {
+    while(fsync(fd) < 0) {
+        if(errno == EINTR) continue;
+        int err = errno;
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
+                    "Failed to synchronize state file '%s': %s",
+                    path, g_strerror(err));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean sync_parent_directory(const char *path, GError **error) {
+    gchar *dir = g_path_get_dirname(path);
+    int fd;
+    do {
+        fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    } while(fd < 0 && errno == EINTR);
+    if(fd < 0) {
+        int err = errno;
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
+                    "Failed to open state directory '%s': %s",
+                    dir, g_strerror(err));
+        g_free(dir);
+        return FALSE;
+    }
+
+    gboolean success = sync_file_descriptor(fd, dir, error);
+    if(close(fd) < 0 && success) {
+        int err = errno;
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
+                    "Failed to close state directory '%s': %s",
+                    dir, g_strerror(err));
+        success = FALSE;
+    }
+    g_free(dir);
+    return success;
+}
+
+gboolean state_write_private_file(const char *path, const void *data,
+                                  gsize size, GError **error) {
     GFile *file = g_file_new_for_path(path);
     GFileOutputStream *stream = g_file_replace(
         file, NULL, FALSE,
@@ -94,13 +144,31 @@ static gboolean write_private_file(const char *path, const void *data,
     gboolean success = g_output_stream_write_all(
         G_OUTPUT_STREAM(stream), size ? data : &empty, size,
         NULL, NULL, error);
+    if(success)
+        success = g_output_stream_flush(G_OUTPUT_STREAM(stream), NULL, error);
+    if(success) {
+        if(!G_IS_FILE_DESCRIPTOR_BASED(stream)) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                        "State output stream for '%s' has no file descriptor",
+                        path);
+            success = FALSE;
+        } else {
+            int fd = g_file_descriptor_based_get_fd(
+                G_FILE_DESCRIPTOR_BASED(stream));
+            success = sync_file_descriptor(fd, path, error);
+        }
+    }
     if(success) {
         success = g_output_stream_close(G_OUTPUT_STREAM(stream), NULL, error);
     } else {
         g_output_stream_close(G_OUTPUT_STREAM(stream), NULL, NULL);
     }
     g_object_unref(stream);
-    return success;
+    if(!success) return FALSE;
+
+    /* Closing a replace stream commits its same-directory rename. Persist
+     * that directory entry before acknowledging a transaction-state write. */
+    return sync_parent_directory(path, error);
 }
 
 static gboolean store_state_value(const char *state_id, const char *name,
@@ -127,6 +195,7 @@ static gboolean store_state_value(const char *state_id, const char *name,
     }
 
     gchar *dir = device_dir_path(state_id);
+    gboolean dir_existed = g_file_test(dir, G_FILE_TEST_IS_DIR);
     if(g_mkdir_with_parents(dir, 0700) < 0) {
         int err = errno;
         g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
@@ -143,6 +212,10 @@ static gboolean store_state_value(const char *state_id, const char *name,
         g_free(dir);
         return FALSE;
     }
+    if(!dir_existed && !sync_parent_directory(dir, error)) {
+        g_free(dir);
+        return FALSE;
+    }
     g_free(dir);
 
     gchar *path = state_file_path(state_id, name, type);
@@ -151,33 +224,50 @@ static gboolean store_state_value(const char *state_id, const char *name,
         uint32_t value;
         memcpy(&value, data, sizeof(value));
         gchar *text = g_strdup_printf("%u\n", value);
-        success = write_private_file(path, text, strlen(text), error);
+        success = state_write_private_file(path, text, strlen(text), error);
         g_free(text);
     } else if(type == TUDOR_STATE_VALUE_BOOL) {
         const char text[] = {
             *(const uint8_t*) data ? '1' : '0', '\n'
         };
-        success = write_private_file(path, text, sizeof(text), error);
+        success = state_write_private_file(path, text, sizeof(text), error);
     } else {
-        success = write_private_file(path, data, size, error);
+        success = state_write_private_file(path, data, size, error);
     }
-    g_free(path);
-    if(!success) return FALSE;
+    if(!success) {
+        g_free(path);
+        return FALSE;
+    }
 
     const enum tudor_state_value_type value_types[] = {
         TUDOR_STATE_VALUE_BLOB,
         TUDOR_STATE_VALUE_UINT32,
         TUDOR_STATE_VALUE_BOOL
     };
+    gboolean removed_stale = FALSE;
     for(size_t i = 0; i < G_N_ELEMENTS(value_types); i++) {
         if(value_types[i] == type) continue;
         gchar *old_path = state_file_path(state_id, name, value_types[i]);
-        if(g_unlink(old_path) < 0 && errno != ENOENT)
-            g_warning("Failed to remove stale state file '%s': %s",
-                      old_path, g_strerror(errno));
+        if(g_unlink(old_path) == 0) {
+            removed_stale = TRUE;
+        } else if(errno != ENOENT) {
+            int err = errno;
+            g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
+                        "Failed to remove stale state file '%s': %s",
+                        old_path, g_strerror(err));
+            g_free(old_path);
+            g_free(path);
+            return FALSE;
+        }
         g_free(old_path);
     }
 
+    if(removed_stale && !sync_parent_directory(path, error)) {
+        g_free(path);
+        return FALSE;
+    }
+
+    g_free(path);
     return TRUE;
 }
 
@@ -244,6 +334,28 @@ static gboolean load_blob_file(const char *path, void **data, gsize *size,
     return TRUE;
 }
 
+static gboolean calibration_matches_state_id(const char *state_id,
+                                              const void *data,
+                                              gsize size) {
+    const size_t prefix_size = strlen(TUDOR_0081_STATE_PREFIX);
+    if(!g_str_has_prefix(state_id, TUDOR_0081_STATE_PREFIX) ||
+       strlen(state_id) != prefix_size + TUDOR_0081_SERIAL_HEX_SIZE ||
+       size != TUDOR_0081_CALIBRATION_SIZE || !data)
+        return FALSE;
+
+    const char *serial = state_id + prefix_size;
+    const guint8 *calibration = data;
+    for(size_t i = 0; i < TUDOR_0081_SERIAL_HEX_SIZE / 2; i++) {
+        int high = g_ascii_xdigit_value(serial[i * 2 + 1]);
+        int low = g_ascii_xdigit_value(serial[i * 2]);
+        if(high < 0 || low < 0 ||
+           calibration[TUDOR_0081_CALIBRATION_ID_OFFSET + i] !=
+               (guint8) ((high << 4) | low))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static gboolean load_state_value(const char *state_id, const char *name,
                                  gboolean *found,
                                  enum tudor_state_value_type *type,
@@ -291,13 +403,26 @@ static gboolean load_state_value(const char *state_id, const char *name,
             *data = NULL;
             return TRUE;
         }
+        if(strcmp(name, "CalibrationData") == 0 &&
+           g_str_has_prefix(state_id, TUDOR_0081_STATE_PREFIX) &&
+           (types[i] != TUDOR_STATE_VALUE_BLOB ||
+            !calibration_matches_state_id(state_id, *data, *size))) {
+            g_warning("Ignoring reader-scoped calibration that does not "
+                      "match the requesting physical reader");
+            wipe_bytes(*data, *size);
+            g_free(*data);
+            *data = NULL;
+            *size = 0;
+            break;
+        }
         *found = TRUE;
         *type = types[i];
         return TRUE;
     }
 
-    /* A single top-level calibration file is the installation/bootstrap
-     * format.  Copy it into the first sensor-specific directory on use. */
+    /* A single top-level calibration file is the old installation/bootstrap
+     * format. Bind it to the physical reader encoded in the state ID before
+     * exposing it, then consume it after a durable device-scoped copy. */
     if(strcmp(name, "CalibrationData") == 0) {
         gchar *legacy_path = g_build_filename(
             state_root, "CalibrationData.blob", NULL);
@@ -306,9 +431,13 @@ static gboolean load_state_value(const char *state_id, const char *name,
                 g_free(legacy_path);
                 return FALSE;
             }
-            if(*size == 0) {
+            if(!calibration_matches_state_id(state_id, *data, *size)) {
+                g_warning("Ignoring unscoped calibration that does not match "
+                          "the requesting physical reader");
+                wipe_bytes(*data, *size);
                 g_free(*data);
                 *data = NULL;
+                *size = 0;
                 g_free(legacy_path);
                 return TRUE;
             }
@@ -320,6 +449,15 @@ static gboolean load_state_value(const char *state_id, const char *name,
                                   &migration_error)) {
                 g_warning("Loaded bootstrap calibration but could not copy it "
                           "to sensor state: %s", migration_error->message);
+                g_clear_error(&migration_error);
+            } else if(g_unlink(legacy_path) < 0) {
+                g_warning("Copied bootstrap calibration but could not remove "
+                          "'%s': %s", legacy_path, g_strerror(errno));
+            } else if(!sync_parent_directory(legacy_path,
+                                             &migration_error)) {
+                g_warning("Consumed bootstrap calibration but could not "
+                          "synchronize its removal: %s",
+                          migration_error->message);
                 g_clear_error(&migration_error);
             }
         }
@@ -481,6 +619,10 @@ void init_state(void) {
     if(g_chmod(devices_dir, 0700) < 0)
         g_error("Failed to protect Tudor device-state directory '%s': %s",
                 devices_dir, g_strerror(errno));
+    GError *error = NULL;
+    if(!sync_parent_directory(devices_dir, &error))
+        g_error("Failed to synchronize Tudor device-state directory: %s",
+                error->message);
     g_free(devices_dir);
 }
 

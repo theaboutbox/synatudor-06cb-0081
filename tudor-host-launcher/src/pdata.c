@@ -1,6 +1,8 @@
 #include <stdbool.h>
+#include <string.h>
 #include <tudor/dbus-launcher.h>
 #include "dbus.h"
+#include "state.h"
 
 static const gchar *pdata_dir;
 
@@ -19,8 +21,15 @@ static GDBusArgInfo pdata_arg = {
 };
 
 static bool validate_sensor_name(GDBusMethodInvocation *invoc, const gchar *sensor_name) {
-    for(; *sensor_name; sensor_name++) {
-        if(!g_ascii_isalnum(*sensor_name)) {
+    size_t length = strnlen(
+        sensor_name, TUDOR_HOST_LAUNCHER_SENSOR_NAME_SIZE + 1);
+    if(!length || length > TUDOR_HOST_LAUNCHER_SENSOR_NAME_SIZE) {
+        g_dbus_method_invocation_return_error(invoc, G_DBUS_ERROR,
+            G_DBUS_ERROR_INVALID_ARGS, "Invalid sensor name length");
+        return false;
+    }
+    for(size_t i = 0; i < length; i++) {
+        if(!g_ascii_isalnum(sensor_name[i])) {
             g_dbus_method_invocation_return_error(invoc, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Invalid sensor name");
             return false;
         }
@@ -108,6 +117,7 @@ void load_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
     bool has_pdata = pdata != NULL;
     if(!pdata) pdata = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, NULL, 0, 1);
     g_dbus_method_invocation_return_value(invoc, g_variant_new("(b@ay)", has_pdata, pdata));
+    g_object_unref(pdata_file);
 }
 
 GDBusMethodInfo launcher_store_pdata_method = {
@@ -130,24 +140,21 @@ void store_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
     g_variant_get(params, "(&s@ay)", &sensor_name, &pdata);
 
     //Validate the sensor name
-    if(!validate_sensor_name(invoc, sensor_name)) return;
+    if(!validate_sensor_name(invoc, sensor_name)) {
+        g_variant_unref(pdata);
+        return;
+    }
 
     //Get the pairing data file
     gchar *path = g_strdup_printf("%s/%s.tpd", pdata_dir, sensor_name);
-    GFile *pdata_file = g_file_new_for_path(path);
-    g_free(path);
 
     //Write data to file
     gsize pdata_len;
     const void *pdata_data = (const void*) g_variant_get_fixed_array(pdata, &pdata_len, 1);
 
-    gboolean suc;
     GError *error = NULL;
-    GFileOutputStream *stream = g_file_replace(pdata_file, NULL, false, G_FILE_CREATE_PRIVATE | G_FILE_CREATE_REPLACE_DESTINATION, NULL, &error);
-    if(stream) {
-        suc = g_output_stream_write_all(G_OUTPUT_STREAM(stream), pdata_data ? pdata_data : &pdata_data, pdata_len, NULL, NULL, &error);
-        g_object_unref(stream);
-    } else suc = false;
+    gboolean suc = state_write_private_file(
+        path, pdata_data ? pdata_data : &pdata_data, pdata_len, &error);
 
     //Return result
     if(suc) {
@@ -158,7 +165,7 @@ void store_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
         g_clear_error(&error);
     }
 
-    g_object_unref(pdata_file);
+    g_free(path);
     g_variant_unref(pdata);
 }
 

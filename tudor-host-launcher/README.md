@@ -24,8 +24,11 @@ are allowlisted, state identifiers are restricted to safe path-component
 characters, writes use private replacement files, and blobs are capped at 64
 KiB.
 
-For initial setup, place a valid calibration blob at
-`/var/lib/tudor/CalibrationData.blob` with mode `0600` and root ownership. The
-launcher copies it into the sensor-specific directory on first use. The
-directory itself should remain `root:root` mode `0700`; systemd applies that
-mode through `StateDirectoryMode=`.
+For migration from an older installation, the launcher accepts a root-owned,
+mode `0600` `/var/lib/tudor/CalibrationData.blob` only when its exact size and
+embedded reader ID match the `06cb:0081` USB serial. It durably copies that
+blob into the sensor-specific directory and removes the unscoped source after
+the first use. Reader-scoped calibration gets the same identity check. Invalid
+calibration is treated as missing so the attached reader is calibrated instead.
+The state directory itself remains `root:root` mode `0700`; systemd applies
+that mode through `StateDirectoryMode=`.
