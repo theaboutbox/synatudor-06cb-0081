@@ -20,11 +20,13 @@ static const char *const allowed_properties[] = {
     "IdleInWorkingState",
     "LastUpdateSystemTimeStamp",
     "OldCalDataDeleted",
+    "PairingContext",
     "PairingData",
     "SetOwnershipFailureCount",
     "SystemWakeEnabled",
     "UnpairingContext",
     "UpdateFirmwareFailureCount",
+    "WakeFromSleepState",
     "deviceInitializeFailures",
     NULL
 };
@@ -56,6 +58,7 @@ static const char *state_extension(enum tudor_state_value_type type) {
     switch(type) {
         case TUDOR_STATE_VALUE_UINT32: return ".uint";
         case TUDOR_STATE_VALUE_BLOB: return ".blob";
+        case TUDOR_STATE_VALUE_BOOL: return ".bool";
         default: return NULL;
     }
 }
@@ -102,8 +105,15 @@ static gboolean store_state_value(const char *state_id, const char *name,
                             "A uint state value must contain four bytes");
         return FALSE;
     }
+    if(type == TUDOR_STATE_VALUE_BOOL &&
+       (size != sizeof(uint8_t) || !data || *(const uint8_t*) data > 1)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "A bool state value must be one byte containing 0 or 1");
+        return FALSE;
+    }
     if(type != TUDOR_STATE_VALUE_UINT32 &&
-       type != TUDOR_STATE_VALUE_BLOB) {
+       type != TUDOR_STATE_VALUE_BLOB &&
+       type != TUDOR_STATE_VALUE_BOOL) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                             "Unknown state value type");
         return FALSE;
@@ -136,20 +146,30 @@ static gboolean store_state_value(const char *state_id, const char *name,
         gchar *text = g_strdup_printf("%u\n", value);
         success = write_private_file(path, text, strlen(text), error);
         g_free(text);
+    } else if(type == TUDOR_STATE_VALUE_BOOL) {
+        const char text[] = {
+            *(const uint8_t*) data ? '1' : '0', '\n'
+        };
+        success = write_private_file(path, text, sizeof(text), error);
     } else {
         success = write_private_file(path, data, size, error);
     }
     g_free(path);
     if(!success) return FALSE;
 
-    enum tudor_state_value_type other =
-        type == TUDOR_STATE_VALUE_BLOB ? TUDOR_STATE_VALUE_UINT32
-                                       : TUDOR_STATE_VALUE_BLOB;
-    gchar *old_path = state_file_path(state_id, name, other);
-    if(g_unlink(old_path) < 0 && errno != ENOENT)
-        g_warning("Failed to remove stale state file '%s': %s",
-                  old_path, g_strerror(errno));
-    g_free(old_path);
+    const enum tudor_state_value_type value_types[] = {
+        TUDOR_STATE_VALUE_BLOB,
+        TUDOR_STATE_VALUE_UINT32,
+        TUDOR_STATE_VALUE_BOOL
+    };
+    for(size_t i = 0; i < G_N_ELEMENTS(value_types); i++) {
+        if(value_types[i] == type) continue;
+        gchar *old_path = state_file_path(state_id, name, value_types[i]);
+        if(g_unlink(old_path) < 0 && errno != ENOENT)
+            g_warning("Failed to remove stale state file '%s': %s",
+                      old_path, g_strerror(errno));
+        g_free(old_path);
+    }
 
     return TRUE;
 }
@@ -174,6 +194,28 @@ static gboolean load_uint_file(const char *path, void **data, gsize *size,
 
     uint32_t *value = g_new(uint32_t, 1);
     *value = (uint32_t) parsed;
+    *data = value;
+    *size = sizeof(*value);
+    return TRUE;
+}
+
+static gboolean load_bool_file(const char *path, void **data, gsize *size,
+                               GError **error) {
+    gchar *text;
+    gsize text_size;
+    if(!g_file_get_contents(path, &text, &text_size, error)) return FALSE;
+
+    if(text_size != 2 || (text[0] != '0' && text[0] != '1') ||
+       text[1] != '\n') {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                    "Invalid bool state file '%s'", path);
+        g_free(text);
+        return FALSE;
+    }
+
+    uint8_t *value = g_new(uint8_t, 1);
+    *value = (uint8_t) (text[0] - '0');
+    g_free(text);
     *data = value;
     *size = sizeof(*value);
     return TRUE;
@@ -204,7 +246,8 @@ static gboolean load_state_value(const char *state_id, const char *name,
 
     const enum tudor_state_value_type types[] = {
         TUDOR_STATE_VALUE_BLOB,
-        TUDOR_STATE_VALUE_UINT32
+        TUDOR_STATE_VALUE_UINT32,
+        TUDOR_STATE_VALUE_BOOL
     };
     for(size_t i = 0; i < G_N_ELEMENTS(types); i++) {
         gchar *path = state_file_path(state_id, name, types[i]);
@@ -214,9 +257,20 @@ static gboolean load_state_value(const char *state_id, const char *name,
             continue;
         }
 
-        gboolean success = types[i] == TUDOR_STATE_VALUE_BLOB
-            ? load_blob_file(path, data, size, error)
-            : load_uint_file(path, data, size, error);
+        gboolean success;
+        switch(types[i]) {
+            case TUDOR_STATE_VALUE_BLOB:
+                success = load_blob_file(path, data, size, error);
+                break;
+            case TUDOR_STATE_VALUE_UINT32:
+                success = load_uint_file(path, data, size, error);
+                break;
+            case TUDOR_STATE_VALUE_BOOL:
+                success = load_bool_file(path, data, size, error);
+                break;
+            default:
+                g_assert_not_reached();
+        }
         g_free(path);
         if(!success) return FALSE;
         /* CalibrationData is generated by the sensor driver.  It can write an

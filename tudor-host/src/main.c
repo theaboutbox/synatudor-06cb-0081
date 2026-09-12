@@ -109,9 +109,12 @@ static bool get_state_cb(const char *name, enum tudor_state_value_type *type,
 
     size_t value_size = size - sizeof(*resp);
     if((resp->value_type != TUDOR_STATE_VALUE_UINT32 &&
-        resp->value_type != TUDOR_STATE_VALUE_BLOB) ||
+        resp->value_type != TUDOR_STATE_VALUE_BLOB &&
+        resp->value_type != TUDOR_STATE_VALUE_BOOL) ||
        (resp->value_type == TUDOR_STATE_VALUE_UINT32 &&
-        value_size != sizeof(uint32_t))) {
+        value_size != sizeof(uint32_t)) ||
+       (resp->value_type == TUDOR_STATE_VALUE_BOOL &&
+        (value_size != sizeof(uint8_t) || resp->data[0] > 1))) {
         log_error("State launcher returned an invalid value for '%s'", name);
         free(buf);
         abort();

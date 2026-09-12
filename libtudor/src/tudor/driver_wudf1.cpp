@@ -579,6 +579,20 @@ static bool tudor_load_state_value(const std::string& name,
         return true;
     }
 
+    std::ifstream bool_input(tudor_state_path(name, ".bool"),
+                             std::ios::binary);
+    if(bool_input) {
+        std::string text(std::istreambuf_iterator<char>(bool_input), {});
+        if(text != "0\n" && text != "1\n") {
+            log_error("Invalid bool device-state value for '%s'",
+                      name.c_str());
+            return false;
+        }
+        *type = TUDOR_STATE_VALUE_BOOL;
+        data->assign(1, static_cast<uint8_t>(text[0] - '0'));
+        return true;
+    }
+
     return false;
 }
 
@@ -608,6 +622,15 @@ static void tudor_store_state_value(const std::string& name,
             const char *bytes = static_cast<const char*>(data);
             output.write(bytes, data_size);
         }
+    } else if(type == TUDOR_STATE_VALUE_BOOL && data &&
+              data_size == sizeof(uint8_t) &&
+              *static_cast<const uint8_t*>(data) <= 1) {
+        std::ofstream output(tudor_state_path(name, ".bool"),
+                             std::ios::binary);
+        const char text[] = {
+            *static_cast<const uint8_t*>(data) ? '1' : '0', '\n'
+        };
+        output.write(text, sizeof(text));
     }
 }
 
@@ -773,6 +796,12 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                 memcpy(&pv->uintVal, data.data(), sizeof(pv->uintVal));
                 std::cout << "Restored uint " << fname << " = "
                           << pv->uintVal << std::endl;
+            } else if(type == TUDOR_STATE_VALUE_BOOL && data.size() == 1 &&
+                      data[0] <= 1) {
+                pv->vt = VT_BOOL;
+                pv->boolVal = data[0] ? -1 : 0;
+                std::cout << "Restored bool " << fname << " = "
+                          << static_cast<unsigned>(data[0]) << std::endl;
             } else if(type == TUDOR_STATE_VALUE_BLOB) {
                 pv->vt = VT_BLOB;
                 pv->blob.cbSize = data.size();
@@ -807,6 +836,14 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                       << "SetNamedValue " << str_u8 << '=' << pv->vt << '\n'
                       << "=====================================" << std::endl;
             switch(pv->vt) {
+                case VT_BOOL: {
+                    const uint8_t value = pv->boolVal != 0;
+                    tudor_store_state_value(str_u8,
+                                            TUDOR_STATE_VALUE_BOOL,
+                                            &value, sizeof(value));
+                    printf("VT_BOOL: %u\n", value);
+                    break;
+                }
                 case VT_I1:
                     printf("VT_I1: %d\n", pv->cVal);
                     break;

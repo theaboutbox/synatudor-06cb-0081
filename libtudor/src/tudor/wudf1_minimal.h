@@ -2,6 +2,7 @@
 #define WUDF1_MINIMAL_CPP_H
 
 #include "internal.h"
+#include <cstddef>
 #include <iostream>
 #include <string>
 #include <cstdint>
@@ -160,6 +161,7 @@ struct PROPVARIANT {
                 CHAR cVal;
                 UCHAR bVal;
                 SHORT iVal;
+                SHORT boolVal;
                 USHORT uiVal;
                 LONG lVal;
                 ULONG ulVal;
@@ -183,6 +185,10 @@ struct PROPVARIANT {
 
 static_assert(sizeof(PROPVARIANT) == 24,
               "64-bit PROPVARIANT must match the Windows ABI");
+static_assert(sizeof(SHORT) == 2,
+              "VARIANT_BOOL must match the Windows 16-bit ABI");
+static_assert(offsetof(PROPVARIANT, boolVal) == 8,
+              "PROPVARIANT boolVal must match the Windows ABI");
 
 
 typedef enum _WDF_TRI_STATE {
