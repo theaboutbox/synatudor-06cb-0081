@@ -601,7 +601,8 @@ prepare_exact_restore_plan() {
 }
 
 prepare_sudo_changed_plan() {
-  local snapshot=$1 plan=$2 path="$snapshot/sudo"
+  local snapshot=$1 plan=$2 path
+  path="$snapshot/sudo"
   if block_is_exact "$path" "$FPRINT_BEGIN" "$FPRINT_END" fprint; then
     strip_block "$path" "$FPRINT_BEGIN" "$FPRINT_END" > "$plan/sudo.content"
     [[ $(active_token_count "$plan/sudo.content") == 0 ]] || return 1
@@ -617,7 +618,8 @@ prepare_sudo_changed_plan() {
 }
 
 prepare_polkit_changed_plan() {
-  local txn=$1 snapshot=$2 plan=$3 path="$snapshot/polkit-1" work
+  local txn=$1 snapshot=$2 plan=$3 path work
+  path="$snapshot/polkit-1"
   if [[ ! -f "$path" ]]; then
     set_plan_action "$plan" polkit-1 noop
     return
@@ -657,8 +659,10 @@ prepare_polkit_changed_plan() {
 }
 
 prepare_rollback_plan() {
-  local txn=$1 attempt=$2 plan="$attempt/plan" snapshot="$attempt/current"
+  local txn=$1 attempt=$2 plan snapshot
   local name target conflict=0
+  plan="$attempt/plan"
+  snapshot="$attempt/current"
   install -d -o 0 -g 0 -m 0700 "$plan" "$snapshot"
 
   for name in sudo polkit-1 omarchy-lock-fingerprint; do
@@ -706,8 +710,10 @@ prepare_rollback_plan() {
 }
 
 apply_rollback_plan() {
-  local attempt=$1 plan="$attempt/plan" snapshot="$attempt/current"
+  local attempt=$1 plan snapshot
   local name action target reference
+  plan="$attempt/plan"
+  snapshot="$attempt/current"
 
   for name in sudo polkit-1 omarchy-lock-fingerprint; do
     same_as_snapshot "$snapshot" "$name" || \

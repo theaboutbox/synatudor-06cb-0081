@@ -664,7 +664,11 @@ start_services() {
     return 1
   fi
   systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
-  timeout --kill-after=3s 20s systemctl start fprintd.service
+  # The one-shot maintenance host exits without advertising READY, so a
+  # synchronous Type=dbus start can wait for systemd's full service timeout.
+  # The result-file polling below owns the bounded completion wait instead.
+  timeout --kill-after=2s 10s \
+    systemctl start --no-block fprintd.service
 }
 
 stop_trigger() {

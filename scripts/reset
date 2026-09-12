@@ -43,7 +43,8 @@ find_sensor() {
 }
 
 clear_ownership_failure_marker() {
-  local state_dir=$1 path=$state_dir/OwnershipFailureDetected.bool
+  local state_dir=$1
+  local path=$state_dir/OwnershipFailureDetected.bool
   local dir owner group mode value
 
   [[ -e $path || -L $path ]] || return 0
@@ -301,7 +302,9 @@ allow_service_activation ||
   die 'could not restore fingerprint service activation'
 timeout --kill-after=3s 20s systemctl start tudor-host-launcher.service
 systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
-timeout --kill-after=3s 20s systemctl start fprintd.service
+# Startup can legitimately remain pending while fprintd waits for the reader.
+# Setup owns the bounded probe and inspects the current-run ownership marker.
+timeout --kill-after=2s 10s systemctl start --no-block fprintd.service
 
 trap - EXIT
-printf 'Reset 06cb:0081 and restarted the fingerprint services.\n'
+printf 'Reset 06cb:0081 and requested restart of the fingerprint services.\n'

@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 script=$repo_dir/scripts/reset-ownership
+reset_script=$repo_dir/scripts/reset
 
 fail() {
   printf 'reset-ownership test failed: %s\n' "$*" >&2
@@ -10,6 +11,7 @@ fail() {
 }
 
 bash -n "$script"
+bash -n "$reset_script"
 # shellcheck disable=SC1090,SC1091
 source "$script"
 
@@ -21,6 +23,39 @@ grep -Fq 'unscoped calibration' <<<"$help_text" ||
 
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+
+# Exercise the reset helper's marker-path setup under nounset. The marker is
+# deliberately absent, so the function returns before inspecting privileged
+# state while still catching dependent assignments in one `local` command.
+# shellcheck disable=SC1090
+source <(sed -n \
+  '/^clear_ownership_failure_marker() {$/,/^}$/p' "$reset_script")
+clear_ownership_failure_marker "$tmp/absent-reader-state"
+reset_restart_tail=$(sed -n '/^\/usr\/bin\/usbreset 06cb:0081$/,$p' \
+  "$reset_script")
+grep -Fxq 'timeout --kill-after=2s 10s systemctl start --no-block fprintd.service' \
+  <<<"$reset_restart_tail" ||
+  fail 'reset waits synchronously for the ownership probe it must return to setup'
+
+# Starting fprintd launches the one-shot maintenance host. That host never
+# advertises READY, so the helper must enqueue the Type=dbus service and let its
+# own result-file loop provide the bounded wait.
+service_start_log=$tmp/service-start-log
+(
+  allow_service_activation() { :; }
+  timeout() {
+    [[ $1 == --kill-after=* ]]
+    shift 2
+    "$@"
+  }
+  systemctl() { printf '%s\n' "$*" >>"$service_start_log"; }
+  start_services
+)
+grep -Fxq 'start tudor-host-launcher.service' "$service_start_log" ||
+  fail 'ownership reset did not start the host launcher'
+grep -Fxq 'start --no-block fprintd.service' "$service_start_log" ||
+  fail 'ownership reset waits synchronously for its one-shot maintenance host'
+
 mkdir -p "$tmp/usb/1-1"
 printf '06cb\n' >"$tmp/usb/1-1/idVendor"
 printf '0081\n' >"$tmp/usb/1-1/idProduct"
@@ -776,5 +811,47 @@ clear_libfprint_metadata "$fprint_root"
   fail 'left hidden-user metadata behind'
 [[ -f $fprint_root/alice/unrelated_driver/left-thumb ]] ||
   fail 'removed metadata for an unrelated driver'
+
+# Exercise every rollback helper that derives one local path from another.
+# Only the function definitions are loaded: the stubs keep this fixture away
+# from live PAM files while Bash nounset checks the declaration order itself.
+(
+  omarchy_pam_script=$repo_dir/scripts/omarchy-pam
+  bash -n "$omarchy_pam_script"
+  for function_name in prepare_sudo_changed_plan \
+                       prepare_polkit_changed_plan \
+                       prepare_rollback_plan apply_rollback_plan; do
+    # shellcheck disable=SC1090
+    source <(sed -n "/^$function_name() {\$/,/^}\$/p" \
+      "$omarchy_pam_script")
+  done
+
+  FPRINT_BEGIN=fixture-fprint-begin
+  FPRINT_END=fixture-fprint-end
+  ROLLBACK_ATTEMPT=
+  ROLLBACK_COMMITTED=1
+  declare -a ROLLBACK_WRITTEN=()
+
+  block_is_exact() { return 1; }
+  has_any_managed_marker() { return 1; }
+  active_token_count() { printf '0\n'; }
+  has_password_auth_flow() { return 0; }
+  set_plan_action() { :; }
+  install() { :; }
+  snapshot_target() { :; }
+  target_path() { printf '/fixture/%s\n' "$1"; }
+  same_as_snapshot() { return 0; }
+
+  prepare_sudo_changed_plan "$tmp/pam-snapshot" "$tmp/pam-plan"
+  prepare_polkit_changed_plan \
+    "$tmp/pam-transaction" "$tmp/pam-snapshot" "$tmp/pam-plan"
+  prepare_rollback_plan "$tmp/pam-transaction" "$tmp/pam-attempt"
+
+  mkdir -p "$tmp/pam-apply/plan" "$tmp/pam-apply/current"
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    printf 'noop\n' >"$tmp/pam-apply/plan/$name.action"
+  done
+  apply_rollback_plan "$tmp/pam-apply"
+) || fail 'Omarchy PAM rollback helpers are not safe under Bash nounset'
 
 printf 'reset-ownership helper tests passed\n'
