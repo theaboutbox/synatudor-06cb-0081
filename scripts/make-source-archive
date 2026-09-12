@@ -82,8 +82,9 @@ done < <(git -C "$repo_dir" ls-tree -r -z --name-only "$tree" -- "${archive_path
 
 mkdir -p -- "$(dirname -- "$output")"
 archive_tmp=$(mktemp "$(dirname -- "$output")/.source.XXXXXX")
+listing_tmp=$(mktemp "$(dirname -- "$output")/.source-list.XXXXXX")
 stage_dir=$(mktemp -d)
-trap 'rm -f -- "$archive_tmp"; rm -rf -- "$stage_dir"' EXIT
+trap 'rm -f -- "$archive_tmp" "$listing_tmp"; rm -rf -- "$stage_dir"' EXIT
 
 # Read only the resolved Git tree, then let GNU tar normalize metadata for all
 # entries. Git's synthetic prefix-directory headers otherwise receive the
@@ -102,7 +103,8 @@ tar -C "$stage_dir" \
   --transform="s,^,$prefix/," \
   -cf - "${archive_paths[@]}" | gzip -n -9 >"$archive_tmp"
 
-if tar -tzf "$archive_tmp" | grep -Eiq '\.(a|blob|bool|cab|cat|dll|exe|gzf|key|log|o|p12|pcap|pcapng|pem|pfx|pkg\.tar[^/]*|so|sys|tpd|tupd|uint)$'; then
+tar -tzf "$archive_tmp" >"$listing_tmp" || die 'cannot list the source archive'
+if grep -Eiq '\.(a|blob|bool|cab|cat|dll|exe|gzf|key|log|o|p12|pcap|pcapng|pem|pfx|pkg\.tar[^/]*|so|sys|tpd|tupd|uint)$' "$listing_tmp"; then
   die 'archive audit found a private or proprietary file'
 fi
 
