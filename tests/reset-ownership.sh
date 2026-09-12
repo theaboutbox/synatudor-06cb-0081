@@ -82,6 +82,57 @@ fi
 [[ $(stat -Lc '%a' -- "$foreign_backup_root") == 755 ]] ||
   fail 'changed a backup directory not owned by root'
 
+# fprintd creates its hierarchy with mode 0700, but g_file_set_contents()
+# creates its root-owned reference leaves using the service umask (normally
+# 0644). Test the tree validator against this layout with the fixture owner.
+fprint_entry_root=$tmp/fprint-entry-root
+fprint_entry_owner=$(id -u)
+mkdir -m 0700 -- "$fprint_entry_root" "$fprint_entry_root/device"
+printf reference >"$fprint_entry_root/device/reference"
+chmod 0644 -- "$fprint_entry_root/device/reference"
+fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner" ||
+  fail 'rejected a normal private fprintd tree with a mode 0644 reference'
+
+chmod 0444 -- "$fprint_entry_root/device/reference"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a fprintd reference without owner write permission'
+fi
+
+chmod 0664 -- "$fprint_entry_root/device/reference"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a group-writable fprintd reference'
+fi
+
+chmod 0744 -- "$fprint_entry_root/device/reference"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted an executable fprintd reference'
+fi
+
+chmod 0644 -- "$fprint_entry_root/device/reference"
+ln -s -- reference "$fprint_entry_root/device/reference-link"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a linked fprintd reference'
+fi
+unlink -- "$fprint_entry_root/device/reference-link"
+
+ln -- "$fprint_entry_root/device/reference" \
+  "$fprint_entry_root/device/reference-hardlink"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a multiply linked fprintd reference'
+fi
+unlink -- "$fprint_entry_root/device/reference-hardlink"
+
+mkdir -m 0755 -- "$fprint_entry_root/public-directory"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a non-private fprintd directory'
+fi
+rmdir -- "$fprint_entry_root/public-directory"
+
+mkfifo -m 0600 -- "$fprint_entry_root/special"
+if fprint_tree_is_safe_for_uid "$fprint_entry_root" "$fprint_entry_owner"; then
+  fail 'accepted a special fprintd entry'
+fi
+
 # Exercise the reset helper's marker-path setup under nounset. The marker is
 # deliberately absent, so the function returns before inspecting privileged
 # state while still catching dependent assignments in one `local` command.
@@ -850,6 +901,7 @@ printf service >"$fprint_root/.service/syna_tudor_relink/device-c/right-thumb"
 # selection can be tested without sudo.
 assert_secure_dir() { :; }
 assert_secure_tree() { :; }
+assert_secure_fprint_tree() { :; }
 backup_libfprint_metadata "$fprint_root" "$fprint_backup"
 [[ -f $fprint_backup/alice/syna_tudor_relink/device-a/right-index ]] ||
   fail 'did not preserve the first user path in the backup'

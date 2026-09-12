@@ -178,6 +178,49 @@ assert_secure_tree() {
     die "$path contains a link, special file, non-root-owned entry, or non-private entry"
 }
 
+fprint_entry_is_safe_for_uid() {
+  local path=$1 expected_owner=${2:-0} owner mode mode_num links
+
+  [[ ! -L $path ]] || return 1
+  owner=$(stat -c '%u' -- "$path") || return 1
+  [[ $owner == "$expected_owner" ]] || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  mode_num=$((8#$mode))
+
+  if [[ -d $path ]]; then
+    # fprintd creates every directory in its storage hierarchy with 0700.
+    (( (mode_num & 07077) == 0 ))
+  elif [[ -f $path ]]; then
+    links=$(stat -c '%h' -- "$path") || return 1
+    # g_file_set_contents() creates fprintd's root-owned reference files using
+    # the service umask, normally 0644. The private ancestor directories make
+    # those read bits inaccessible, but writable, executable, specially
+    # linked, or special-mode entries are never expected.
+    (( links == 1 &&
+       (mode_num & 00600) == 00600 &&
+       (mode_num & 07133) == 0 ))
+  else
+    return 1
+  fi
+}
+
+fprint_tree_is_safe_for_uid() {
+  local path=$1 expected_owner=$2 entry
+
+  find -P "$path" -xdev -print0 |
+      while IFS= read -r -d '' entry; do
+        fprint_entry_is_safe_for_uid "$entry" "$expected_owner" || exit 1
+      done
+}
+
+assert_secure_fprint_tree() {
+  local path=$1
+
+  if ! fprint_tree_is_safe_for_uid "$path" 0; then
+    die "$path contains an unsafe fingerprint-storage entry"
+  fi
+}
+
 assert_status_file() {
   local path=$1 mode owner group size
   [[ -f $path && ! -L $path ]] || die "$path is not a regular file"
@@ -366,7 +409,7 @@ backup_libfprint_metadata() {
     user_name=${user_dir##*/}
     driver_dir=$user_dir/syna_tudor_relink
     [[ -e $driver_dir || -L $driver_dir ]] || continue
-    assert_secure_tree "$driver_dir"
+    assert_secure_fprint_tree "$driver_dir"
 
     if (( ! found )); then
       install -d -m 0700 -- "$destination"
@@ -498,7 +541,7 @@ clear_libfprint_metadata() {
     assert_secure_dir "$user_dir"
     driver_dir=$user_dir/syna_tudor_relink
     [[ -e $driver_dir || -L $driver_dir ]] || continue
-    assert_secure_tree "$driver_dir"
+    assert_secure_fprint_tree "$driver_dir"
     rm -rf --one-file-system -- "$driver_dir"
   done
 }
