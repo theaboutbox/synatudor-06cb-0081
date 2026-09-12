@@ -72,6 +72,7 @@ The initial hardware port has passed:
 - enrollment and deletion through `fprintd`
 - repeated matching and wrong-finger rejection
 - persistence across service restarts and a USB reset
+- fresh per-handshake P-256 session keys instead of replay-only crypto state
 - sudo, polkit, and the Omarchy lock screen with password fallback
 - the full automated suite under GCC, Clang, ASan/UBSan, and TSan
 
@@ -98,6 +99,9 @@ Calibration, pairing, cryptographic registry state, and enrollment metadata
 are stored under root-only `/var/lib/tudor`. Calibration is specific to one
 physical reader. Never copy or publish files from `/var/lib/tudor` or
 `/var/lib/fprint`, fingerprint captures, or unedited verbose logs.
+
+Keep `~/.cache/synatudor-0081` private as well. It contains Lenovo's downloaded
+package and the locally built Arch package, which embeds the vendor DLL data.
 
 The normal uninstaller preserves this state so a reinstall can reuse it:
 

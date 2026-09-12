@@ -41,6 +41,14 @@ bcrypt_sha1_test = executable('bcrypt-sha1-test',
     install: false)
 test('bcrypt-sha1', bcrypt_sha1_test, timeout: 5)
 
+bcrypt_ecc_test = executable('bcrypt-ecc-test',
+    'tests/bcrypt-ecc.c',
+    dependencies: [libtudor_dep, cryptbridge_dep],
+    include_directories: ['../libtudor/src', '../libtudor/src/winapi'],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('bcrypt-ecc', bcrypt_ecc_test, timeout: 10)
+
 winusb_borrowed_test = executable('winusb-borrowed-test',
     'tests/winusb-borrowed.c',
     dependencies: [thread_dep, libtudor_dep, libusb_dep],

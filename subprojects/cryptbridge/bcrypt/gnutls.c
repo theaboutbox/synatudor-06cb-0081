@@ -37,6 +37,7 @@
 
 #include "ntsecapi.h"
 #include "bcrypt.h"
+#include "bcrypt_ecc_util.h"
 
 #include "bcrypt_internal.h"
 #include "secrets.h"
@@ -556,7 +557,7 @@ static NTSTATUS export_gnutls_pubkey_ecc( gnutls_privkey_t gnutls_key, UCHAR **p
     gnutls_ecc_curve_t curve;
     gnutls_datum_t x, y;
     DWORD magic, size;
-    UCHAR *src, *dst;
+    UCHAR *dst;
     int ret;
 
     if ((ret = gnutls_privkey_export_ecc_raw( gnutls_key, &curve, &x, &y, NULL )))
@@ -574,37 +575,33 @@ static NTSTATUS export_gnutls_pubkey_ecc( gnutls_privkey_t gnutls_key, UCHAR **p
 
     default:
         FIXME( "curve %u not supported\n", curve );
-        free( x.data ); free( y.data );
+        gnutls_free( x.data ); gnutls_free( y.data );
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    if (!(ecc_blob = heap_alloc( sizeof(*ecc_blob) + x.size + y.size )))
+    if (!(ecc_blob = heap_alloc( sizeof(*ecc_blob) + size * 2 )))
     {
-        gnutls_perror( ret );
-        free( x.data ); free( y.data );
+        gnutls_free( x.data ); gnutls_free( y.data );
         return STATUS_NO_MEMORY;
     }
 
     ecc_blob->dwMagic = magic;
-    ecc_blob->cbKey   = size;
-
+    ecc_blob->cbKey = size;
     dst = (UCHAR *)(ecc_blob + 1);
-    if (x.size == size + 1) src = x.data + 1;
-    else src = x.data;
-    memcpy( dst, src, size );
-
-    dst += size;
-    if (y.size == size + 1) src = y.data + 1;
-    else src = y.data;
-    memcpy( dst, src, size );
+    if (!cryptbridge_copy_be_component( dst, size, &x ) ||
+        !cryptbridge_copy_be_component( dst + size, size, &y ))
+    {
+        heap_free( ecc_blob );
+        gnutls_free( x.data ); gnutls_free( y.data );
+        return STATUS_INTERNAL_ERROR;
+    }
 
     *pubkey = (UCHAR *)ecc_blob;
-    *pubkey_len = sizeof(*ecc_blob) + ecc_blob->cbKey * 2;
+    *pubkey_len = sizeof(*ecc_blob) + size * 2;
 
-    free( x.data ); free( y.data );
+    gnutls_free( x.data ); gnutls_free( y.data );
     return STATUS_SUCCESS;
 }
-
 
 NTSTATUS key_asymmetric_generate( struct key *key )
 {
@@ -614,6 +611,7 @@ NTSTATUS key_asymmetric_generate( struct key *key )
     NTSTATUS status;
     int ret;
 
+    if (key->u.a.handle || key->u.a.pubkey) return STATUS_INVALID_HANDLE;
 
     switch (key->alg_id)
     {
@@ -627,31 +625,27 @@ NTSTATUS key_asymmetric_generate( struct key *key )
         return STATUS_NOT_SUPPORTED;
     }
 
-#if 0
-    if ((ret = pgnutls_privkey_init( &handle )))
+    if ((ret = gnutls_privkey_init( &handle )))
     {
-        pgnutls_perror( ret );
+        gnutls_perror( ret );
         return STATUS_INTERNAL_ERROR;
     }
 
-    if ((ret = pgnutls_privkey_generate( handle, pk_alg, GNUTLS_CURVE_TO_BITS(curve), 0 )))
+    if ((ret = gnutls_privkey_generate( handle, pk_alg, GNUTLS_CURVE_TO_BITS(curve), 0 )))
     {
-        pgnutls_perror( ret );
-        pgnutls_privkey_deinit( handle );
+        gnutls_perror( ret );
+        gnutls_privkey_deinit( handle );
         return STATUS_INTERNAL_ERROR;
     }
 
     if ((status = export_gnutls_pubkey_ecc( handle, &key->u.a.pubkey, &key->u.a.pubkey_len )))
     {
-        pgnutls_privkey_deinit( handle );
+        gnutls_privkey_deinit( handle );
         return status;
     }
 
     key->u.a.handle = handle;
     return STATUS_SUCCESS;
-#else
-    return STATUS_NOT_IMPLEMENTED;
-#endif
 }
 
 NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len )
@@ -660,7 +654,7 @@ NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len 
     gnutls_ecc_curve_t curve;
     gnutls_datum_t x, y, d;
     DWORD magic, size;
-    UCHAR *src, *dst;
+    UCHAR *dst;
     int ret;
 
     if ((ret = gnutls_privkey_export_ecc_raw( key->u.a.handle, &curve, &x, &y, &d )))
@@ -678,7 +672,7 @@ NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len 
 
     default:
         FIXME( "curve %u not supported\n", curve );
-        free( x.data ); free( y.data ); free( d.data );
+        gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
         return STATUS_NOT_IMPLEMENTED;
     }
 
@@ -687,25 +681,19 @@ NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len 
     {
         ecc_blob = (BCRYPT_ECCKEY_BLOB *)buf;
         ecc_blob->dwMagic = magic;
-        ecc_blob->cbKey   = size;
-
+        ecc_blob->cbKey = size;
         dst = (UCHAR *)(ecc_blob + 1);
-        if (x.size == size + 1) src = x.data + 1;
-        else src = x.data;
-        memcpy( dst, src, size );
 
-        dst += size;
-        if (y.size == size + 1) src = y.data + 1;
-        else src = y.data;
-        memcpy( dst, src, size );
-
-        dst += size;
-        if (d.size == size + 1) src = d.data + 1;
-        else src = d.data;
-        memcpy( dst, src, size );
+        if (!cryptbridge_copy_be_component( dst, size, &x ) ||
+            !cryptbridge_copy_be_component( dst + size, size, &y ) ||
+            !cryptbridge_copy_be_component( dst + size * 2, size, &d ))
+        {
+            gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
+            return STATUS_INTERNAL_ERROR;
+        }
     }
 
-    free( x.data ); free( y.data ); free( d.data );
+    gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
     return STATUS_SUCCESS;
 }
 
@@ -737,7 +725,11 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
     }
 
     ecc_blob = (BCRYPT_ECCKEY_BLOB *)buf;
-    derive_ec_pubkey((unsigned char *)(ecc_blob + 1));
+    if (derive_ec_pubkey((unsigned char *)(ecc_blob + 1)))
+    {
+        gnutls_privkey_deinit( handle );
+        return STATUS_INVALID_PARAMETER;
+    }
     x.data = (unsigned char *)(ecc_blob + 1);
     x.size = ecc_blob->cbKey;
     y.data = x.data + ecc_blob->cbKey;
@@ -1071,13 +1063,16 @@ NTSTATUS WINAPI BCryptSignHash(
             dwFlags);
     
     if(ALG_ID_ECDSA_P256 == key->alg_id) {
-        if(pPaddingInfo || dwFlags) return STATUS_NOT_IMPLEMENTED;
-
         gnutls_ecc_curve_t curve;
         gnutls_datum_t x, y, d;
-        DWORD magic, size;
-        UCHAR *src, *dst;
         int ret;
+
+        if(pPaddingInfo || dwFlags) return STATUS_NOT_IMPLEMENTED;
+        if(!pcbResult) return STATUS_INVALID_PARAMETER;
+
+        *pcbResult = 64;
+        if(!pbOutput) return STATUS_SUCCESS;
+        if(cbOutput < *pcbResult) return STATUS_BUFFER_TOO_SMALL;
 
         if ((ret = gnutls_privkey_export_ecc_raw( key->u.a.handle, &curve, &x, &y, &d )))
         {
@@ -1085,58 +1080,14 @@ NTSTATUS WINAPI BCryptSignHash(
             return STATUS_INTERNAL_ERROR;
         }
 
-        if(ecc_sign(x.data, x.size,
-                    y.data, y.size,
-                    d.data, d.size,
-                    pbInput, cbInput,
-                    pbOutput)) {
+        ret = ecc_sign(x.data, x.size, y.data, y.size, d.data, d.size,
+                       pbInput, cbInput, pbOutput);
+        gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
+        if(ret)
+        {
             ERR("ecc_sign failed\n");
             return STATUS_INTERNAL_ERROR;
         }
-    #if 0
-int ecc_sign(PUCHAR x, PUCHAR y, PUCHAR d, PUCHAR src, ULONG src_len, PUCHAR dst);
-
-
-        gnutls_datum_t src;
-        src.data = pbInput;
-        src.size = cbInput;
-
-        gnutls_datum_t signature;
-        signature.data = NULL;
-        signature.size = 0;
-
-        int ret = gnutls_privkey_sign_hash(
-                    key->u.a.handle, 
-                    GNUTLS_DIG_SHA256,
-                    0, 
-                    &src, 
-                    &signature);
-
-        if(GNUTLS_E_SUCCESS != ret) {
-            ERR("gnutls_privkey_sign_hash returned %d\n", ret);
-            return STATUS_INTERNAL_ERROR;
-        }
-
-
-        char buf1[1024];
-        DWORD cb = sizeof(buf1);
-        CERT_ECC_SIGNATURE *s = (CERT_ECC_SIGNATURE *)buf1;
-
-        if(!CryptDecodeObject(X509_ASN_ENCODING, X509_ECC_SIGNATURE, signature.data, signature.size, 0, buf1, &cb)) {
-            ERR("failed to decode fresh signature: %x\n", GetLastError());
-            return STATUS_INTERNAL_ERROR;
-        }
-
-        if(cbOutput < s->r.cbData + s->s.cbData) {
-            ERR("not enough space in pbOutput\n");
-            return STATUS_INTERNAL_ERROR;
-        }
-
-        memcpy(pbOutput, s->r.pbData, s->r.cbData);
-        memcpy(pbOutput+s->r.cbData, s->s.pbData, s->s.cbData);
-        *pcbResult = s->r.cbData + s->s.cbData;
-
-#endif
         return STATUS_SUCCESS;
     }
 

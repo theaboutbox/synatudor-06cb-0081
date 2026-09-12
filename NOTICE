@@ -2,7 +2,9 @@ synaTudor support for Synaptics 06cb:0081
 
 This repository is derived from the relink branch of Popax21/synaTudor and
 subsequent work in rstar000/synaTudor. The original Git history is retained so
-individual authorship remains visible.
+individual authorship remains visible. Local build caches, machine-specific
+paths, diagnostic residue, and deterministic USB-replay crypto were removed
+from that history before publication.
 
 The cryptbridge subproject contains code derived from Wine and includes work
 copyrighted by Wine and CodeWeavers contributors. Its original copyright and

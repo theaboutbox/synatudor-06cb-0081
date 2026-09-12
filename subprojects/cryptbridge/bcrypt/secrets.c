@@ -3,6 +3,7 @@
 #include "wine/port.h"
 
 #include <stdarg.h>
+#include <limits.h>
 #ifdef HAVE_COMMONCRYPTO_COMMONCRYPTOR_H
 #include <AvailabilityMacros.h>
 #include <CommonCrypto/CommonCryptor.h>
@@ -150,111 +151,76 @@ sBN_bn2hex(BIGNUM *bn)
 int
 derive_ec_pubkey(unsigned char *buf)
 {
-    BIGNUM *prv;
-    EC_POINT *pub;
-    EC_GROUP *curve;
-    BN_CTX *ctx = BN_CTX_new();
-    unsigned char *out;
+    BIGNUM *prv = NULL;
+    EC_POINT *pub = NULL;
+    EC_GROUP *curve = NULL;
+    BN_CTX *ctx = NULL;
+    unsigned char out[65];
+    int result = -1;
 
+    if(!buf) return -1;
+    ctx = BN_CTX_new();
     curve = EC_GROUP_new_by_curve_name(CURVE_NID);
-
+    if(!ctx || !curve) goto done;
     pub = EC_POINT_new(curve);
-    prv = BN_bin2bn(buf+32*2, 32, NULL);
+    prv = BN_bin2bn(buf + 64, 32, NULL);
+    if(!pub || !prv || BN_is_zero(prv)) goto done;
+    if(EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx) != 1) goto done;
+    if(EC_POINT_point2oct(curve, pub, POINT_CONVERSION_UNCOMPRESSED,
+                         out, sizeof(out), ctx) != sizeof(out)) goto done;
 
-    if (1 != EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx))
-        puts("oops, EC_POINT_mul");
+    memcpy(buf, out + 1, 64);
+    result = 0;
 
-    if(65 != EC_POINT_point2buf(curve, pub, POINT_CONVERSION_UNCOMPRESSED, &out, ctx))
-        puts("oops, EC_POINT_point2buf");
-
-    memmove(buf, out+1, 32*2);
-
-    pCRYPTO_free(out, OPENSSL_FILE, OPENSSL_LINE);
+done:
     BN_free(prv);
     EC_POINT_free(pub);
     EC_GROUP_free(curve);
     BN_CTX_free(ctx);
-
-    return 0;
+    return result;
 }
-
 
 int ecc_sign(
             PUCHAR px, ULONG sx,
             PUCHAR py, ULONG sy,
             PUCHAR pd, ULONG sd,
-            PUCHAR src, ULONG src_len, 
+            PUCHAR src, ULONG src_len,
             PUCHAR dst)
 {
-    ERR("Enter ecc_sign\n");
-    ERR("px ptr = %p size = %ul\n", px, sx);
-    ERR("py ptr = %p size = %ul\n", py, sy);
-    ERR("pd ptr = %p size = %ul\n", pd, sd);
-    ERR("src ptr = %p size = %ul\n", src, src_len);
-    ERR("dst ptr = %p\n", dst);
+    EC_KEY *key = NULL;
+    ECDSA_SIG *sig = NULL;
+    BIGNUM *x = NULL, *y = NULL, *d = NULL;
+    const BIGNUM *r, *s;
+    int result = -1;
 
-    EC_KEY *key = EC_KEY_new_by_curve_name(CURVE_NID);
-    BIGNUM *x = BN_bin2bn(px, sx, NULL);
-    BIGNUM *y = BN_bin2bn(py, sy, NULL);
-    BIGNUM *d = BN_bin2bn(pd, sd, NULL);
+    if(!px || !py || !pd || !src || !dst || src_len > INT_MAX) return -1;
 
-    if(!x || !y || !d) {
-        ERR("oops, one of pBN_bin2bn failed (%p %p %p)\n", x, y, d);
-        return -1;
-    }
+    key = EC_KEY_new_by_curve_name(CURVE_NID);
+    x = BN_bin2bn(px, sx, NULL);
+    y = BN_bin2bn(py, sy, NULL);
+    d = BN_bin2bn(pd, sd, NULL);
+    if(!key || !x || !y || !d) goto done;
 
-    if(!EC_KEY_set_private_key(key, d)) {
-        ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return -1;
-    }
-    ERR("After Set private key\n");
-#if 1
-    if(!EC_KEY_set_public_key_affine_coordinates(key, x, y)) {
-        ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return -1;
-    }
-    ERR("After Set public key\n");
-#endif
+    if(!EC_KEY_set_private_key(key, d)) goto done;
+    if(!EC_KEY_set_public_key_affine_coordinates(key, x, y)) goto done;
+    if(EC_KEY_check_key(key) != 1) goto done;
 
-    BIGNUM *kinv = BN_new();
-    BIGNUM *rp = BN_new();;
-
-    if(!ECDSA_sign_setup(key, NULL, &kinv, &rp)) {
-        ERR("oops, ECDSA_sign_setup failed\n");
-        return -1;
-    }
-    ERR("After BIGNUM convert");
-    ECDSA_SIG *sig = ECDSA_do_sign_ex(src, src_len, kinv, rp, key);
-    BN_free(kinv);
-    BN_free(rp);
-
-    if(sig == NULL) {
-        ERR("oops, ECDSA_do_sign failed\n");
-        return -1;
-    }
-
-    const BIGNUM *r = NULL;
-    const BIGNUM *s = NULL;
+    sig = ECDSA_do_sign(src, (int)src_len, key);
+    if(!sig) goto done;
 
     ECDSA_SIG_get0(sig, &r, &s);
+    if(BN_bn2binpad(r, dst, 32) != 32) goto done;
+    if(BN_bn2binpad(s, dst + 32, 32) != 32) goto done;
 
-    if(!BN_bn2binpad(r, dst, 32)) {
-        ERR("oops, BN_bn2binpad failed for r\n");
-        return -1;
-    }
+    result = 0;
 
-    if(!BN_bn2binpad(s, dst+32, 32)) {
-        ERR("oops, BN_bn2binpad failed for s\n");
-        return -1;
-    }
-
-    BN_free(r);
-    BN_free(s);
+done:
+    ECDSA_SIG_free(sig);
     BN_free(d);
     BN_free(y);
     BN_free(x);
-
-    return 0;
+    EC_KEY_free(key);
+    return result;
 }
 
 struct my_secret {
@@ -270,95 +236,100 @@ NTSTATUS WINAPI BCryptSecretAgreement(
 )
 {
     gnutls_ecc_curve_t curve;
-    gnutls_datum_t myX, myY, myD;
-    BIGNUM *myXbn, *myYbn, *myDbn;
-    EC_KEY *myKey = EC_KEY_new_by_curve_name(CURVE_NID);
+    gnutls_datum_t myX = {0}, myY = {0}, myD = {0};
+    BIGNUM *myXbn = NULL, *myYbn = NULL, *myDbn = NULL;
+    BIGNUM *peerXbn = NULL, *peerYbn = NULL;
+    EC_KEY *myKey = NULL, *peerKey = NULL;
+    struct my_secret *secret = NULL;
+    struct key *privKeyInt = hPrivKey;
+    struct key *peerKeyInt = hPubKey;
+    BCRYPT_ECCKEY_BLOB *ecc_blob;
+    NTSTATUS status = STATUS_INTERNAL_ERROR;
+    int secret_size;
 
-    NTSTATUS ret;
+    if(!phAgreedSecret || dwFlags) return STATUS_INVALID_PARAMETER;
+    *phAgreedSecret = NULL;
 
-    // my private key
-    ret = get_gnutls_ecc_key_params(hPrivKey, &curve, &myX, &myY, &myD);
-    if(ret) {
-        ERR("oops, get_gnutls_ecc_key_params failed for my key\n");
-        return STATUS_INTERNAL_ERROR;
+    if(!privKeyInt || privKeyInt->hdr.magic != MAGIC_KEY ||
+       privKeyInt->alg_id != ALG_ID_ECDH_P256) {
+        status = STATUS_INVALID_HANDLE;
+        goto done;
     }
-    
+
+    if(get_gnutls_ecc_key_params(hPrivKey, &curve, &myX, &myY, &myD))
+        goto done;
+    if(curve != GNUTLS_ECC_CURVE_SECP256R1) {
+        status = STATUS_NOT_SUPPORTED;
+        goto done;
+    }
+
+    myKey = EC_KEY_new_by_curve_name(CURVE_NID);
     myXbn = BN_bin2bn(myX.data, myX.size, NULL);
     myYbn = BN_bin2bn(myY.data, myY.size, NULL);
     myDbn = BN_bin2bn(myD.data, myD.size, NULL);
+    if(!myKey || !myXbn || !myYbn || !myDbn) goto done;
+    if(!EC_KEY_set_public_key_affine_coordinates(myKey, myXbn, myYbn)) goto done;
+    if(!EC_KEY_set_private_key(myKey, myDbn)) goto done;
+    if(EC_KEY_check_key(myKey) != 1) goto done;
 
-
-    if(!myXbn || !myYbn || !myDbn) {
-        ERR("oops, one of pBN_bin2bn failed\n");
-        return STATUS_INTERNAL_ERROR;
+    if(!peerKeyInt || peerKeyInt->hdr.magic != MAGIC_KEY ||
+       peerKeyInt->alg_id != ALG_ID_ECDH_P256 ||
+       !peerKeyInt->u.a.pubkey ||
+       peerKeyInt->u.a.pubkey_len < sizeof(*ecc_blob) + 64) {
+        status = STATUS_INVALID_HANDLE;
+        goto done;
     }
 
-    if(!EC_KEY_set_public_key_affine_coordinates(myKey, myXbn, myYbn)) {
-        ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
+    ecc_blob = (BCRYPT_ECCKEY_BLOB *)peerKeyInt->u.a.pubkey;
+    if(ecc_blob->dwMagic != BCRYPT_ECDH_PUBLIC_P256_MAGIC || ecc_blob->cbKey != 32) {
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
     }
 
-    if(!EC_KEY_set_private_key(myKey, myDbn)) {
-        ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
-        return -1;
+    peerKey = EC_KEY_new_by_curve_name(CURVE_NID);
+    peerXbn = BN_bin2bn((unsigned char *)(ecc_blob + 1), ecc_blob->cbKey, NULL);
+    peerYbn = BN_bin2bn((unsigned char *)(ecc_blob + 1) + ecc_blob->cbKey,
+                        ecc_blob->cbKey, NULL);
+    if(!peerKey || !peerXbn || !peerYbn) goto done;
+    if(!EC_KEY_set_public_key_affine_coordinates(peerKey, peerXbn, peerYbn)) goto done;
+
+    secret = heap_alloc(sizeof(*secret));
+    if(!secret) {
+        status = STATUS_NO_MEMORY;
+        goto done;
     }
-
-    // peer pub key
-    BIGNUM *peerXbn, *peerYbn;
-    EC_KEY *peerKey = EC_KEY_new_by_curve_name(CURVE_NID);
-
-    struct key *peerKeyInt = hPubKey;
-    BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB *)peerKeyInt->u.a.pubkey;
-
-    peerXbn = BN_bin2bn((unsigned char *)(ecc_blob+1), ecc_blob->cbKey, NULL);
-    peerYbn = BN_bin2bn((unsigned char *)(ecc_blob+1) + ecc_blob->cbKey, ecc_blob->cbKey, NULL);
-
-    if(!peerXbn || !peerYbn) {
-        ERR("oops, one of pBN_bin2bn failed\n");
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    if(!EC_KEY_set_public_key_affine_coordinates(peerKey, peerXbn, peerYbn)) {
-        ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    ERR("Yay! created both keys!\n");
-
-    /* OpenSSL 3 no longer reliably derives from EVP_PKEY objects populated
-     * through the deprecated EVP_PKEY_set1_EC_KEY bridge.  In particular,
-     * EVP_PKEY_derive_init() and set_peer() can succeed while the size query
-     * still fails.  CNG's ECDH secret is the raw P-256 shared point x
-     * coordinate, which ECDH_compute_key returns directly in big-endian
-     * form. */
-    struct my_secret *secret = heap_alloc(sizeof(*secret));
-    if(!secret) return STATUS_NO_MEMORY;
-
     secret->secret_size = 32;
     secret->secret = heap_alloc(secret->secret_size);
     if(!secret->secret) {
-        heap_free(secret);
-        return STATUS_NO_MEMORY;
+        status = STATUS_NO_MEMORY;
+        goto done;
     }
 
-    int secret_size = ECDH_compute_key(secret->secret, secret->secret_size,
-                                       EC_KEY_get0_public_key(peerKey),
-                                       myKey, NULL);
-    if(secret_size <= 0) {
-        ERR("oops, ECDH_compute_key failed: %s\n",
-            ERR_error_string(ERR_get_error(), NULL));
-        heap_free(secret->secret);
-        heap_free(secret);
-        return STATUS_INTERNAL_ERROR;
-    }
+    secret_size = ECDH_compute_key(secret->secret, secret->secret_size,
+                                   EC_KEY_get0_public_key(peerKey), myKey, NULL);
+    if(secret_size <= 0) goto done;
 
     secret->secret_size = secret_size;
     *phAgreedSecret = secret;
+    secret = NULL;
+    status = STATUS_SUCCESS;
 
-    // FIXME - release all the memory
-    // FIXME - fix error handling
-    
-    return STATUS_SUCCESS;
+done:
+    if(secret) {
+        heap_free(secret->secret);
+        heap_free(secret);
+    }
+    EC_KEY_free(peerKey);
+    EC_KEY_free(myKey);
+    BN_free(peerYbn);
+    BN_free(peerXbn);
+    BN_free(myDbn);
+    BN_free(myYbn);
+    BN_free(myXbn);
+    gnutls_free(myD.data);
+    gnutls_free(myY.data);
+    gnutls_free(myX.data);
+    return status;
 }
 
 
@@ -385,11 +356,19 @@ NTSTATUS WINAPI BCryptDeriveKey(
 )
 {
     struct my_secret *secret = hSharedSecret;
-    char label[1024];
+    EVP_PKEY_CTX *pctx = NULL;
+    unsigned char derived[48];
+    const char *label = NULL;
     PUCHAR seed = NULL;
-    DWORD proto = 0;
+    size_t label_size = 0, derived_size = sizeof(derived);
+    BOOL have_label = FALSE;
+    NTSTATUS status = STATUS_INTERNAL_ERROR;
 
-    label[0] = 0;
+    if(!secret || !secret->secret || !secret->secret_size ||
+       secret->secret_size > INT_MAX || !pwszKDF ||
+       !pParameterList || !pcbResult || dwFlags ||
+       (pParameterList->cBuffers && !pParameterList->pBuffers))
+        return STATUS_INVALID_PARAMETER;
 
     // FIXME("hSharedSecret=%p pwszKDF=%s pParameterList=%p pbDerivedKey=%p cbDerivedKey=%d pcbResult=%p dwFlags=%x\n", 
     //             hSharedSecret,
@@ -402,25 +381,28 @@ NTSTATUS WINAPI BCryptDeriveKey(
     //         );
 
     if(pParameterList) {
-        for(int i=0;i<pParameterList->cBuffers;i++) {
+        for(ULONG i=0;i<pParameterList->cBuffers;i++) {
             PBCryptBuffer bcb = pParameterList->pBuffers + i;            
             switch(bcb->BufferType) {
                 case 4:
-                    memcpy(label, bcb->pvBuffer, bcb->cbBuffer);
-                    label[bcb->cbBuffer] = 0;
+                    if(!bcb->cbBuffer || !bcb->pvBuffer)
+                        return STATUS_INVALID_PARAMETER;
+                    label = bcb->pvBuffer;
+                    label_size = strnlen(label, bcb->cbBuffer);
+                    if(label_size == bcb->cbBuffer || label_size > INT_MAX)
+                        return STATUS_INVALID_PARAMETER;
+                    have_label = TRUE;
                     break;
 
                 case 7:
-                    proto = *(DWORD*)bcb->pvBuffer;
+                    if(bcb->cbBuffer != sizeof(DWORD) || !bcb->pvBuffer)
+                        return STATUS_INVALID_PARAMETER;
                     break;
 
                 case 5:
-                    if(bcb->cbBuffer != 64) {
-                        ERR("Seed must be 64 bytes long\n");
-                        return STATUS_INTERNAL_ERROR;
-                    }
+                    if(bcb->cbBuffer != 64 || !bcb->pvBuffer)
+                        return STATUS_INVALID_PARAMETER;
                     seed = bcb->pvBuffer;
-
                     break;
 
                 default:
@@ -430,59 +412,40 @@ NTSTATUS WINAPI BCryptDeriveKey(
         }
     }
 
+    if(!have_label || !seed) return STATUS_INVALID_PARAMETER;
+    *pcbResult = sizeof(derived);
+    if(!pbDerivedKey) return STATUS_SUCCESS;
+    if(cbDerivedKey < sizeof(derived)) return STATUS_BUFFER_TOO_SMALL;
 
-    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_TLS1_PRF, NULL);
-    if (EVP_PKEY_derive_init(pctx) <= 0) {
-        ERR("EVP_PKEY_derive_init: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_TLS1_PRF, NULL);
+    if(!pctx || EVP_PKEY_derive_init(pctx) <= 0) goto done;
 
-    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE, EVP_PKEY_CTRL_TLS_MD, 0, (void *)EVP_sha256()) <= 0) {
-        ERR("EVP_PKEY_CTX_set_tls1_prf_md: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE,
+                         EVP_PKEY_CTRL_TLS_MD, 0,
+                         (void *)EVP_sha256()) <= 0) goto done;
 
-    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE, EVP_PKEY_CTRL_TLS_SECRET, secret->secret_size, (void *)secret->secret) <= 0) {
-        ERR("EVP_PKEY_CTX_set1_tls1_prf_secret: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE,
+                         EVP_PKEY_CTRL_TLS_SECRET, secret->secret_size,
+                         (void *)secret->secret) <= 0) goto done;
 
-    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE, EVP_PKEY_CTRL_TLS_SEED, strlen(label), (void *)label) <= 0) {
-        ERR("EVP_PKEY_CTX_add1_tls1_prf_seed(label): %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE,
+                         EVP_PKEY_CTRL_TLS_SEED, label_size,
+                         (void *)label) <= 0) goto done;
 
-    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE, EVP_PKEY_CTRL_TLS_SEED, 64, (void *)seed) <= 0) {
-        ERR("EVP_PKEY_CTX_add1_tls1_prf_seed(seed): %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    if(EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_DERIVE,
+                         EVP_PKEY_CTRL_TLS_SEED, 64,
+                         (void *)seed) <= 0) goto done;
 
-    unsigned char buf[48];
-    size_t sz = sizeof(buf);
+    if(EVP_PKEY_derive(pctx, derived, &derived_size) <= 0 ||
+       derived_size != sizeof(derived)) goto done;
 
-    if (EVP_PKEY_derive(pctx, buf, &sz) <= 0) {
-        ERR("EVP_PKEY_derive: %s\n", pERR_error_string(pERR_get_error(), NULL));
-        return STATUS_INTERNAL_ERROR;
-    }
+    memcpy(pbDerivedKey, derived, sizeof(derived));
+    status = STATUS_SUCCESS;
 
-    if(sz != sizeof(buf)) {
-        ERR("EVP_PKEY_derive was expected to return %ld bytes instead of %ld?\n", sizeof(buf), sz);
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    ERR("%d < %ld?\n", cbDerivedKey, sz);
-
-    if(pbDerivedKey && cbDerivedKey >= sz) {
-        memcpy(pbDerivedKey, buf, sz);
-    } else {
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    if(pcbResult) {
-        *pcbResult = sz;
-    }
-
-    return STATUS_SUCCESS;
+done:
+    OPENSSL_cleanse(derived, sizeof(derived));
+    EVP_PKEY_CTX_free(pctx);
+    return status;
 }
 
 NTSTATUS WINAPI BCryptDestroySecret(

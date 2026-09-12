@@ -40,7 +40,9 @@ PAM / desktop / fprintd clients
   WUDF calls they use, and exposes the Windows Biometric Framework sensor,
   engine, and storage interfaces.
 - `subprojects/cryptbridge` implements additional Windows cryptography and
-  registry behavior used while the sensor establishes its secure channel.
+  registry behavior used while the sensor establishes its secure channel. It
+  generates a fresh P-256 ECDH key for each channel handshake; persistent
+  pairing identity is stored separately in the protected registry state.
 - `cli` is a development interface and has a less restrictive threat model
   than the fprintd path.
 
@@ -84,6 +86,7 @@ this device needed additional compatibility work:
 - USB discovery and udev matching for `06cb:0081`
 - a WUDF 1 object model and ABI layout matching this driver build
 - Windows string, wait, time, property, process, pipe, WinUSB, and crypto calls
+- fresh session-key generation and fixed-width P-256 key serialization
 - persistent device and crypto-registry state
 - secure state IPC across the host sandbox boundary
 - capture completion recovery for the driver's asynchronous request pattern

@@ -37,4 +37,4 @@ state_test = executable('tudor-state-test',
     c_args: ['-D_GNU_SOURCE'],
     include_directories: ['src', tudor_host_inc, libtudor_inc],
 )
-test('tudor-state', state_test)
+test('tudor-state', state_test, env: ['GIO_USE_VFS=local'])

@@ -14,9 +14,10 @@ $ meson test -C build --print-errorlogs
 ```
 
 The suite covers Windows wait and string behavior, cryptographic context and
-SHA-1 behavior, persistent crypto-registry state, WinUSB ownership and bounded
-diagnostic playback, capture recovery, native storage calls and lifecycle,
-native storage IPC, and persistent launcher state.
+SHA-1 behavior, fresh P-256 key generation, ECDH agreement, ECDSA signing,
+persistent crypto-registry state, WinUSB ownership and bounded diagnostic
+playback, capture recovery, native storage calls and lifecycle, native storage
+IPC, and persistent launcher state.
 
 For a Clang sanitizer build:
 
