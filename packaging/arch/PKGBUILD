@@ -3,7 +3,7 @@
 pkgname=synatudor-0081
 _project=synatudor-06cb-0081
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Synaptics Tudor TOD driver for the 06cb:0081 fingerprint sensor'
 arch=(x86_64)
 url='https://github.com/theaboutbox/synatudor-06cb-0081'
@@ -43,7 +43,7 @@ options=(!lto)
 
 _release_name="$_project-$pkgver.tar.gz"
 _release_url="${SYNA_TUDOR_SOURCE_URL:-$url/releases/download/v$pkgver/$_release_name}"
-_release_sha256="${SYNA_TUDOR_SOURCE_SHA256:-6c0577c22730423e7dca8dab29c9ddf3c5ce037c761e6d965bfa36570a9cdae5}"
+_release_sha256="${SYNA_TUDOR_SOURCE_SHA256:-a4c73d0c1b31d2f2521fa295576a9a895038984b7a23cb4d74658407ccd12a35}"
 
 source=(
   "$_release_name::$_release_url"
