@@ -66,8 +66,8 @@ not replace the pending hardware sequence above.
 The release installer was also run in `--build-only` mode from the committed,
 curated source archive. It verified both source inputs, completed all 202 build
 steps, passed all 14 Meson tests and the shell fixture suite, and produced the
-`0.1.0-4` Arch package without changing installed packages or reader state.
-Three archive generations spanning the packaging-metadata commit were
+`0.1.0-6` Arch package without changing installed packages or reader state.
+Repeated archive generations spanning packaging-metadata commits were
 byte-identical and matched the SHA-256 pinned in `PKGBUILD`.
 
 For the earlier baseline, fresh GCC and Clang builds completed with the TOD
