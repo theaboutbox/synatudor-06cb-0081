@@ -93,8 +93,13 @@ logging. The shell fixture also passed its
 protected-state permissions, marker-transition, replay-guard, service-mask,
 ordinary-reset gating, and injected-failure cases. `bash -n` passed for the
 three installed helpers and the fixture, and `git diff --check` was clean.
-Final source-archive and local package results will be recorded after they run.
-No automated result substitutes for the pending hardware sequence above.
+Two archives generated independently from committed tree
+`9d6ca339989da1957fef180350a1ba0ab8c7deb1` were byte-identical. The curated
+316-entry payload included the loader call-site test, contained no forbidden
+private/proprietary extension, and has SHA-256
+`81c1ea9da6f63949065cb435a209556d62d28ef20782fab1bbcf416a5690ad5c`.
+The local package result will be recorded after it runs. No automated result
+substitutes for the pending hardware sequence above.
 
 A superseded recovery candidate completed fresh release-mode GCC 16.2.1 and
 Clang builds and passed all 14 Meson tests. The same tests passed under

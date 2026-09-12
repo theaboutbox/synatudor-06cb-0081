@@ -1,7 +1,7 @@
 pkgbase = synatudor-0081
 	pkgdesc = Synaptics Tudor TOD driver for the 06cb:0081 fingerprint sensor
 	pkgver = 0.1.0
-	pkgrel = 7
+	pkgrel = 8
 	url = https://github.com/theaboutbox/synatudor-06cb-0081
 	arch = x86_64
 	license = LGPL-2.1-only
@@ -35,7 +35,7 @@ pkgbase = synatudor-0081
 	options = !lto
 	source = synatudor-06cb-0081-0.1.0.tar.gz::https://github.com/theaboutbox/synatudor-06cb-0081/releases/download/v0.1.0/synatudor-06cb-0081-0.1.0.tar.gz
 	source = huy103af07m6.exe::https://download.lenovo.com/consumer/mobiles/huy103af07m6.exe
-	sha256sums = 205e8d82d08fe1d97f3c5e675d88d64d33c605696a28a6b9a1bb197d7e26357e
+	sha256sums = 81c1ea9da6f63949065cb435a209556d62d28ef20782fab1bbcf416a5690ad5c
 	sha256sums = 2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343
 
 pkgname = synatudor-0081
