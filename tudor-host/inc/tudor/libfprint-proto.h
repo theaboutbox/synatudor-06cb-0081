@@ -7,6 +7,7 @@
 
 #include <tudor/log.h>
 #include <tudor/tudor.h>
+#include <tudor/state-proto.h>
 
 enum ipc_msg_type {
     IPC_MSG_INIT,
@@ -30,7 +31,10 @@ enum ipc_msg_type {
     IPC_MSG_VERIFY,
     IPC_MSG_RESP_VERIFY,
     IPC_MSG_IDENTIFY,
-    IPC_MSG_RESP_IDENTIFY
+    IPC_MSG_RESP_IDENTIFY,
+
+    /* Clear the transient host-side mirror without deleting sensor records. */
+    IPC_MSG_CLEAR_HOST_RECORDS
 };
 
 #define IPC_SENSOR_NAME_SIZE 128
@@ -44,6 +48,7 @@ struct ipc_msg_init {
 
     enum log_level log_level;
     uint8_t usb_bus, usb_addr;
+    char state_id[TUDOR_STATE_ID_SIZE + 1];
 };
 
 struct ipc_msg_resp_probe {

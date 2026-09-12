@@ -8,5 +8,24 @@ functionality), it can properly launch these host processes, and because it
 provides its services using the DBus, the libfprint-tod module can interact with
 it and take over IPC once the process has been started.
 
-## Documentation
-**TODO**
+## Persistent device state
+
+The systemd unit creates a private state directory (normally
+`/var/lib/tudor`). The launcher, which remains outside the vendor-driver
+sandbox, stores named device properties below:
+
+```
+/var/lib/tudor/devices/<vid>-<pid>-<usb-serial>/
+```
+
+The host and launcher use a dedicated sequenced-packet socket for state I/O.
+The host never receives a directory or regular-file descriptor. Property names
+are allowlisted, state identifiers are restricted to safe path-component
+characters, writes use private replacement files, and blobs are capped at 64
+KiB.
+
+For initial setup, place a valid calibration blob at
+`/var/lib/tudor/CalibrationData.blob` with mode `0600` and root ownership. The
+launcher copies it into the sensor-specific directory on first use. The
+directory itself should remain `root:root` mode `0700`; systemd applies that
+mode through `StateDirectoryMode=`.

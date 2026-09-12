@@ -12,6 +12,12 @@
 #include <codecvt>
 #include <string>
 #include <locale>
+#include <atomic>
+#include <cstddef>
+#include <cstdlib>
+#include <pthread.h>
+
+#include <cryptbridge/registry.h>
 
 #define _Analysis_mode_(...)
 #define _Notliteral_
@@ -40,7 +46,7 @@
 IDriverEntry *inst = NULL;
 IWDFDriver* aDriver = NULL;
 
-bool tudor_log_traces = true;
+bool tudor_log_traces = false;
 
 int goIdle = 0;
 
@@ -59,9 +65,308 @@ typedef BOOL __winfnc (*api_DllMain)(HANDLE hinstDLL, int fdwReason, void *lpRes
 struct windrv_dll *tudor_adapter_dll, *tudor_driver_dll;
 WINBIO_SENSOR_INTERFACE *tudor_sensor_adapter;
 WINBIO_ENGINE_INTERFACE *tudor_engine_adapter;
+WINBIO_STORAGE_INTERFACE *tudor_native_storage_adapter;
 
 static DRIVER_OBJECT umdf_driver;
 struct winwdf_driver *tudor_wdf_driver;
+
+/* These RVAs are specific to the pinned synaWudfBioUsb.dll.  The lifecycle
+ * observer also checks the loaded module and exact CaptureThread address, so
+ * an unrelated Windows worker can never enter this path. */
+static constexpr uintptr_t SYNA_CAPTURE_THREAD_RVA = 0x1c40c;
+static constexpr useconds_t SYNA_CAPTURE_RECOVERY_DELAY_US = 250000;
+static constexpr ULONG SYNA_CAPTURE_IOCTL = 0x440014;
+
+/* MyRequest is defined below.  This helper atomically validates and claims a
+ * stalled request under the lifecycle lock, then invokes vendor code after
+ * dropping the lock. */
+static bool capture_request_recover(uint64_t request_generation,
+                                    uint64_t worker_generation);
+
+struct capture_worker_observation {
+    void *cookie;
+    uint64_t request_generation;
+    uint64_t worker_generation;
+    capture_worker_observation *next;
+};
+
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    pthread_t relay_thread;
+    bool relay_started;
+    bool stopping;
+
+    struct winmodule *module;
+    void *capture_proc;
+
+    void *active_request;
+    uint64_t request_generation;
+    bool cancel_requested;
+    bool recovery_reported;
+
+    uint64_t worker_generation;
+    capture_worker_observation *workers;
+
+    bool recovery_pending;
+    uint64_t recovery_request_generation;
+    uint64_t recovery_worker_generation;
+} capture_relay = {
+    PTHREAD_MUTEX_INITIALIZER,
+    PTHREAD_COND_INITIALIZER,
+};
+
+static void capture_request_started(void *request) {
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    if(capture_relay.relay_started && !capture_relay.stopping) {
+        capture_relay.request_generation++;
+        capture_relay.active_request = request;
+        capture_relay.cancel_requested = false;
+        capture_relay.recovery_reported = false;
+        capture_relay.recovery_pending = false;
+        cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+    }
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+}
+
+static void capture_request_finished(void *request) {
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    if(capture_relay.active_request == request) {
+        capture_relay.active_request = nullptr;
+        capture_relay.cancel_requested = true;
+        capture_relay.request_generation++;
+        capture_relay.recovery_pending = false;
+        cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+    }
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+}
+
+static void capture_request_cancelled(void *request) {
+    capture_request_finished(request);
+}
+
+static void capture_thread_lifecycle(struct winmodule *module,
+                                     void *start_proc, void *start_param,
+                                     void *thread_cookie, bool created) {
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+
+    if(!capture_relay.relay_started || capture_relay.stopping ||
+       module != capture_relay.module ||
+       start_proc != capture_relay.capture_proc) {
+        cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+        return;
+    }
+
+    if(created) {
+        capture_worker_observation *worker =
+            static_cast<capture_worker_observation*>(
+                malloc(sizeof(*worker)));
+        if(!worker) {
+            log_error("Could not track Synaptics capture worker lifecycle");
+            cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+            return;
+        }
+
+        worker->cookie = thread_cookie;
+        worker->request_generation = capture_relay.request_generation;
+        worker->worker_generation = ++capture_relay.worker_generation;
+        worker->next = capture_relay.workers;
+        capture_relay.workers = worker;
+
+        /* A newer worker supersedes any delayed recovery for an older one. */
+        capture_relay.recovery_pending = false;
+        cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+        cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+        return;
+    }
+
+    capture_worker_observation **link = &capture_relay.workers;
+    capture_worker_observation *worker = nullptr;
+    while(*link) {
+        if((*link)->cookie == thread_cookie) {
+            worker = *link;
+            *link = worker->next;
+            break;
+        }
+        link = &(*link)->next;
+    }
+
+    if(worker && capture_relay.active_request &&
+       !capture_relay.cancel_requested &&
+       worker->request_generation == capture_relay.request_generation &&
+       worker->worker_generation == capture_relay.worker_generation) {
+        capture_relay.recovery_pending = true;
+        capture_relay.recovery_request_generation =
+            worker->request_generation;
+        capture_relay.recovery_worker_generation =
+            worker->worker_generation;
+        cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+    }
+
+    free(worker);
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+}
+
+static bool capture_relay_snapshot_valid(uint64_t request_generation,
+                                         uint64_t worker_generation) {
+    return capture_relay.relay_started && !capture_relay.stopping &&
+           capture_relay.active_request &&
+           !capture_relay.cancel_requested &&
+           capture_relay.request_generation == request_generation &&
+           capture_relay.worker_generation == worker_generation;
+}
+
+static void *capture_relay_main(void *) {
+    winmodule_set_cur(capture_relay.module);
+    win_init_tib();
+
+    for(;;) {
+        cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+        while(!capture_relay.stopping && !capture_relay.recovery_pending)
+            cant_fail_ret(pthread_cond_wait(&capture_relay.cond,
+                                            &capture_relay.lock));
+
+        if(capture_relay.stopping) {
+            cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+            return nullptr;
+        }
+
+        uint64_t request_generation =
+            capture_relay.recovery_request_generation;
+        uint64_t worker_generation =
+            capture_relay.recovery_worker_generation;
+        capture_relay.recovery_pending = false;
+        cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+        /* The lifecycle callback runs just before the pthread wrapper exits.
+         * Give it time to become fully joinable before invoking OnCancel from
+         * this separate thread. */
+        usleep(SYNA_CAPTURE_RECOVERY_DELAY_US);
+
+        for(;;) {
+            bool report_recovery = false;
+            cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+            bool valid = capture_relay_snapshot_valid(request_generation,
+                                                       worker_generation);
+            if(valid && !capture_relay.recovery_reported) {
+                capture_relay.recovery_reported = true;
+                report_recovery = true;
+            }
+            cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+            if(!valid) break;
+
+            if(report_recovery) {
+                log_warn("Vendor capture worker exited with its WUDF1 request "
+                         "pending; cancelling it so a fresh capture can start");
+            }
+
+            winmodule_set_cur(capture_relay.module);
+            bool cancelled = capture_request_recover(request_generation,
+                                                      worker_generation);
+
+            if(cancelled) {
+                log_debug("Cancelled stalled WUDF1 capture request");
+                break;
+            }
+
+            /* MarkCancelable can race a very short-lived worker.  Retry only
+             * while this exact request and worker generation remain current. */
+            usleep(SYNA_CAPTURE_RECOVERY_DELAY_US);
+        }
+    }
+}
+
+static bool capture_relay_start(void) {
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    capture_relay.stopping = false;
+    capture_relay.relay_started = true;
+    capture_relay.module = &tudor_driver_dll->module;
+    capture_relay.capture_proc = static_cast<uint8_t*>(
+        tudor_driver_dll->image.base_addr) + SYNA_CAPTURE_THREAD_RVA;
+    capture_relay.active_request = nullptr;
+    capture_relay.cancel_requested = false;
+    capture_relay.recovery_pending = false;
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+    int err = pthread_create(&capture_relay.relay_thread, nullptr,
+                             capture_relay_main, nullptr);
+    if(err) {
+        log_error("Could not start Synaptics capture relay: %s",
+                  strerror(err));
+        cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+        capture_relay.relay_started = false;
+        capture_relay.stopping = true;
+        cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+        return false;
+    }
+
+    win_set_thread_lifecycle_observer(capture_thread_lifecycle);
+    return true;
+}
+
+static void capture_relay_stop(void) {
+    /* Prevent new callbacks first.  A callback which already loaded the old
+     * pointer still serializes on this mutex and observes stopping. */
+    win_set_thread_lifecycle_observer(nullptr);
+
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    bool join_relay = capture_relay.relay_started;
+    capture_relay.stopping = true;
+    capture_relay.active_request = nullptr;
+    capture_relay.cancel_requested = true;
+    capture_relay.request_generation++;
+    capture_relay.recovery_pending = false;
+    cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+    if(join_relay)
+        cant_fail_ret(pthread_join(capture_relay.relay_thread, nullptr));
+
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    capture_relay.relay_started = false;
+    while(capture_relay.workers) {
+        capture_worker_observation *worker = capture_relay.workers;
+        capture_relay.workers = worker->next;
+        free(worker);
+    }
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+}
+
+static enum cryptbridge_registry_load_result
+load_crypto_registry(void *, void **data, size_t *data_size) {
+    *data = nullptr;
+    *data_size = 0;
+    if(!tudor_get_state_fnc) return CRYPTBRIDGE_REGISTRY_LOAD_ERROR;
+
+    enum tudor_state_value_type type;
+    if(!tudor_get_state_fnc("CryptoRegistry", &type, data, data_size))
+        return CRYPTBRIDGE_REGISTRY_LOAD_NOT_FOUND;
+    if(type != TUDOR_STATE_VALUE_BLOB) {
+        log_error("CryptoRegistry device state has an invalid value type");
+        free(*data);
+        *data = nullptr;
+        *data_size = 0;
+        return CRYPTBRIDGE_REGISTRY_LOAD_ERROR;
+    }
+    return CRYPTBRIDGE_REGISTRY_LOAD_FOUND;
+}
+
+static bool store_crypto_registry(void *, const void *data,
+                                  size_t data_size) {
+    if(!tudor_set_state_fnc) return false;
+    tudor_set_state_fnc("CryptoRegistry", TUDOR_STATE_VALUE_BLOB,
+                        data, data_size);
+    return true;
+}
+
+static void configure_crypto_registry(void) {
+    if(tudor_get_state_fnc || tudor_set_state_fnc) {
+        cryptbridge_registry_set_state_callbacks(
+            load_crypto_registry, store_crypto_registry, nullptr);
+    } else {
+        cryptbridge_registry_set_state_callbacks(nullptr, nullptr, nullptr);
+    }
+}
 
 extern uint8_t _binary_libtudor_synaAdvAdapter_dll_start, _binary_libtudor_synaAdvAdapter_dll_end;
 extern uint8_t _binary_libtudor_synaWudfBioUsb_dll_start, _binary_libtudor_synaWudfBioUsb_dll_end;
@@ -204,6 +509,108 @@ char16_t* utf8_to_utf16le(const std::string& input) {
     return buffer; // caller must delete[]
 }
 
+static std::string tudor_state_path(const std::string& name,
+                                    const char *extension) {
+    const char *state_dir = getenv("SYNA_TUDOR_STATE_DIR");
+    if(state_dir && state_dir[0])
+        return std::string(state_dir) + "/" + name + extension;
+    return name + extension;
+}
+
+static bool tudor_state_name_valid(const std::string& name) {
+    if(name.empty() || name.size() > 64) return false;
+    for(unsigned char c : name) {
+        if(!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9')))
+            return false;
+    }
+    return true;
+}
+
+static bool tudor_load_state_value(const std::string& name,
+                                   enum tudor_state_value_type *type,
+                                   std::vector<uint8_t> *data) {
+    if(!tudor_state_name_valid(name)) {
+        log_error("Rejected invalid device-state property name '%s'",
+                  name.c_str());
+        return false;
+    }
+
+    if(tudor_get_state_fnc) {
+        void *raw_data = nullptr;
+        size_t raw_size = 0;
+        if(!tudor_get_state_fnc(name.c_str(), type, &raw_data, &raw_size))
+            return false;
+        if(raw_size && !raw_data) {
+            log_error("State callback returned a null buffer for '%s'",
+                      name.c_str());
+            return false;
+        }
+        if(raw_size) {
+            const uint8_t *bytes = static_cast<const uint8_t*>(raw_data);
+            data->assign(bytes, bytes + raw_size);
+        } else {
+            data->clear();
+        }
+        free(raw_data);
+        return true;
+    }
+
+    std::ifstream blob_input(tudor_state_path(name, ".blob"),
+                             std::ios::binary);
+    if(blob_input) {
+        *type = TUDOR_STATE_VALUE_BLOB;
+        data->assign(std::istreambuf_iterator<char>(blob_input),
+                     std::istreambuf_iterator<char>());
+        return true;
+    }
+
+    std::ifstream uint_input(tudor_state_path(name, ".uint"));
+    if(uint_input) {
+        uint32_t value;
+        if(!(uint_input >> value)) {
+            log_error("Invalid uint device-state value for '%s'",
+                      name.c_str());
+            return false;
+        }
+        *type = TUDOR_STATE_VALUE_UINT32;
+        data->resize(sizeof(value));
+        memcpy(data->data(), &value, sizeof(value));
+        return true;
+    }
+
+    return false;
+}
+
+static void tudor_store_state_value(const std::string& name,
+                                    enum tudor_state_value_type type,
+                                    const void *data, size_t data_size) {
+    if(!tudor_state_name_valid(name)) {
+        log_error("Rejected invalid device-state property name '%s'",
+                  name.c_str());
+        return;
+    }
+
+    if(tudor_set_state_fnc) {
+        tudor_set_state_fnc(name.c_str(), type, data, data_size);
+        return;
+    }
+
+    if(type == TUDOR_STATE_VALUE_UINT32 && data_size == sizeof(uint32_t)) {
+        uint32_t value;
+        memcpy(&value, data, sizeof(value));
+        std::ofstream output(tudor_state_path(name, ".uint"));
+        output << value << std::endl;
+    } else if(type == TUDOR_STATE_VALUE_BLOB) {
+        std::ofstream output(tudor_state_path(name, ".blob"),
+                             std::ios::binary);
+        if(data_size) {
+            const char *bytes = static_cast<const char*>(data);
+            output.write(bytes, data_size);
+        }
+    }
+}
+
 struct IObjectCleanup;
 
 class MyDevInit : public IWDFDeviceInitialize {
@@ -337,42 +744,49 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             _In_  LPCWSTR pszName,
             /* [annotation][out] */ 
             _Out_  PROPVARIANT *pv){
-            std::wcout << L"=====================================" << std::endl;
-            std::wcout << L"GetNamedValue " << pszName << std::endl;
             std::string fname = utf16le_to_utf8(pszName);
-            std::cout << fname << std::endl;
-            std::wcout << L"=====================================" << std::endl;
+            std::cout << "=====================================\n"
+                      << "GetNamedValue " << fname << '\n'
+                      << "=====================================" << std::endl;
 
-            if(fname == "CalibrationData") {
-                std::ifstream input(fname + ".blob", std::ios::binary);
-                std::vector<char> buf((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-                std::cout << "Loaded " << buf.size() << " bytes of calibration data" << std::endl;
-                if(buf.size() == 0) {
-                    DECIMAL_SETZERO(pv->decVal);
-                } else {
-                    pv->vt = VT_BLOB;
-                    pv->blob.cbSize = buf.size();
-                    pv->blob.pBlobData = (BYTE*)CoTaskMemAlloc(pv->blob.cbSize);
-                    std::copy(buf.begin(), buf.end(), pv->blob.pBlobData);
+            memset(pv, 0, sizeof(*pv));
+
+            enum tudor_state_value_type type;
+            std::vector<uint8_t> data;
+            if(!tudor_load_state_value(fname, &type, &data)) return 0;
+
+            /* The vendor writes a zero-length calibration blob while a fresh
+             * calibration is in progress.  If that intermediate value
+             * survives a restart, Windows reports it as an empty property so
+             * the driver calibrates again.  PairingData is different: its
+             * zero-length blob is an intentional presence marker. */
+            if(fname == "CalibrationData" &&
+               type == TUDOR_STATE_VALUE_BLOB && data.empty()) {
+                std::cout << "Ignoring incomplete empty CalibrationData"
+                          << std::endl;
+                return 0;
+            }
+
+            if(type == TUDOR_STATE_VALUE_UINT32 &&
+               data.size() == sizeof(pv->uintVal)) {
+                pv->vt = VT_UINT;
+                memcpy(&pv->uintVal, data.data(), sizeof(pv->uintVal));
+                std::cout << "Restored uint " << fname << " = "
+                          << pv->uintVal << std::endl;
+            } else if(type == TUDOR_STATE_VALUE_BLOB) {
+                pv->vt = VT_BLOB;
+                pv->blob.cbSize = data.size();
+                pv->blob.pBlobData = nullptr;
+                if(!data.empty()) {
+                    pv->blob.pBlobData =
+                        (BYTE*) CoTaskMemAlloc(pv->blob.cbSize);
+                    std::copy(data.begin(), data.end(), pv->blob.pBlobData);
                 }
-            } 
-            else if(fname == "LastUpdateSystemTimeStamp" || fname == "OldCalDataDeleted") {
-                std::ifstream input(fname + ".uint");
-                if(input) {
-                    pv->vt = VT_UINT;
-                    unsigned int& dst = pv->uintVal;
-                    input >> dst;
-                    std::cout << "UINT " << fname << " = " << pv->uintVal << std::endl; 
-                }
-                else {
-                    DECIMAL_SETZERO(pv->decVal);
-                    std::cout << "UINT " << fname << " not found" << std::endl; 
-                }
-            } 
-            else {
-                memset(pv, 0, sizeof(PROPVARIANT));
-                // DECIMAL_SETZERO(pv->decVal);
-                // pv->vt = VT_DECIMAL;
+                std::cout << "Restored " << data.size() << " bytes of "
+                          << fname << std::endl;
+            } else {
+                log_error("Invalid stored type or size for device-state "
+                          "property '%s'", fname.c_str());
             }
             return 0;
         }
@@ -388,34 +802,28 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             //PropVariantToInt32(*pv, &num);
             //PropVariantToStringAlloc(*pv, &buf);
 
-            std::wcout << L"=====================================" << std::endl;
-            std::wcout << L"SetNamedValue " << pszName << "=" << pv->vt << std::endl;
             std::string str_u8 = utf16le_to_utf8(pszName);
-            std::cout << str_u8 << std::endl;
+            std::cout << "=====================================\n"
+                      << "SetNamedValue " << str_u8 << '=' << pv->vt << '\n'
+                      << "=====================================" << std::endl;
             switch(pv->vt) {
                 case VT_I1:
                     printf("VT_I1: %d\n", pv->cVal);
                     break;
-                case VT_UINT: {
-                        std::string fname = utf16le_to_utf8(pszName);
-                        std::ofstream output(fname + ".uint");
-                        output << pv->uintVal << std::endl;
-                        printf("VT_UINT: %d\n", pv->uintVal);
-                    }
+                case VT_UINT:
+                    tudor_store_state_value(str_u8,
+                                            TUDOR_STATE_VALUE_UINT32,
+                                            &pv->uintVal,
+                                            sizeof(pv->uintVal));
+                    printf("VT_UINT: %d\n", pv->uintVal);
                     break;
-                case VT_BLOB: {
-                        std::string fname = utf16le_to_utf8(pszName);
-                        std::ofstream output(fname + ".blob", std::ios::binary);
-                        std::copy(pv->blob.pBlobData, pv->blob.pBlobData + pv->blob.cbSize,
-                                std::ostreambuf_iterator<char>(output));
-
-                        char hex[800020], *p = hex;
-                        for(unsigned int i=0;i<(pv->blob.cbSize < 400? pv->blob.cbSize : 400);i++) {
-                            p+=sprintf(p, "%02x", pv->blob.pBlobData[i]);
-                        }
-                        *p=0;
-                        printf("Blob value: %lu: %s\n", pv->blob.cbSize, hex);
-                    }
+                case VT_BLOB:
+                    tudor_store_state_value(str_u8,
+                                            TUDOR_STATE_VALUE_BLOB,
+                                            pv->blob.pBlobData,
+                                            pv->blob.cbSize);
+                    printf("Stored blob value: %u bytes\n",
+                           pv->blob.cbSize);
                     break;
             }
             std::wcout << L"=====================================" << std::endl;
@@ -447,7 +855,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
         virtual HRESULT STDMETHODCALLTYPE DeleteNamedValue( 
             /* [annotation][string][in] */ 
             _In_  LPCWSTR pwszName){
-            std::wcout << L"DeleteNamedValue " << pwszName<< std::endl;
+            std::cout << "DeleteNamedValue " << utf16le_to_utf8(pwszName) << std::endl;
             return 0;
         }
 
@@ -573,21 +981,112 @@ struct MyMem : public IWDFMemory {
     SIZE_T size;
 };
 
-struct MyRequest : public IWDFIoRequest {
+struct MyRequest final : public IWDFIoRequest {
     public:
-        MyRequest(WDF_REQUEST_TYPE t, ULONG c, MyMem *out, MyMem *in) {
-            reqType = t;
-            ctl = c;
-            outMem = out;
-            inMem = in;
-            complete = FALSE;
-            informationSize = 0;
-        }
+        static constexpr uintptr_t CANCEL_CALLBACK_CLAIMED = 1;
+
+        MyRequest(WDF_REQUEST_TYPE t, ULONG c, void *out, SIZE_T out_size,
+                  void *in, SIZE_T in_size, OVERLAPPED *overlapped)
+            : reqType(t), ctl(c), complete(false), informationSize(0),
+              completionStatus(STATUS_PENDING), cancelState(0),
+              nativeRefs(1), ovlp(overlapped),
+              outMem(out, out_size), inMem(in, in_size) {}
 
         WDF_REQUEST_TYPE reqType;
         ULONG ctl;
-        BOOL complete;
-        LONG_PTR informationSize;
+        std::atomic<bool> complete;
+        std::atomic<SIZE_T> informationSize;
+        std::atomic<HRESULT> completionStatus;
+        /* Zero means unmarked, a callback pointer means cancelable, and the
+         * sentinel means cancellation atomically claimed that callback. */
+        std::atomic<uintptr_t> cancelState;
+        std::atomic<unsigned int> nativeRefs;
+        OVERLAPPED *ovlp;
+        MyMem outMem, inMem;
+
+        void retain_native() {
+            nativeRefs.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void release_native() {
+            if(nativeRefs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                delete this;
+        }
+
+        void clear_cancel_callback() {
+            uintptr_t state = cancelState.load(std::memory_order_acquire);
+            while(state > CANCEL_CALLBACK_CLAIMED &&
+                  !cancelState.compare_exchange_weak(
+                      state, 0, std::memory_order_acq_rel,
+                      std::memory_order_acquire)) {}
+        }
+
+        IRequestCallbackCancel *claim_cancel_callback() {
+            uintptr_t state = cancelState.load(std::memory_order_acquire);
+            while(state > CANCEL_CALLBACK_CLAIMED) {
+                if(cancelState.compare_exchange_weak(
+                       state, CANCEL_CALLBACK_CLAIMED,
+                       std::memory_order_acq_rel,
+                       std::memory_order_acquire)) {
+                    return reinterpret_cast<IRequestCallbackCancel*>(state);
+                }
+            }
+            return nullptr;
+        }
+
+        void finish(HRESULT status, SIZE_T information) {
+            /* Completion callbacks may clean up the request on another
+             * thread before winio_complete_overlapped returns. */
+            retain_native();
+            clear_cancel_callback();
+            completionStatus.store(status, std::memory_order_relaxed);
+            if(complete.exchange(true, std::memory_order_acq_rel)) {
+                log_warn("Ignoring duplicate WUDF1 request completion [code 0x%x status 0x%x]",
+                         ctl, (unsigned int) status);
+                release_native();
+                return;
+            }
+
+            if(ctl == SYNA_CAPTURE_IOCTL)
+                capture_request_finished(this);
+
+            /* The 0081 performs identification against its database on the
+             * sensor.  Record just the documented result header so we can
+             * distinguish an on-sensor no-match from a later engine/storage
+             * translation failure without logging biometric payload data. */
+            if(ctl == 0x442004 && status == ERROR_SUCCESS &&
+               information >= 0x54 && outMem.buf) {
+                const BYTE *result = static_cast<const BYTE*>(outMem.buf);
+                DWORD identity_type, identify_status;
+                memcpy(&identity_type, result, sizeof(identity_type));
+                memcpy(&identify_status, result + 0x50,
+                       sizeof(identify_status));
+                printf("[WUDF1-IDENTIFY] identity-type=%u subtype=0x%02x "
+                       "status=0x%08x size=%zu\r\n",
+                       identity_type, result[0x4c], identify_status,
+                       information);
+            }
+
+            if(ovlp)
+                winio_complete_overlapped(ovlp, (NTSTATUS) status,
+                                          information);
+            release_native();
+        }
+
+        bool cancel() {
+            retain_native();
+            IRequestCallbackCancel *callback = claim_cancel_callback();
+            if(!callback) {
+                release_native();
+                return false;
+            }
+
+            if(ctl == SYNA_CAPTURE_IOCTL)
+                capture_request_cancelled(this);
+            callback->OnCancel(this);
+            release_native();
+            return true;
+        }
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
             LPOLESTR str;
@@ -641,24 +1140,27 @@ struct MyRequest : public IWDFIoRequest {
             _In_  HRESULT CompletionStatus,
             /* [annotation][in] */ 
             _In_  SIZE_T Information){
-            printf("CompleteWithInformation\r\n");
-            complete = TRUE;
+            printf("CompleteWithInformation: status=%lx size=%zu\r\n",
+                   (unsigned long) CompletionStatus, Information);
+            informationSize.store(Information, std::memory_order_relaxed);
+            finish(CompletionStatus, Information);
         }
 
         
         virtual void STDMETHODCALLTYPE SetInformation( 
             /* [annotation][in] */ 
             _In_  ULONG_PTR Information){
-            printf("SetInformation size=%lld\r\n", Information);
-            informationSize = Information;
+	        TRACE_PRINTF("SetInformation size=%lld\r\n", Information);
+            informationSize.store((SIZE_T) Information, std::memory_order_relaxed);
         }
 
         
         virtual void STDMETHODCALLTYPE Complete( 
             /* [annotation][in] */ 
             _In_  HRESULT CompletionStatus){
-            printf("Complete: %lx\r\n", (unsigned long)CompletionStatus);
-            complete = TRUE;
+	        TRACE_PRINTF("Complete: %lx\r\n", (unsigned long)CompletionStatus);
+            finish(CompletionStatus,
+                   informationSize.load(std::memory_order_relaxed));
         }
 
         
@@ -719,38 +1221,56 @@ struct MyRequest : public IWDFIoRequest {
             _Out_opt_  SIZE_T *pOutBufferSize){
             //printf("GetDeviceIoControlParameters %p %p %p\r\n", pControlCode, pInBufferSize, pOutBufferSize);
             *pControlCode = ctl;
-            *pInBufferSize = inMem->size;
-            *pOutBufferSize = outMem->size;
+            *pInBufferSize = inMem.size;
+            *pOutBufferSize = outMem.size;
         }
 
         
-        MyMem *outMem, *inMem;
-
         virtual void STDMETHODCALLTYPE GetOutputMemory( 
             /* [annotation][out] */ 
             _Out_  IWDFMemory **ppWdfMemory){
-            *ppWdfMemory = outMem;
+            *ppWdfMemory = &outMem;
             //printf("GetOutputMemory\r\n");
         }
         
         virtual void STDMETHODCALLTYPE GetInputMemory( 
             /* [annotation][out] */ 
             _Out_  IWDFMemory **ppWdfMemory){
-            *ppWdfMemory = inMem;
+            *ppWdfMemory = &inMem;
             // printf("GetInputMemory\r\n");
         }
 
         
         virtual void STDMETHODCALLTYPE MarkCancelable( 
             /* [annotation][in] */ 
-            _In_  void *pCancelCallback){
-            printf("MarkCancelable\r\n");
-            //this->cancelCallback = pCancelCallback;
+            _In_  IRequestCallbackCancel *pCancelCallback){
+	        TRACE_PRINTF("MarkCancelable\r\n");
+            uintptr_t callback = reinterpret_cast<uintptr_t>(pCancelCallback);
+            if(callback <= CANCEL_CALLBACK_CLAIMED) {
+                log_error("Invalid WUDF1 cancellation callback pointer");
+                abort();
+            }
+            uintptr_t expected = 0;
+            if(!cancelState.compare_exchange_strong(
+                   expected, callback, std::memory_order_release,
+                   std::memory_order_acquire)) {
+                log_warn("Ignoring WUDF1 MarkCancelable after cancellation "
+                         "was already marked or claimed [code 0x%x]", ctl);
+            }
         }
 
         virtual HRESULT STDMETHODCALLTYPE UnmarkCancelable( void){
-            printf("UnmarkCancelable\r\n");
-            return 0;
+	        TRACE_PRINTF("UnmarkCancelable\r\n");
+            uintptr_t state = cancelState.load(std::memory_order_acquire);
+            for(;;) {
+                if(state == CANCEL_CALLBACK_CLAIMED)
+                    return (HRESULT) 0x800703e3; /* HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED) */
+                if(state == 0) return 0;
+                if(cancelState.compare_exchange_weak(
+                       state, 0, std::memory_order_acq_rel,
+                       std::memory_order_acquire))
+                    return 0;
+            }
         }
 
         
@@ -831,6 +1351,118 @@ struct MyRequest : public IWDFIoRequest {
 
         
 };
+
+static bool capture_request_recover(uint64_t request_generation,
+                                    uint64_t worker_generation) {
+    MyRequest *request = nullptr;
+    IRequestCallbackCancel *callback = nullptr;
+
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    if(capture_relay_snapshot_valid(request_generation,
+                                    worker_generation)) {
+        request = static_cast<MyRequest*>(capture_relay.active_request);
+        request->retain_native();
+        callback = request->claim_cancel_callback();
+        if(callback) {
+            /* Commit the recovery before invoking vendor code.  A completion
+             * callback can now start the next request without clearing it. */
+            capture_relay.active_request = nullptr;
+            capture_relay.cancel_requested = true;
+            capture_relay.request_generation++;
+            capture_relay.recovery_pending = false;
+            cant_fail_ret(pthread_cond_broadcast(&capture_relay.cond));
+        }
+    }
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+    if(!request) return false;
+    if(!callback) {
+        request->release_native();
+        return false;
+    }
+
+    callback->OnCancel(request);
+    request->release_native();
+    return true;
+}
+
+#ifdef TUDOR_RECOVERY_TEST_HOOK
+class RecoveryTestCancelCallback final : public IRequestCallbackCancel {
+public:
+    std::atomic<unsigned int> calls{0};
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **object) override {
+        if(!object) return (HRESULT) 0x80070057u;
+        *object = this;
+        return ERROR_SUCCESS;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef(void) override { return 1; }
+    ULONG STDMETHODCALLTYPE Release(void) override { return 1; }
+
+    void STDMETHODCALLTYPE OnCancel(IWDFIoRequest *wdf_request) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        MyRequest *request = static_cast<MyRequest*>(wdf_request);
+
+        /* Model the strongest real ordering: OnCancel completes the request,
+         * and its newly spawned completion callback drops the owning reference
+         * before OnCancel itself returns.  The recovery pin must keep the
+         * request alive until capture_request_recover is done with it. */
+        request->Complete((HRESULT) 0x800703e3u);
+        request->release_native();
+    }
+};
+
+extern "C" __attribute__((visibility("hidden")))
+int tudor_internal_test_capture_recovery(void) {
+    RecoveryTestCancelCallback callback;
+    MyRequest *request = new MyRequest(
+        WdfRequestTypeOther, SYNA_CAPTURE_IOCTL,
+        nullptr, 0, nullptr, 0, nullptr);
+    request->MarkCancelable(&callback);
+
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    if(capture_relay.relay_started) {
+        cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+        request->release_native();
+        return 1;
+    }
+    capture_relay.relay_started = true;
+    capture_relay.stopping = false;
+    capture_relay.active_request = request;
+    capture_relay.request_generation = 17;
+    capture_relay.cancel_requested = false;
+    capture_relay.recovery_reported = false;
+    capture_relay.worker_generation = 23;
+    capture_relay.recovery_pending = true;
+    capture_relay.recovery_request_generation = 17;
+    capture_relay.recovery_worker_generation = 23;
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+    bool stale_request = capture_request_recover(16, 23);
+    bool stale_worker = capture_request_recover(17, 22);
+    bool recovered = capture_request_recover(17, 23);
+    bool recovered_twice = capture_request_recover(17, 23);
+    unsigned int callback_calls =
+        callback.calls.load(std::memory_order_relaxed);
+
+    cant_fail_ret(pthread_mutex_lock(&capture_relay.lock));
+    capture_relay.relay_started = false;
+    capture_relay.stopping = false;
+    capture_relay.active_request = nullptr;
+    capture_relay.cancel_requested = false;
+    capture_relay.recovery_pending = false;
+    cant_fail_ret(pthread_mutex_unlock(&capture_relay.lock));
+
+    if(!recovered) request->release_native();
+    if(stale_request) return 2;
+    if(stale_worker) return 3;
+    if(!recovered) return 4;
+    if(recovered_twice) return 5;
+    if(callback_calls != 1) return 6;
+    return 0;
+}
+#endif
 
 struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
 public:
@@ -1332,14 +1964,14 @@ struct MyDevice : public IWDFDevice3 {
         virtual HRESULT STDMETHODCALLTYPE StopIdle( 
             /* [annotation][in] */ 
             _In_  BOOL WaitForD0){
-            printf("StopIdle\r\n");
+	        TRACE_PRINTF("StopIdle\r\n");
             return 0;
         }
 
         
         virtual void STDMETHODCALLTYPE ResumeIdle( void){
             goIdle = 1;
-            printf("ResumeIdle\r\n");
+	        TRACE_PRINTF("ResumeIdle\r\n");
         }
 
         
@@ -1504,7 +2136,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettingsEx( 
             /* [annotation][in] */ 
             _In_  PWUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS IdleSettings){
-            printf("AssignS0IdleSettingsEx\r\n");
+	        TRACE_PRINTF("AssignS0IdleSettingsEx\r\n");
             return 0;
         }
 
@@ -1639,6 +2271,11 @@ struct MyDriver : public IWDFDriver {
 // typedef a function-pointer type that uses MS x64 ABI
 using DLLGetClassObject_t = HRESULT (__winfnc *)(void*, void*, void**);
 
+#define INTERFACE_HAS_MEMBER(interface_ptr, interface_type, member) \
+    ((interface_ptr)->Size >= offsetof(interface_type, member) + \
+                              sizeof((interface_ptr)->member) && \
+     (interface_ptr)->member != NULL)
+
 
 
 static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, 
@@ -1650,34 +2287,74 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
         printf("[WUDF1-DEVCTRL] -> code 0x%x (size 0x%lx)\r\n", code, in_size);
     }
 
-    // For UMDF1, we need to handle this through the queue callback mechanism
-    // The actual I/O will be handled when the driver calls our queue callbacks
-    
-    // Store the request info for when the callback is invoked
-    // This is a simplified approach - you might need a more sophisticated request tracking system
-    
-    if (myQueue) {
-        //MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
-        MyMem in(in_buf, in_size), out(out_buf, out_size);
-        MyRequest req(WdfRequestTypeOther, 0x442004, &out, &in);
+    if (myQueue && myQueue->ioctl) {
+        MyRequest *wudf_req = new MyRequest(WdfRequestTypeOther, code,
+                                             out_buf, out_size,
+                                             in_buf, in_size, ovlp);
+        *req = reinterpret_cast<struct winwdf_request*>(wudf_req);
 
-        printf("about to ioctl: 0x%x\r\n", code);
-        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, code, 0, 0);
-        while(!req.complete)
-            usleep(20000);
+        if(code == SYNA_CAPTURE_IOCTL)
+            capture_request_started(wudf_req);
+
+	TRACE_PRINTF("about to ioctl: 0x%x\r\n", code);
+        struct winmodule *caller_module = winmodule_get_cur();
+        winmodule_set_cur(&tudor_driver_dll->module);
+        myQueue->ioctl->OnDeviceIoControl(myQueue, wudf_req, code,
+                                           0, 0);
+        winmodule_set_cur(caller_module);
+        return STATUS_SUCCESS;
     }
-    
-    // For now, return pending - the actual completion will happen in the callback
-    return STATUS_PENDING;
+
+    log_error("WUDF1 IOCTL queue is not initialized");
+    return STATUS_INTERNAL_ERROR;
 }
 
 static NTSTATUS tudor_cancel_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, struct winwdf_request *req) {
-    // winwdf_cancel_request(req);
+    MyRequest *wudf_req = reinterpret_cast<MyRequest*>(req);
+    wudf_req->retain_native();
+    ULONG code = wudf_req->ctl;
+    struct winmodule *caller_module = winmodule_get_cur();
+    winmodule_set_cur(&tudor_driver_dll->module);
+    if(!wudf_req->cancel()) {
+        log_warn("WUDF1 request has no registered cancellation callback [code 0x%x]",
+                 code);
+    }
+    winmodule_set_cur(caller_module);
+    wudf_req->release_native();
     return STATUS_SUCCESS;
 }
 
 static void tudor_cleanup_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, struct winwdf_request *req) {
-    // winwdf_destroy_object((WDFOBJECT) req);
+    MyRequest *wudf_req = reinterpret_cast<MyRequest*>(req);
+    if(wudf_req->ctl == SYNA_CAPTURE_IOCTL)
+        capture_request_finished(wudf_req);
+    wudf_req->release_native();
+}
+
+bool tudor_get_sensor_database_size(uint64_t *record_count) {
+    if(!record_count || !myQueue || !myQueue->ioctl) return false;
+
+    uint8_t result[sizeof(*record_count)] = {0};
+    MyRequest req(WdfRequestTypeOther, 0x44202c,
+                  result, sizeof(result), nullptr, 0, nullptr);
+
+    struct winmodule *caller_module = winmodule_get_cur();
+    winmodule_set_cur(&tudor_driver_dll->module);
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44202c, 0, 0);
+    while(!req.complete.load(std::memory_order_acquire)) usleep(1000);
+    winmodule_set_cur(caller_module);
+
+    HRESULT status = req.completionStatus.load(std::memory_order_acquire);
+    SIZE_T information =
+        req.informationSize.load(std::memory_order_acquire);
+    if(status != ERROR_SUCCESS || information < sizeof(result)) {
+        log_error("Sensor database-size query failed [status 0x%x size %zu]",
+                  (unsigned int) status, information);
+        return false;
+    }
+
+    memcpy(record_count, result, sizeof(*record_count));
+    return true;
 }
 
 void print_vtable(void* obj, int N) {
@@ -1690,6 +2367,10 @@ void print_vtable(void* obj, int N) {
 
 
 bool tudor_init() {
+
+    /* The sandbox has no writable filesystem.  Install the per-device state
+     * backend before either vendor DLL can acquire its RSA key container. */
+    configure_crypto_registry();
 
     winmodule_register(&ntdll_module);
     winreg_set_handler(tudor_reg_handler, NULL);
@@ -1796,7 +2477,6 @@ bool tudor_init() {
     print_vtable(myDevice->pnphwcb, 5); 
 
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
-    usleep(50000000);
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     //
@@ -1824,6 +2504,79 @@ bool tudor_init() {
         log_error("Error querying engine interface: 0x%x!", hres);
         return false;
     }
+    tudor_native_storage_adapter = nullptr;
+    auto query_storage = reinterpret_cast<api_WbioQueryStorageInterface>(
+        try_find_dll_export(&tudor_adapter_dll->image,
+                            "WbioQueryStorageInterface"));
+    if(!query_storage) {
+        log_error("Required WbioQueryStorageInterface export is absent");
+        return false;
+    }
+    if((hres = query_storage(&tudor_native_storage_adapter)) != 0 ||
+       !tudor_native_storage_adapter) {
+        log_error("Error querying required native storage interface: 0x%x!",
+                  hres);
+        return false;
+    }
+
+    const size_t required_storage_size =
+        offsetof(WINBIO_STORAGE_INTERFACE, ControlUnitPrivileged) +
+        sizeof(tudor_native_storage_adapter->ControlUnitPrivileged);
+    if(tudor_native_storage_adapter->Version.MajorVersion != 1 ||
+       tudor_native_storage_adapter->Size < required_storage_size) {
+        log_error("Unsupported native storage interface %u.%u size 0x%zx; "
+                  "0081 requires the complete v1 table (at least 0x%zx)",
+                  tudor_native_storage_adapter->Version.MajorVersion,
+                  tudor_native_storage_adapter->Version.MinorVersion,
+                  (size_t) tudor_native_storage_adapter->Size,
+                  required_storage_size);
+        return false;
+    }
+    if(!tudor_native_storage_adapter->Attach ||
+       !tudor_native_storage_adapter->Detach ||
+       !tudor_native_storage_adapter->ClearContext ||
+       !tudor_native_storage_adapter->CreateDatabase ||
+       !tudor_native_storage_adapter->EraseDatabase ||
+       !tudor_native_storage_adapter->OpenDatabase ||
+       !tudor_native_storage_adapter->CloseDatabase ||
+       !tudor_native_storage_adapter->GetDataFormat ||
+       !tudor_native_storage_adapter->GetDatabaseSize ||
+       !tudor_native_storage_adapter->AddRecord ||
+       !tudor_native_storage_adapter->DeleteRecord ||
+       !tudor_native_storage_adapter->QueryBySubject ||
+       !tudor_native_storage_adapter->QueryByContent ||
+       !tudor_native_storage_adapter->GetRecordCount ||
+       !tudor_native_storage_adapter->FirstRecord ||
+       !tudor_native_storage_adapter->NextRecord ||
+       !tudor_native_storage_adapter->GetCurrentRecord ||
+       !tudor_native_storage_adapter->ControlUnit ||
+       !tudor_native_storage_adapter->ControlUnitPrivileged) {
+        log_error("Native storage v1 interface has a missing required method");
+        return false;
+    }
+
+    log_info("Sensor adapter interface %u.%u, size %zu",
+             tudor_sensor_adapter->Version.MajorVersion,
+             tudor_sensor_adapter->Version.MinorVersion,
+             (size_t) tudor_sensor_adapter->Size);
+    log_info("Engine adapter interface %u.%u, size %zu",
+             tudor_engine_adapter->Version.MajorVersion,
+             tudor_engine_adapter->Version.MinorVersion,
+             (size_t) tudor_engine_adapter->Size);
+    const uint8_t *storage_id = reinterpret_cast<const uint8_t *>(
+        &tudor_native_storage_adapter->AdapterId);
+    log_info("Native storage adapter interface %u.%u, size 0x%zx, "
+             "adapter %08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             tudor_native_storage_adapter->Version.MajorVersion,
+             tudor_native_storage_adapter->Version.MinorVersion,
+             (size_t) tudor_native_storage_adapter->Size,
+             tudor_native_storage_adapter->AdapterId.PartA,
+             tudor_native_storage_adapter->AdapterId.PartB,
+             tudor_native_storage_adapter->AdapterId.PartC,
+             storage_id[8], storage_id[9], storage_id[10], storage_id[11],
+             storage_id[12], storage_id[13], storage_id[14], storage_id[15]);
+
+    if(!capture_relay_start()) return false;
 
     printf("tudor_init finish!\n");
     return true;
@@ -1831,6 +2584,8 @@ bool tudor_init() {
 }
 
 bool tudor_shutdown() {
+    capture_relay_stop();
+
     //Unload the driver
     winmodule_set_cur(&tudor_driver_dll->module);
 
@@ -1861,6 +2616,8 @@ bool tudor_shutdown() {
 
     //Unregister dummy modules
     winmodule_unregister(&ntdll_module);
+
+    cryptbridge_registry_set_state_callbacks(nullptr, nullptr, nullptr);
 
     return true;
 }
@@ -1893,16 +2650,106 @@ bool device_init()
     return true;
 }
 
+struct tudor_open_progress {
+    bool sensor_attached = false;
+    bool engine_attached = false;
+    bool storage_attached = false;
+    bool sensor_initialized = false;
+    bool engine_initialized = false;
+    bool storage_initialized = false;
+    bool sensor_activated = false;
+    bool engine_activated = false;
+    bool storage_activated = false;
+    bool storage_database_open = false;
+};
+
+static void tudor_unwind_failed_open(struct tudor_device *device,
+                                     const tudor_open_progress& progress)
+{
+    winmodule_set_cur(&tudor_adapter_dll->module);
+    auto unwind_pipeline = [&](const char *name,
+                               HRESULT (__winfnc *fnc)(WINBIO_PIPELINE*)) {
+        if(!fnc) return;
+        HRESULT hres = fnc(device->pipeline);
+        if(hres != ERROR_SUCCESS) {
+            log_error("Error unwinding WINBIO pipeline function '%s': 0x%x!",
+                      name, hres);
+        }
+    };
+
+    if(progress.sensor_activated &&
+       INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE,
+                            Deactivate))
+        unwind_pipeline("SensorInterface->Deactivate",
+                        tudor_sensor_adapter->Deactivate);
+    if(progress.engine_activated &&
+       INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE,
+                            Deactivate))
+        unwind_pipeline("EngineInterface->Deactivate",
+                        tudor_engine_adapter->Deactivate);
+    if(progress.storage_activated &&
+       INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, Deactivate))
+        unwind_pipeline("StorageInterface->Deactivate",
+                        device->pipeline->StorageInterface->Deactivate);
+
+    if(progress.sensor_initialized &&
+       INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE,
+                            PipelineCleanup))
+        unwind_pipeline("SensorInterface->PipelineCleanup",
+                        tudor_sensor_adapter->PipelineCleanup);
+    if(progress.engine_initialized &&
+       INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE,
+                            PipelineCleanup))
+        unwind_pipeline("EngineInterface->PipelineCleanup",
+                        tudor_engine_adapter->PipelineCleanup);
+    if(progress.storage_initialized &&
+       INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, PipelineCleanup))
+        unwind_pipeline("StorageInterface->PipelineCleanup",
+                        device->pipeline->StorageInterface->PipelineCleanup);
+
+    if(progress.storage_database_open)
+        unwind_pipeline("StorageInterface->CloseDatabase",
+                        device->pipeline->StorageInterface->CloseDatabase);
+
+    if(progress.storage_attached)
+        unwind_pipeline("StorageInterface->Detach",
+                        device->pipeline->StorageInterface->Detach);
+    if(progress.engine_attached)
+        unwind_pipeline("EngineInterface->Detach",
+                        tudor_engine_adapter->Detach);
+    if(progress.sensor_attached)
+        unwind_pipeline("SensorInterface->Detach",
+                        tudor_sensor_adapter->Detach);
+
+    if(device->winbio_file) {
+        winhandle_destroy(device->winbio_file);
+        device->winbio_file = NULL;
+    }
+    free(device->pipeline);
+    device->pipeline = NULL;
+    cant_fail_ret(pthread_mutex_destroy(&device->records_lock));
+}
+
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state)
 {
-    HRESULT hres;
-    NTSTATUS status;
-
+    tudor_open_progress progress;
     device->state = state ? *state : (struct tudor_device_state) {0};
     device->enrolling = false;
+    device->pipeline = NULL;
+    device->winbio_file = NULL;
     cant_fail_ret(pthread_mutex_init(&device->records_lock, NULL));
     device->records_head = NULL;
     device->result_records_head = device->result_records_cursor = NULL;
+
+    auto open_pipeline = [&](const char *name, HRESULT result) {
+        if(result == ERROR_SUCCESS) return true;
+        log_error("Error in WINBIO pipeline function '%s': 0x%x!",
+                  name, result);
+        tudor_unwind_failed_open(device, progress);
+        return false;
+    };
 
     device_init();
 
@@ -1918,7 +2765,7 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     *device->pipeline = (WINBIO_PIPELINE) {0};
     device->pipeline->EngineInterface = tudor_engine_adapter;
     device->pipeline->SensorInterface = tudor_sensor_adapter;
-    // device->pipeline->StorageInterface = tudor_storage_adapter;
+    device->pipeline->StorageInterface = tudor_native_storage_adapter;
     // device->pipeline->SensorHandle = device->winbio_file = winio_create_file(device, true, NULL, NULL, (winio_devctrl_fnc*) tudor_devctrl, (winio_cancel_fnc*) tudor_cancel, (winio_cleanup_fnc*) tudor_cleanup, NULL);
     device->pipeline->SensorHandle = device->winbio_file = winio_create_file(
         device, 
@@ -1933,34 +2780,95 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
 
     device->pipeline->EngineHandle = INVALID_HANDLE_VALUE;
     device->pipeline->StorageHandle = INVALID_HANDLE_VALUE;
-    device->pipeline->StorageContext = device;
+    /* All adapter contexts must be NULL before Attach.  In particular, the
+     * vendor storage Attach rejects a pre-populated StorageContext. */
+    device->pipeline->StorageContext = NULL;
 
     log_debug("Attaching interfaces to pipeline...");
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Attach, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_engine_adapter->Attach, device->pipeline);
-    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->Attach, device->pipeline);
+    if(!open_pipeline("SensorInterface->Attach",
+                      tudor_sensor_adapter->Attach(device->pipeline)))
+        return false;
+    progress.sensor_attached = true;
+    if(!open_pipeline("EngineInterface->Attach",
+                      tudor_engine_adapter->Attach(device->pipeline)))
+        return false;
+    progress.engine_attached = true;
+    if(!open_pipeline("StorageInterface->Attach",
+                      device->pipeline->StorageInterface->Attach(
+                          device->pipeline)))
+        return false;
+    progress.storage_attached = true;
+
+    /* The 0081 engine expects the vendor database to be open before its
+     * PipelineInit loads the match-in-sensor enrollment catalog. */
+    if(!tudor_open_native_storage_database(device)) {
+        tudor_unwind_failed_open(device, progress);
+        return false;
+    }
+    progress.storage_database_open = true;
 
     log_debug("Initializing pipeline interfaces...");
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->PipelineInit, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_engine_adapter->PipelineInit, device->pipeline);
-    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->PipelineInit, device->pipeline);
+    if(INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, PipelineInit)) {
+        if(!open_pipeline("StorageInterface->PipelineInit",
+                          device->pipeline->StorageInterface->PipelineInit(
+                              device->pipeline)))
+            return false;
+        progress.storage_initialized = true;
+    }
+    if(INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE, PipelineInit)) {
+        if(!open_pipeline("EngineInterface->PipelineInit",
+                          tudor_engine_adapter->PipelineInit(device->pipeline)))
+            return false;
+        progress.engine_initialized = true;
+    }
+    if(INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE, PipelineInit)) {
+        if(!open_pipeline("SensorInterface->PipelineInit",
+                          tudor_sensor_adapter->PipelineInit(device->pipeline)))
+            return false;
+        progress.sensor_initialized = true;
+    }
 
     //Reset the sensor
     log_debug("Resetting sensor...");
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Reset, device->pipeline);
+    if(!open_pipeline("SensorInterface->Reset",
+                      tudor_sensor_adapter->Reset(device->pipeline)))
+        return false;
 
     //Activate the pipeline
     log_debug("Activating pipeline...");
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Activate, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_engine_adapter->Activate, device->pipeline);
-    // WINBIO_CALL_PIPELINE(tudor_storage_adapter->Activate, device->pipeline);
+    if(INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, Activate)) {
+        if(!open_pipeline("StorageInterface->Activate",
+                          device->pipeline->StorageInterface->Activate(
+                              device->pipeline)))
+            return false;
+        progress.storage_activated = true;
+    }
+    if(INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE, Activate)) {
+        if(!open_pipeline("EngineInterface->Activate",
+                          tudor_engine_adapter->Activate(device->pipeline)))
+            return false;
+        progress.engine_activated = true;
+    }
+    if(INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE, Activate)) {
+        if(!open_pipeline("SensorInterface->Activate",
+                          tudor_sensor_adapter->Activate(device->pipeline)))
+            return false;
+        progress.sensor_activated = true;
+    }
 
     //Check the sensor status
     log_debug("Checking sensor status...");
     ULONG sensor_status = WINBIO_SENSOR_FAILURE;
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->QueryStatus, device->pipeline, &sensor_status)
+    if(!open_pipeline("SensorInterface->QueryStatus",
+                      tudor_sensor_adapter->QueryStatus(device->pipeline,
+                                                        &sensor_status)))
+        return false;
     if(sensor_status != WINBIO_SENSOR_READY) {
-        log_error("Sensor didn't return ready status! [status 0x%x]", status);
+        log_error("Sensor didn't return ready status! [status 0x%x]",
+                  sensor_status);
+        tudor_unwind_failed_open(device, progress);
         return false;
     }
 
@@ -1969,8 +2877,82 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
 
 bool tudor_close(struct tudor_device *device)
 {
+    bool success = true;
 
+    winmodule_set_cur(&tudor_adapter_dll->module);
+    auto call_pipeline = [&](const char *name,
+                             HRESULT (__winfnc *fnc)(WINBIO_PIPELINE*)) {
+        if(!fnc) return;
+        HRESULT hres = fnc(device->pipeline);
+        if(hres != ERROR_SUCCESS) {
+            log_error("Error in WINBIO pipeline close function '%s': 0x%x!",
+                      name, hres);
+            success = false;
+        }
+    };
 
-    return true;
+    log_debug("Deactivating pipeline...");
+    if(INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE,
+                            Deactivate))
+        call_pipeline("SensorInterface->Deactivate",
+                      tudor_sensor_adapter->Deactivate);
+    if(INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE,
+                            Deactivate))
+        call_pipeline("EngineInterface->Deactivate",
+                      tudor_engine_adapter->Deactivate);
+    if(INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, Deactivate))
+        call_pipeline("StorageInterface->Deactivate",
+                      device->pipeline->StorageInterface->Deactivate);
+
+    log_debug("Cleaning up pipeline interfaces...");
+    if(INTERFACE_HAS_MEMBER(tudor_sensor_adapter, WINBIO_SENSOR_INTERFACE,
+                            PipelineCleanup))
+        call_pipeline("SensorInterface->PipelineCleanup",
+                      tudor_sensor_adapter->PipelineCleanup);
+    if(INTERFACE_HAS_MEMBER(tudor_engine_adapter, WINBIO_ENGINE_INTERFACE,
+                            PipelineCleanup))
+        call_pipeline("EngineInterface->PipelineCleanup",
+                      tudor_engine_adapter->PipelineCleanup);
+    if(INTERFACE_HAS_MEMBER(device->pipeline->StorageInterface,
+                            WINBIO_STORAGE_INTERFACE, PipelineCleanup))
+        call_pipeline("StorageInterface->PipelineCleanup",
+                      device->pipeline->StorageInterface->PipelineCleanup);
+
+    if(tudor_uses_native_storage(device))
+        call_pipeline("StorageInterface->CloseDatabase",
+                      device->pipeline->StorageInterface->CloseDatabase);
+
+    log_debug("Detaching pipeline interfaces...");
+    call_pipeline("StorageInterface->Detach",
+                  device->pipeline->StorageInterface->Detach);
+    call_pipeline("EngineInterface->Detach", tudor_engine_adapter->Detach);
+    call_pipeline("SensorInterface->Detach", tudor_sensor_adapter->Detach);
+
+    if(device->winbio_file) {
+        winhandle_destroy(device->winbio_file);
+        device->winbio_file = NULL;
+    }
+    free(device->pipeline);
+    device->pipeline = NULL;
+
+    /* This closes one WinBio pipeline, not the physical PnP device.  Calling
+     * OnD0Exit/OnReleaseHardware here powers down and re-enumerates the 0081
+     * on every client close.  Driver-wide teardown belongs to
+     * tudor_shutdown(), after all pipelines have been detached. */
+
+    cant_fail_ret(pthread_mutex_lock(&device->records_lock));
+    for(struct tudor_record *record = device->records_head, *next = NULL;
+        record; record = next) {
+        next = record->next;
+        free(record->data);
+        free(record->identity);
+        free(record);
+    }
+    device->records_head = NULL;
+    device->result_records_head = device->result_records_cursor = NULL;
+    cant_fail_ret(pthread_mutex_unlock(&device->records_lock));
+    cant_fail_ret(pthread_mutex_destroy(&device->records_lock));
+
+    return success;
 }
-

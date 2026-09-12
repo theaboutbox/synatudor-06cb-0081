@@ -344,6 +344,25 @@ __winfnc BOOL GetMessageW(
 ) { TRACE(); return FALSE;}
 WINAPI(GetMessageW)
 
+__winfnc BOOL PostThreadMessageW(
+  DWORD thread_id,
+  UINT message,
+  ULONG_PTR w_param,
+  LONG_PTR l_param
+) {
+    TRACE();
+    printf("thread=%u message=0x%x wParam=%#lx lParam=%#lx\n",
+           thread_id, message, (unsigned long) w_param,
+           (unsigned long) l_param);
+
+    /* GetMessageW currently models the driver's hidden-window thread as an
+     * already-drained queue.  Accepting the shutdown post is therefore the
+     * matching operation: the target thread has already returned and the
+     * caller can proceed to join and release it. */
+    return TRUE;
+}
+WINAPI(PostThreadMessageW)
+
 __winfnc BOOL DestroyWindow(
   void* hWnd
 ) {TRACE(); return true;}
@@ -379,4 +398,3 @@ __winfnc void* CreateWindowExW(
     return NULL;
 }
 WINAPI(CreateWindowExW)
-

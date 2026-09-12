@@ -42,10 +42,14 @@ extern "C" {
 
 
 #define DPRINT_(fmt, ...) fprintf(stderr, "[TRACE lib] %s:%d:%s " fmt "%c", __FILE__, __LINE__, __func__, __VA_ARGS__)
+#ifdef CRYPTBRIDGE_DEBUG_TRACE
 #define TRACE(...)       DPRINT_(__VA_ARGS__, '\n')
-#define ERR TRACE
-#define FIXME TRACE
-#define WARN TRACE
+#else
+#define TRACE(...)       do { } while (0)
+#endif
+#define ERR(...)         DPRINT_(__VA_ARGS__, '\n')
+#define FIXME(...)       DPRINT_(__VA_ARGS__, '\n')
+#define WARN(...)        DPRINT_(__VA_ARGS__, '\n')
   /* Windows Exit Procedure flag values */
 #define	WEP_FREE_DLL        0
 #define	WEP_SYSTEM_EXIT     1

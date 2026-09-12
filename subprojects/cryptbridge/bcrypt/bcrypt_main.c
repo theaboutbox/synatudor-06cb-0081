@@ -167,6 +167,7 @@ NTSTATUS WINAPI BCryptGenRandom(BCRYPT_ALG_HANDLE handle, UCHAR *buffer, ULONG c
     return STATUS_NOT_IMPLEMENTED;
 }
 
+#ifdef CRYPTBRIDGE_DEBUG_TRACE
 static void print_utf16(const char16_t *s)
 {
     if (!s) return;
@@ -226,8 +227,9 @@ static void print_utf16(const char16_t *s)
             fwrite(out, 1, (size_t)out_len, stdout);
         }
     }
-    printf("\n"); fflush(stdout);
+	printf("\n"); fflush(stdout);
 }
+#endif
 
 NTSTATUS WINAPI BCryptOpenAlgorithmProvider( BCRYPT_ALG_HANDLE *handle, LPCWSTR id, LPCWSTR implementation, DWORD flags )
 {
@@ -236,8 +238,10 @@ NTSTATUS WINAPI BCryptOpenAlgorithmProvider( BCRYPT_ALG_HANDLE *handle, LPCWSTR 
     enum alg_id alg_id;
 
     TRACE( "%p, %s, %s, %08x\n", handle, id, implementation, flags );
-    print_utf16(id);
-    print_utf16(implementation);
+#ifdef CRYPTBRIDGE_DEBUG_TRACE
+	print_utf16(id);
+	print_utf16(implementation);
+#endif
 
     if (!handle || !id) return STATUS_INVALID_PARAMETER;
     if (flags & ~supported_flags)
@@ -333,7 +337,7 @@ static NTSTATUS hash_init( struct hash_impl *hash, enum alg_id alg_id )
         break;
 
     case ALG_ID_SHA1:
-        // A_SHAInit( &hash->u.sha1 );
+        A_SHAInit( &hash->u.sha1 );
         break;
 
     case ALG_ID_SHA256:
@@ -375,8 +379,7 @@ static NTSTATUS hash_update( struct hash_impl *hash, enum alg_id alg_id,
         break;
 
     case ALG_ID_SHA1:
-        abort();
-        // A_SHAUpdate( &hash->u.sha1, input, size );
+        A_SHAUpdate( &hash->u.sha1, input, size );
         break;
 
     case ALG_ID_SHA256:
@@ -420,8 +423,7 @@ static NTSTATUS hash_finish( struct hash_impl *hash, enum alg_id alg_id,
         break;
 
     case ALG_ID_SHA1:
-        abort();
-        // A_SHAFinal( &hash->u.sha1, (ULONG *)output );
+        A_SHAFinal( &hash->u.sha1, (ULONG *)output );
         break;
 
     case ALG_ID_SHA256:
@@ -741,7 +743,7 @@ NTSTATUS WINAPI BCryptCreateHash( BCRYPT_ALG_HANDLE algorithm, BCRYPT_HASH_HANDL
     }
 
     *handle = hash;
-    printf("Created hash: %x\n", hash->flags);
+	TRACE("Created hash: %x\n", hash->flags);
     return STATUS_SUCCESS;
 }
 
@@ -766,7 +768,8 @@ NTSTATUS WINAPI BCryptDuplicateHash( BCRYPT_HASH_HANDLE handle, BCRYPT_HASH_HAND
         heap_free( hash_copy );
         return STATUS_NO_MEMORY;
     }
-    memcpy( hash_copy->secret, hash_orig->secret, hash_orig->secret_len );
+    if (hash_orig->secret_len)
+        memcpy( hash_copy->secret, hash_orig->secret, hash_orig->secret_len );
 
     *handle_copy = hash_copy;
     return STATUS_SUCCESS;
@@ -794,11 +797,6 @@ NTSTATUS WINAPI BCryptHashData( BCRYPT_HASH_HANDLE handle, UCHAR *input, ULONG s
     if (!hash || hash->hdr.magic != MAGIC_HASH) return STATUS_INVALID_HANDLE;
     if (!input) return STATUS_SUCCESS;
 
-    printf("Hash input: ");
-    for(int i=0;i<size;i++) {
-        printf("%02x", input[i]);
-    }
-    printf("\n");
     return hash_update( &hash->inner, hash->alg_id, input, size );
 }
 
@@ -814,30 +812,20 @@ NTSTATUS WINAPI BCryptFinishHash( BCRYPT_HASH_HANDLE handle, UCHAR *output, ULON
     if (!hash || hash->hdr.magic != MAGIC_HASH) return STATUS_INVALID_HANDLE;
     if (!output) return STATUS_INVALID_PARAMETER;
 
-    FIXME("BCryptFinishHash: flags=%x, alg_id %d\n", hash->flags, hash->alg_id);
+	TRACE("BCryptFinishHash: flags=%x, alg_id %d\n", hash->flags, hash->alg_id);
 
     if (!(hash->flags & HASH_FLAG_HMAC))
     {
         if ((status = hash_finish( &hash->inner, hash->alg_id, output, size ))) return status;
-        printf("Hash out: ");
-        for(int i=0;i<0x20;i++) {
-            printf("%02x", output[i]);
-        }
-        printf("\n");
         if (hash->flags & HASH_FLAG_REUSABLE) return prepare_hash( hash );
         return STATUS_SUCCESS;
     }
 
     hash_length = alg_props[hash->alg_id].hash_length;
-    FIXME("BCryptFinishHash: hash_length=%d MAX_HASH_OUTPUT_BYTES=%d\n", hash_length, MAX_HASH_OUTPUT_BYTES);
+	TRACE("BCryptFinishHash: hash_length=%d MAX_HASH_OUTPUT_BYTES=%d\n", hash_length, MAX_HASH_OUTPUT_BYTES);
     if ((status = hash_finish( &hash->inner, hash->alg_id, buffer, hash_length ))) return status;
     if ((status = hash_update( &hash->outer, hash->alg_id, buffer, hash_length ))) return status;
     if ((status = hash_finish( &hash->outer, hash->alg_id, output, size ))) return status;
-    printf("Hash out: ");
-    for(int i=0;i<0x20;i++) {
-        printf("%02x", output[i]);
-    }
-    printf("\n");
     if (hash->flags & HASH_FLAG_REUSABLE) return prepare_hash( hash );
     return STATUS_SUCCESS;
 }
@@ -1452,15 +1440,7 @@ NTSTATUS WINAPI BCryptExportKey( BCRYPT_KEY_HANDLE export_key, BCRYPT_KEY_HANDLE
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    NTSTATUS rc = key_export( key, type, output, output_len, size );
-    if(rc == 0 && output) {
-        char buf[1024], *p = buf;
-        for(int i=0;i<*size && i < output_len;i++)
-            p += sprintf(p, "%02x ", output[i]);
-        *p = 0;
-        TRACE("The key %d bytes: %s\n", *size, buf);
-    }
-    return rc;
+    return key_export( key, type, output, output_len, size );
 }
 
 NTSTATUS WINAPI BCryptDuplicateKey( BCRYPT_KEY_HANDLE handle, BCRYPT_KEY_HANDLE *handle_copy,
@@ -1494,12 +1474,6 @@ NTSTATUS WINAPI BCryptImportKeyPair( BCRYPT_ALG_HANDLE algorithm, BCRYPT_KEY_HAN
 
     // TRACE( "%p, %p, %s, %p, %p, %u, %08x\n", algorithm, decrypt_key, debugstr_w(type), ret_key, input,
     //        input_len, flags );
-
-    char buf[1024], *p = buf;
-    for(int i=0;i<input_len;i++)
-        p += sprintf(p, "%02x ", input[i]);
-    *p = 0;
-    TRACE("The key %d bytes: %s\n", input_len, buf);
 
     if (!alg || alg->hdr.magic != MAGIC_ALG) return STATUS_INVALID_HANDLE;
     if (!ret_key || !type || !input) return STATUS_INVALID_PARAMETER;

@@ -86,6 +86,16 @@ __winfnc BOOL VerifyVersionInfoW(ULONGLONG condition_mask, DWORD type_mask, ULON
 }
 WINAPI(VerifyVersionInfoW)
 
+__winfnc BOOL VerifyVersionInfoA(OSVERSIONINFOEXA *version_info, DWORD type_mask,
+                                ULONGLONG condition_mask) {
+    /* Match the existing wide-character version emulation. The vendor also
+     * calls the ANSI entry point during shutdown. Neither path currently
+     * examines the version structure. */
+    return VerifyVersionInfoW((ULONGLONG) (uintptr_t) version_info, type_mask,
+                              condition_mask);
+}
+WINAPI(VerifyVersionInfoA)
+
 __winfnc BOOL ConvertStringSecurityDescriptorToSecurityDescriptorW(const char16_t *str, DWORD rev, void *descrpt, ULONG *descrpt_size) {
     TRACE();
     //TODO

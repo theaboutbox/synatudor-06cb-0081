@@ -3,6 +3,7 @@
 #include "dbus.h"
 #include "launch.h"
 #include "pdata.h"
+#include "state.h"
 
 GDBusConnection *dbus_con;
 
@@ -60,6 +61,7 @@ int main() {
     g_assert_no_error(error);
 
     //Initialize modules
+    init_state();
     init_launcher();
     init_pdata();
 
@@ -83,6 +85,7 @@ int main() {
     //Uninitialize modules
     uninit_launcher();
     uninit_pdata();
+    uninit_state();
 
     return EXIT_SUCCESS;
 }

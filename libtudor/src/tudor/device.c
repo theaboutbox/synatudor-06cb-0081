@@ -1,6 +1,11 @@
 #include <unistd.h>
 #include "internal.h"
 
+/* HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED), returned by the vendor's
+ * WUDF cancellation callback.  A stalled capture uses this status to request
+ * a fresh capture while other transport failures remain fatal. */
+#define TUDOR_CAPTURE_RESTART_STATUS ((NTSTATUS) 0x800703e3u)
+
 static void req_cb(struct winwdf_request *req, NTSTATUS status, OVERLAPPED *ovlp) {
     //Get request info
     const void *out_buf = NULL;
@@ -15,9 +20,8 @@ static void req_cb(struct winwdf_request *req, NTSTATUS status, OVERLAPPED *ovlp
 
     if(LOG_LEVEL <= LOG_VERBOSE) {
         cant_fail_ret(pthread_mutex_lock(&LOG_LOCK));
-        printf("[DEVCTRL] <- status 0x%x out (size 0x%lx): ", status, num_transfered);
-        if(status == STATUS_SUCCESS) for(size_t i = 0; i < num_transfered; i++) printf("%02x", ((uint8_t*) out_buf)[i]);
-        puts("");
+        printf("[DEVCTRL] <- status 0x%x out size 0x%lx\n", status,
+               num_transfered);
         cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
     }
 
@@ -28,9 +32,7 @@ static void req_cb(struct winwdf_request *req, NTSTATUS status, OVERLAPPED *ovlp
 static NTSTATUS tudor_devctrl(struct tudor_device *device, OVERLAPPED *ovlp, ULONG code, void *in_buf, size_t in_size, void *out_buf, size_t out_size, struct winwdf_request **req) {
     if(LOG_LEVEL <= LOG_VERBOSE) {
         cant_fail_ret(pthread_mutex_lock(&LOG_LOCK));
-        printf("[DEVCTRL] -> in code 0x%x (size 0x%lx): ", code, in_size);
-        for(size_t i = 0; i < in_size; i++) printf("%02x", ((uint8_t*) in_buf)[i]);
-        puts("");
+        printf("[DEVCTRL] -> code 0x%x in size 0x%lx\n", code, in_size);
         cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
     }
 
@@ -201,7 +203,7 @@ bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_fi
     //Follow https://docs.microsoft.com/en-us/windows/win32/secbiomet/adapter-workflow - WinBioEnrollBegin
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->ClearContext, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->ClearContext, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->ClearContext, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->ClearContext, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->CreateEnrollment, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->SetEnrollmentParameters, device->pipeline, &(WINBIO_EXTENDED_ENROLLMENT_PARAMETERS) {
         .Size = sizeof(WINBIO_EXTENDED_ENROLLMENT_PARAMETERS),
@@ -221,6 +223,7 @@ static void enroll_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) 
 
     if(status != STATUS_SUCCESS) {
         log_error("Error starting capture: 0x%x!", status);
+        if(status == TUDOR_CAPTURE_RESTART_STATUS) done = false;
         goto exit;
     }
 
@@ -306,6 +309,10 @@ bool tudor_enroll_commit(struct tudor_device *device, bool *is_duplicate) {
         return false;
     }
 
+    /* RefreshCache is an optional tail method.  Failure must not turn a
+     * committed sensor-side enrollment into a reported enrollment failure. */
+    tudor_refresh_native_storage_cache(device);
+
     device->enrolling = false;
     return true;
 }
@@ -324,6 +331,7 @@ bool tudor_enroll_discard(struct tudor_device *device) {
     //Follow https://docs.microsoft.com/en-us/windows/win32/secbiomet/adapter-workflow - WinBioEnrollDiscard
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->DiscardEnrollment, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->ClearContext, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->ClearContext, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->ClearContext, device->pipeline);
 
     device->enrolling = false;
@@ -337,6 +345,7 @@ static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) 
 
     if(status != STATUS_SUCCESS) {
         log_error("Error starting capture: 0x%x!", status);
+        if(status == TUDOR_CAPTURE_RESTART_STATUS) retry = true;
         goto exit;
     }
 
@@ -409,6 +418,7 @@ static void identify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res
 
     if(status != STATUS_SUCCESS) {
         log_error("Error starting capture: 0x%x!", status);
+        if(status == TUDOR_CAPTURE_RESTART_STATUS) retry = true;
         goto exit;
     }
 

@@ -128,12 +128,6 @@ static BOOL hmac_get_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             } else if(data) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
             *data_size = hash->hash_size;
 
-            printf("Data size: %d\n", (int) *data_size);
-            printf("Hash out: ");
-            for (DWORD i = 0; i < *data_size; i++) {
-                printf("%02X", ((unsigned char*)data)[i]);  // two-digit uppercase hex
-            }
-            printf("\n");
             return TRUE;
         }
         case HP_HASHSIZE: {
@@ -173,13 +167,6 @@ static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
         case HP_HMAC_INFO: {
             if(hash->is_completed) { winerr_set_errno(); return FALSE; }
             HMAC_INFO *info = (HMAC_INFO*) data;
-            printf("info: %p\n", info);
-            printf("info->innerStringSize: %d\n", info->cbInnerString);
-            printf("info->outerStringSize: %d\n", info->cbOuterString);
-            printf("info->innerString: %s\n", info->pbInnerString);
-            printf("info->outerString: %p\n", info->pbOuterString);
-            printf("info->hasAlgId: %x\n", info->HashAlgid);
-
             //Set algorithm
             switch(info->HashAlgid) {
                 case CALG_SHA1: hash->hash_size = 20; break;
@@ -210,8 +197,6 @@ static BOOL hmac_set_hash_param(struct crypt_hash_algorithm *algo, struct hmac_h
             else
                 memset(hash->outer_data, 0x5C, hash->outer_size);
 
-            print_hex_str("Outer string", hash->outer_data, hash->outer_size);
-            print_hex_str("Inner string", hash->inner_data, hash->inner_size);
             hash->has_algo = true;
             hash->is_dirty = true;
             TRACE_OK();

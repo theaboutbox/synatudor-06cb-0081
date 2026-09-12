@@ -3,10 +3,12 @@ project('synaTudor', ['c', 'cpp'],
     meson_version: '>= 0.57.0'
 )
 
-INSTALL_DIR = '/sbin/tudor'
+INSTALL_DIR = '/usr/bin/tudor'
 
 subdir('libtudor')
 subdir('cli')
 subdir('tudor-host')
 subdir('tudor-host-launcher')
-subdir('libfprint-tod')
+if get_option('TOD')
+    subdir('libfprint-tod')
+endif

@@ -1136,12 +1136,6 @@ int ecc_sign(PUCHAR x, PUCHAR y, PUCHAR d, PUCHAR src, ULONG src_len, PUCHAR dst
         memcpy(pbOutput+s->r.cbData, s->s.pbData, s->s.cbData);
         *pcbResult = s->r.cbData + s->s.cbData;
 
-        char buf[1024], *p = buf;
-        for(int i=0;i<cb;i++)
-            p += sprintf(p, "%02x ", ((unsigned char*)buf1)[i]);
-        *p = 0;
-        FIXME("Generated %d signature bytes: %s\n", cb, buf);
-
 #endif
         return STATUS_SUCCESS;
     }

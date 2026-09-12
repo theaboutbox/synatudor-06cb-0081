@@ -108,10 +108,9 @@ __winfnc HRESULT SHGetFolderPathA(
     TRACE();
     int folder = CSIDL_FOLDER_MASK & nFolder;
     printf("SHGetFolderPathA: %d\n", folder);
-    const char* path = "/tmp/synatudor";
-    if (pszPath == NULL) {
-        pszPath = malloc(sizeof(path + 1));
-    }
+    const char *path = getenv("SYNA_TUDOR_STATE_DIR");
+    if(!path || !path[0]) path = ".";
+    if(!pszPath) return E_INVALIDARG;
     strcpy(pszPath, path);
     return 0;
 }

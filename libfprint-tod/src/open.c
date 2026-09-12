@@ -74,6 +74,50 @@ static void host_died_signal_cb(GDBusConnection *con, const gchar *sender, const
     }
 }
 
+static gboolean state_component_is_safe(const gchar *value) {
+    size_t len = value ? strlen(value) : 0;
+    if(!len || len > 96) return FALSE;
+    for(size_t i = 0; i < len; i++) {
+        if(!g_ascii_isalnum(value[i])) return FALSE;
+    }
+    return TRUE;
+}
+
+static gchar *make_state_id(GUsbDevice *usb_dev) {
+    gchar *serial = NULL;
+    GError *error = NULL;
+    guint8 serial_index = g_usb_device_get_serial_number_index(usb_dev);
+    if(serial_index)
+        serial = g_usb_device_get_string_descriptor(
+            usb_dev, serial_index, &error);
+    if(error) {
+        g_warning("Could not read fingerprint sensor serial number: %s",
+                  error->message);
+        g_clear_error(&error);
+    }
+
+    gchar *component;
+    if(state_component_is_safe(serial)) {
+        component = g_strdup(serial);
+    } else {
+        const gchar *fallback = serial && serial[0]
+            ? serial : g_usb_device_get_platform_id(usb_dev);
+        if(!fallback || !fallback[0])
+            fallback = "unknown-usb-device";
+        component = g_compute_checksum_for_string(
+            G_CHECKSUM_SHA256, fallback, -1);
+        component[32] = 0;
+        g_warning("Using a hashed USB path as the fingerprint sensor state ID");
+    }
+
+    gchar *state_id = g_strdup_printf(
+        "%04x-%04x-%s", g_usb_device_get_vid(usb_dev),
+        g_usb_device_get_pid(usb_dev), component);
+    g_free(component);
+    g_free(serial);
+    return state_id;
+}
+
 void register_host_process_monitor(FpiDeviceTudor *tdev) {
     //Register a signal listener
     g_dbus_connection_signal_subscribe(tdev->dbus_con,
@@ -212,6 +256,8 @@ static void init_host_proc(FpiDeviceTudor *tdev, GTask *task, GUsbDevice *usb_de
         int dev_fd = ((int*) dev_handle)[10 + 2 + 4 + 2 + 1 + 1]; //(struct linux_device_handle_priv*)->fd
         g_assert_no_errno(tdev->usb_fd = dup(dev_fd));
 
+        if(!tdev->state_id) tdev->state_id = make_state_id(usb_dev);
+
         if(!g_usb_device_close(usb_dev, &error)) {
             dispose_dev(tdev);
             g_task_return_error(task, error);
@@ -235,8 +281,12 @@ static void init_host_proc(FpiDeviceTudor *tdev, GTask *task, GUsbDevice *usb_de
         .type = IPC_MSG_INIT,
         .log_level = loglvl,
         .usb_bus = g_usb_device_get_bus(usb_dev),
-        .usb_addr = g_usb_device_get_address(usb_dev)
+        .usb_addr = g_usb_device_get_address(usb_dev),
+        .state_id = {0}
     };
+    if(!tdev->state_id) tdev->state_id = make_state_id(usb_dev);
+    strncpy(tdev->send_msg->init.state_id, tdev->state_id,
+            TUDOR_STATE_ID_SIZE);
     if(!send_ipc_msg(tdev, tdev->send_msg, &error)) {
         dispose_dev(tdev);
         g_task_return_error(task, error);
@@ -398,7 +448,7 @@ void close_device(FpiDeviceTudor *tdev, bool orphan_host, GAsyncReadyCallback ca
     if(orphan_host) {
         //Clear the host prints, then orphan
         tdev->send_msg->size = sizeof(enum ipc_msg_type);
-        tdev->send_msg->type = IPC_MSG_CLEAR_RECORDS;
+        tdev->send_msg->type = IPC_MSG_CLEAR_HOST_RECORDS;
         send_acked_ipc_msg(tdev, tdev->send_msg, orphan_clear_acked_cb, NULL);
     } else shutdown_host(tdev);
 }

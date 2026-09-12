@@ -14,6 +14,7 @@ GType fpi_tod_shared_driver_get_type() {
 
 static FpIdEntry tudor_ids[] = {
     { .vid = 0x06cb, .pid = 0x00be },
+    { .vid = 0x06cb, .pid = 0x0081 },
 //  { .vid = 0x06cb, .pid = 0x00bd }, //TODO Check if it's also supported
     { 0 }
 };
@@ -53,6 +54,7 @@ static void fpi_device_tudor_init(FpiDeviceTudor *tdev) {
     tdev->ipc_socket = NULL;
     tdev->ipc_cancel = NULL;
     tdev->pdata_sensor_name = NULL;
+    tdev->state_id = NULL;
     tdev->close_task = NULL;
     tdev->close_timeout_src = NULL;
     tdev->cancel_handler_id = 0;
@@ -88,6 +90,7 @@ static void fpi_device_tudor_finalize(GObject *obj) {
     //Free data
     ipc_msg_buf_free(tdev->send_msg);
     g_ptr_array_unref(tdev->db_records);
+    g_clear_pointer(&tdev->state_id, g_free);
 
     //Free USB FD
     if(tdev->usb_fd >= 0) g_assert_no_errno(close(tdev->usb_fd));
@@ -164,6 +167,7 @@ static void fpi_device_tudor_class_init(FpiDeviceTudorClass *class) {
     dev_class->id_table = tudor_ids;
     dev_class->nr_enroll_stages = TUDOR_NUM_ENROLL_STAGES;
     dev_class->scan_type = FP_SCAN_TYPE_PRESS;
+    dev_class->temp_hot_seconds = -1;
 
     dev_class->probe = fpi_device_tudor_probe;
     dev_class->open = fpi_device_tudor_open;

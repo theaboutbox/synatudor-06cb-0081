@@ -28,3 +28,11 @@ tudor_host = executable('tudor_host', tudor_host_src,
     install: true,
     install_dir: INSTALL_DIR
 )
+
+native_storage_ipc_test = executable('native-storage-ipc-test',
+    ['tests/native-storage-ipc.c', 'src/handler.c', 'src/ipc.c'],
+    dependencies: [thread_dep, libusb_dep],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    include_directories: ['src', tudor_host_inc, libtudor_inc],
+    install: false)
+test('native-storage-ipc', native_storage_ipc_test, timeout: 5)

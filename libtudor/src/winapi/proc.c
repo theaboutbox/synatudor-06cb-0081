@@ -100,7 +100,7 @@ __winfnc DWORD GetCurrentThreadId() {
     TRACE();
     DWORD thread_id = win_get_thread_id();
 
-    printf("Thread id: %d\n", thread_id);
+	TRACE_PRINTF("Thread id: %d\n", thread_id);
     return thread_id;
 }
 WINAPI(GetCurrentThreadId)

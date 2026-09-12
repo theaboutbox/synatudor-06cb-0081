@@ -9,7 +9,7 @@ Currently, the following build options are defined:
 
 Flag | Description
 ----- | ---------------------------
-`UNMOUNTFS=true` | Enable unmounting of the root file system in the sandbox, which prevents the driver from accessing any files. Enabled by default, disable when debugging using e.g. GDB.
+`UNMOUNTFS=true` | Replace the host's filesystem view with the read-only installed driver directory. Persistent device state is exchanged with the launcher over a dedicated socket. Enabled by default; disable when debugging with a tool such as GDB.
 
 ## Documentation
 **TODO**

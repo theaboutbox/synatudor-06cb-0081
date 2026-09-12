@@ -21,6 +21,8 @@ struct __winapi_descr {
     struct __winapi_descr *next;
 };
 
+#ifdef SYNA_TUDOR_DEBUG_TRACE
+#define TRACE_PRINTF(...) do { printf(__VA_ARGS__); } while (0)
 #define TRACE_OK() do { \
     printf("[Trace] --> %s OK\n", \
            __func__); \
@@ -32,6 +34,11 @@ struct __winapi_descr {
            (long)syscall(SYS_gettid), __FILE__, __LINE__, __func__); \
     fflush(stdout); \
 } while (0)
+#else
+#define TRACE_PRINTF(...) do { } while (0)
+#define TRACE_OK() do { } while (0)
+#define TRACE() do { } while (0)
+#endif
 // #define TRACE() printf("Trace -->: [%s:%d] %s\n", __FILE__, __LINE__, __func__); fflush(stdout);
 
 
@@ -89,6 +96,17 @@ void winmodule_unregister(struct winmodule *module);
 
 struct winmodule *winmodule_get_cur();
 void winmodule_set_cur(struct winmodule *module);
+void win_init_tib();
+
+/* Windows-thread lifecycle notifications are used by the WUDF1 bridge to
+ * emulate framework callbacks which the vendor driver expects after a worker
+ * exits.  The opaque cookie distinguishes overlapping threads which use the
+ * same start routine and parameter. */
+typedef void win_thread_lifecycle_observer_fnc(
+    struct winmodule *module, void *start_proc, void *start_param,
+    void *thread_cookie, bool created);
+void win_set_thread_lifecycle_observer(
+    win_thread_lifecycle_observer_fnc *observer);
 
 //Log
 

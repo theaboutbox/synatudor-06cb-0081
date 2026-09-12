@@ -73,8 +73,6 @@ driver_dll_names = [
 ]
 
 add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
-add_global_arguments('-g', language : ['c', 'cpp'])
-add_global_arguments('-fsanitize=address', language : ['c', 'cpp'])
 
 
 bridge_proj = subproject('cryptbridge')
@@ -83,7 +81,7 @@ cryptbridge_dep = bridge_proj.get_variable('cryptbridge_dep')
 
 driver_dlls = custom_target('driver-download', 
     output: driver_dll_names,
-    input: ['download_driver.sh', 'installer.sha'],
+    input: ['download_driver.sh', 'installer.sha256'],
     command: [find_program('bash'), '@INPUT0@', '@INPUT1@', '@PRIVATE_DIR@', '@OUTDIR@'] + driver_dll_names
 )
 
@@ -124,3 +122,31 @@ libtudor_dep = declare_dependency(
     link_with: libtudor,
     include_directories: libtudor_inc
 )
+
+native_storage_test = executable('native-storage-test',
+    'tests/native-storage.c',
+    dependencies: [thread_dep, libusb_dep, libtudor_dep],
+    include_directories: ['src', libtudor_inc],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('native-storage', native_storage_test, timeout: 5)
+
+native_storage_lifecycle_test = executable('native-storage-lifecycle-test',
+    'tests/native-storage-lifecycle.c',
+    dependencies: [thread_dep, libusb_dep, libtudor_dep],
+    include_directories: ['src', libtudor_inc],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('native-storage-lifecycle', native_storage_lifecycle_test, timeout: 5)
+
+# Build the WUDF request recovery test as a self-contained executable so its
+# hook remains hidden and is never present in the installed shared library.
+capture_recovery_test = executable('capture-recovery-test',
+    [libtudor_src, driver_dll_blobs, 'tests/capture-recovery.cpp'],
+    dependencies: [thread_dep, libcrypto_dep, libusb_dep, cryptbridge_dep],
+    c_args: ['-D_GNU_SOURCE'] + libtudor_flags,
+    cpp_args: ['-D_GNU_SOURCE', '-DTUDOR_RECOVERY_TEST_HOOK'] + libtudor_flags,
+    link_args: ['-Wl,-z,noexecstack', '-Wl,--copy-dt-needed-entries'],
+    include_directories: ['src', libtudor_inc],
+    install: false)
+test('capture-recovery', capture_recovery_test, timeout: 5)

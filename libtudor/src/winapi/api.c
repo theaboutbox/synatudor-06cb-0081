@@ -1,7 +1,5 @@
 #include <stdlib.h>
 #include <string.h>
-#include <iconv.h>
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <uchar.h>
@@ -69,48 +67,39 @@ char16_t* winstr_from_str(const char *str) {
 
 char16_t *winstr_from_str(const char *str) {
     if(!str) return NULL;
-    mbstate_t mstate;
 
-    //Determine length of converted string
-    int len = 0;
-    mstate = (mbstate_t) {0};
-    for(const char *p = str; *p;) {
-        p += mbrtoc16(NULL, p, MB_CUR_MAX, &mstate);
-        len++;
-    }
+    size_t input_size = strlen(str) + 1;
+    size_t output_size;
+    if(win_utf8_to_utf16(str, input_size, NULL, 0, &output_size) !=
+       WIN_UTF_OK)
+        return NULL;
 
-    //Convert string
-    char16_t *wstr = (char16_t*) malloc((len + 1) * sizeof(char16_t));
+    char16_t *wstr = malloc(output_size * sizeof(*wstr));
     if(!wstr) { perror("Couldn't allocate memory for string"); abort(); }
-    memset(wstr, 0, (len + 1) * sizeof(char16_t));
-    mstate = (mbstate_t) {0};
-    for(char16_t *d = wstr; *str; d++) {
-        str += mbrtoc16(d, str, MB_CUR_MAX, &mstate);
+    if(win_utf8_to_utf16(str, input_size, wstr, output_size, NULL) !=
+       WIN_UTF_OK) {
+        free(wstr);
+        return NULL;
     }
-
     return wstr;
 }
 
 char *winstr_to_str(const char16_t *wstr) {
     if(!wstr) return NULL;
-    mbstate_t mstate;
 
-    //Determine length of converted string
-    int len = 0;
-    mstate = (mbstate_t) {0};
-    for(const char16_t *p = wstr; *p; p++) {
-        len += c16rtomb(NULL, *p, &mstate);
-    }
+    size_t input_size = (size_t) winstr_len(wstr) + 1;
+    size_t output_size;
+    if(win_utf16_to_utf8(wstr, input_size, NULL, 0, &output_size) !=
+       WIN_UTF_OK)
+        return NULL;
 
-    //Convert string
-    char *str = (char*) malloc(len + 1);
+    char *str = malloc(output_size);
     if(!str) { perror("Couldn't allocate memory for string"); abort(); }
-    memset(str, 0, len + 1);
-    mstate = (mbstate_t) {0};
-    for(char *d = str; *wstr; wstr++) {
-        d += c16rtomb(d, *wstr, &mstate);
+    if(win_utf16_to_utf8(wstr, input_size, str, output_size, NULL) !=
+       WIN_UTF_OK) {
+        free(str);
+        return NULL;
     }
-
     return str;
 }
 
@@ -122,4 +111,3 @@ void print_hex_str(const char* name, uint8_t* buf, size_t size)
     }
     printf("\n");
 }
-

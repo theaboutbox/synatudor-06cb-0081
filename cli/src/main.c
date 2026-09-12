@@ -74,7 +74,7 @@ static libusb_device_handle *open_sensor_device(libusb_context *usb_ctx, int vid
         //Check VID and PID
         if(dev_descr.idVendor != vid || dev_descr.idProduct != pid) continue;
 
-        sensor_dev = dev;
+        sensor_dev = libusb_ref_device(dev);
         log_info("Found sensor USB device [bus %d addr %d vid 0x%04x pid 0x%04x]", (int) libusb_get_bus_number(dev), (int) libusb_get_device_address(dev), (int) dev_descr.idVendor, (int) dev_descr.idProduct);
         break;
     }
@@ -89,7 +89,9 @@ static libusb_device_handle *open_sensor_device(libusb_context *usb_ctx, int vid
     //Open the sensor device
     log_info("Opening sensor USB device...");
     libusb_device_handle *sensor_handle;
-    if((usb_err = libusb_open(sensor_dev, &sensor_handle)) != 0) {
+    usb_err = libusb_open(sensor_dev, &sensor_handle);
+    libusb_unref_device(sensor_dev);
+    if(usb_err != 0) {
         log_error("Error opening sensor USB device: %d [%s]", usb_err, libusb_error_name(usb_err));
         return NULL;
     }
@@ -127,8 +129,6 @@ int main(int argc, char **argv) {
     }
     sensor_vid = 0x06cb;
     sensor_pid = 0x0081;
-    tudor_log_traces = true;
-    LOG_LEVEL = LOG_VERBOSE;
 
     //Ask if one wants to really use this
     // puts(">>>>> WARNING <<<<<");

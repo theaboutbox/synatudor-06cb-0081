@@ -1,6 +1,83 @@
+#include <stddef.h>
+
 #include "internal.h"
 
+bool tudor_uses_native_storage(struct tudor_device *device) {
+    return device && device->pipeline && tudor_native_storage_adapter &&
+        device->pipeline->StorageInterface == tudor_native_storage_adapter;
+}
+
+bool tudor_open_native_storage_database(struct tudor_device *device) {
+    if(!tudor_uses_native_storage(device)) return false;
+
+    GUID database_id =
+        DEFINE_GUID(D833B48E, 3178, 4DF0, AEE3, 2803155883D4);
+    GUID null_format = {0};
+    static const char16_t empty_string[] = u"";
+
+    HRESULT hres = device->pipeline->StorageInterface->OpenDatabase(
+        device->pipeline, &database_id, empty_string, empty_string);
+    if(hres == WINBIO_E_DATABASE_CANT_FIND) {
+        log_info("Native storage database is absent; creating it");
+        hres = device->pipeline->StorageInterface->CreateDatabase(
+            device->pipeline, &database_id, WINBIO_TYPE_FINGERPRINT,
+            &null_format, empty_string, empty_string, 0, 0x20);
+    }
+    if(hres != ERROR_SUCCESS) {
+        log_error("Native storage database open/create failed: 0x%x", hres);
+        return false;
+    }
+
+    log_info("Opened native storage database");
+    return true;
+}
+
+void tudor_refresh_native_storage_cache(struct tudor_device *device) {
+    if(!tudor_uses_native_storage(device) || !tudor_engine_adapter) return;
+
+    size_t required_size = offsetof(WINBIO_ENGINE_INTERFACE, RefreshCache) +
+        sizeof(tudor_engine_adapter->RefreshCache);
+    if(tudor_engine_adapter->Size < required_size ||
+       !tudor_engine_adapter->RefreshCache)
+        return;
+
+    winmodule_set_cur(&tudor_adapter_dll->module);
+    HRESULT hres = tudor_engine_adapter->RefreshCache(device->pipeline);
+    if(hres != ERROR_SUCCESS)
+        log_warn("Engine cache refresh failed after enrollment: 0x%x", hres);
+}
+
+static int tudor_wipe_native_records(struct tudor_device *device,
+                                     RECGUID *guid,
+                                     enum tudor_finger finger) {
+    WINBIO_IDENTITY identity = {0};
+    if(guid) {
+        identity.Type = WINBIO_ID_TYPE_GUID;
+        identity.TemplateGuid = *(GUID*) (void*) guid;
+    } else {
+        /* This is the wildcard cookie used by the 0081 vendor storage
+         * adapter.  A zero Wildcard value is rejected by its delete path. */
+        identity.Type = WINBIO_ID_TYPE_WILDCARD;
+        identity.Wildcard = 0x25066282;
+    }
+
+    winmodule_set_cur(&tudor_adapter_dll->module);
+    HRESULT hres = device->pipeline->StorageInterface->DeleteRecord(
+        device->pipeline, &identity, (UCHAR) finger);
+    if(hres == WINBIO_E_DATABASE_NO_SUCH_RECORD ||
+       hres == WINBIO_E_DATABASE_NO_RESULTS)
+        return 0;
+    if(hres != ERROR_SUCCESS) {
+        log_error("Native storage record delete failed: 0x%x", hres);
+        return -1;
+    }
+    return 1;
+}
+
 int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_finger finger) {
+    if(tudor_uses_native_storage(device))
+        return tudor_wipe_native_records(device, guid, finger);
+
     cant_fail_ret(pthread_mutex_lock(&device->records_lock));
 
     //Find the record
@@ -15,6 +92,7 @@ int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_fi
             else device->records_head = rec->next;
             if(rec->next) rec->next->prev = rec->prev;
             free(rec->data);
+            free(rec->identity);
             free(rec);
 
             device->result_records_head = device->result_records_cursor = NULL;
@@ -27,6 +105,8 @@ int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_fi
 }
 
 bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, const void *data, size_t data_size) {
+    if(tudor_uses_native_storage(device)) return true;
+
     cant_fail_ret(pthread_mutex_lock(&device->records_lock));
 
     //Check for duplicate record
@@ -48,10 +128,10 @@ bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_fing
 
     rec->guid  = guid;
     rec->finger = finger;
-    rec->data = malloc(data_size);
+    rec->data = data_size ? malloc(data_size) : NULL;
     rec->data_size = data_size;
-    if(!rec->data)  { perror("Couldn't allocate record data"); abort(); }
-    memcpy(rec->data, data, data_size);
+    if(data_size && !rec->data)  { perror("Couldn't allocate record data"); abort(); }
+    if(data_size) memcpy(rec->data, data, data_size);
 
     //Add to record list
     rec->prev = NULL;

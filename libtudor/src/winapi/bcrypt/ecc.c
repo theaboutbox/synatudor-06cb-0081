@@ -85,15 +85,6 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
     BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB*) buf;
     p256_param_t *key_params = (p256_param_t*) (ecc_blob + 1);
 
-    if (buf != NULL) {
-        printf("Import key: raw data:\n");
-
-        for (int i = 0; i < buf_size; ++i) {
-            printf("%02x", ((uint8_t*)buf)[i]);
-        }
-        printf("\n");
-    }
-
     BIGNUM *pub_x, *pub_y, *priv_d;
     if(strcmp(import_type, "ECCPUBLICBLOB") == 0) {
         if(buf_size < sizeof(BCRYPT_ECCKEY_BLOB) + 2*P256_PARAM_SIZE) return STATUS_BUFFER_TOO_SMALL;
@@ -121,7 +112,6 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             LIBCRYPTO_ERR(EC_POINT_get_affine_coordinates(p256_get_curve(), pub_point, pub_x, pub_y, NULL));
             EC_POINT_free(pub_point);
         }
-        log_error("d=%s\n", BN_bn2hex(priv_d));
     } else return WINERR_SET_CODE;
 
 
@@ -202,11 +192,6 @@ static NTSTATUS p256_export_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             memcpy(key_params[0], key->pub_x, P256_PARAM_SIZE);
             memcpy(key_params[1], key->pub_y, P256_PARAM_SIZE);
 
-            printf("Exporting PUBLIC KEY\n");
-            for (int i = 0; i < *buf_size; ++i) {
-                printf("%02x", ((uint8_t*)buf)[i]);
-            }
-            printf("\n");
         } else if(buf) return STATUS_BUFFER_TOO_SMALL;
         *buf_size = sizeof(BCRYPT_ECCKEY_BLOB) + 2*P256_PARAM_SIZE;
         return STATUS_SUCCESS;
@@ -219,11 +204,6 @@ static NTSTATUS p256_export_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
             memcpy(key_params[1], key->pub_y, P256_PARAM_SIZE);
             memcpy(key_params[2], key->priv_d, P256_PARAM_SIZE);
 
-            printf("Exporting PRIVATE KEY\n");
-            for (int i = 0; i < *buf_size; ++i) {
-                printf("%02x", ((uint8_t*)buf)[i]);
-            }
-            printf("\n");
         } else if(buf) return STATUS_BUFFER_TOO_SMALL;
         *buf_size = sizeof(BCRYPT_ECCKEY_BLOB) + 3*P256_PARAM_SIZE;
         return STATUS_SUCCESS;
@@ -245,8 +225,6 @@ derive_ec_pubkey(unsigned char *buf)
 
     pub = EC_POINT_new(curve);
     prv = BN_bin2bn(buf+32*2, 32, NULL);
-
-    log_error("d=%s\n", BN_bn2hex(prv));
 
     if (1 != EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx))
         puts("oops, EC_POINT_mul");
@@ -310,7 +288,6 @@ NTSTATUS key_import_ecc(struct p256_key *key, const unsigned char *buf, unsigned
     d = BN_bin2bn(d_bytes, ecc_blob->cbKey, NULL);
 
 
-    log_error("d=%s\n", BN_bn2hex(d));
     if (!x || !y || !d)
     {
         status = STATUS_INTERNAL_ERROR;
@@ -418,10 +395,6 @@ int ecc_sign(
         return -1;
     }
 
-    log_error("x=%s\n", BN_bn2hex(x));
-    log_error("y=%s\n", BN_bn2hex(y));
-    log_error("d=%s\n", BN_bn2hex(d));
-
     if(!EC_KEY_set_private_key(key, d)) {
         // log_error("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
         return -1;
@@ -442,9 +415,6 @@ int ecc_sign(
         ERR("oops, ECDSA_sign_setup failed\n");
         return -1;
     }
-    log_error("kinv=%s\n", BN_bn2hex(kinv));
-    log_error("rp=%s\n", BN_bn2hex(rp));
-
     log_error("After BIGNUM convert");
     ECDSA_SIG *sig = ECDSA_do_sign_ex(src, src_len, kinv, rp, key);
     BN_free(kinv);

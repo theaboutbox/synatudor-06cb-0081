@@ -18,6 +18,7 @@
 #include <linux/netlink.h>
 #include <seccomp.h>
 #include <tudor/log.h>
+#include <tudor/state-proto.h>
 #include "sandbox.h"
 #include "ipc.h"
 
@@ -95,27 +96,29 @@ static void setup_uid_gid() {
         //Notify child process
         cant_fail(kill(cpid, SIGUSR1));
 
-        //Wait for child
+        //Wait for child and mirror its real exit status. Passing the encoded
+        //wait status to exit() turns common failures such as exit(1) into 0.
         int status;
-        cant_fail(wait(&status));
-        exit(status);
+        cant_fail(waitpid(cpid, &status, 0));
+        if(WIFEXITED(status)) exit(WEXITSTATUS(status));
+        if(WIFSIGNALED(status)) exit(128 + WTERMSIG(status));
+        exit(EXIT_FAILURE);
     }
 
     //Change UID / GID
-    cant_fail(setresuid(SANDBOX_UID, SANDBOX_UID, SANDBOX_UID));
     cant_fail(setresgid(SANDBOX_GID, SANDBOX_GID, SANDBOX_GID));
+    cant_fail(setresuid(SANDBOX_UID, SANDBOX_UID, SANDBOX_UID));
 
     //Restore signal mask
-    sigandset(&oldsigs, &oldsigs, &sigs);
-    cant_fail(sigprocmask(SIG_UNBLOCK, &oldsigs, NULL));
+    cant_fail(sigprocmask(SIG_SETMASK, &oldsigs, NULL));
 }
 
 static void unmount_root() {
 #ifdef UNMOUNTFS
     //Pivot root
     cant_fail(mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
-    cant_fail(mount("/sbin/tudor", "/sbin/tudor", NULL, MS_BIND | MS_NOSUID | MS_RDONLY, NULL));
-    cant_fail(chdir("/sbin/tudor"));
+    cant_fail(mount("/usr/bin/tudor", "/usr/bin/tudor", NULL, MS_BIND | MS_NOSUID | MS_RDONLY, NULL));
+    cant_fail(chdir("/usr/bin/tudor"));
     cant_fail(syscall(SYS_pivot_root, ".", "."));
     cant_fail(umount2(".", MNT_DETACH));
     cant_fail(chdir("/"));
@@ -192,6 +195,11 @@ static void setup_seccomp() {
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ERRNO(EPERM), SCMP_SYS(open), 0));
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ERRNO(EPERM), SCMP_SYS(openat), 0));
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ERRNO(EPERM), SCMP_SYS(openat2), 0));
+    /* Vendor initialization probes writable working-directory state.  The
+     * pivoted root is read-only, so report that expected failure instead of
+     * killing the process for the mkdir syscall. */
+    cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ERRNO(EROFS), SCMP_SYS(mkdir), 0));
+    cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ERRNO(EROFS), SCMP_SYS(mkdirat), 0));
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ALLOW, SCMP_SYS(fcntl), 1, SCMP_A1_32(SCMP_CMP_EQ, F_GETFD)));
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ALLOW, SCMP_SYS(fcntl), 1, SCMP_A1_32(SCMP_CMP_EQ, F_SETFD)));
     cant_fail(seccomp_rule_add(scmp_ctx, SCMP_ACT_ALLOW, SCMP_SYS(fcntl), 1, SCMP_A1_32(SCMP_CMP_EQ, F_GETFL)));
@@ -229,8 +237,8 @@ void activate_sandbox() {
     //Setup UID / GID
     setup_uid_gid();
 
-    //Close all file descriptors, but preserve stdin/out/err
-    closefrom(3);
+    //Preserve stdin/out/err and the dedicated launcher state socket.
+    closefrom(TUDOR_STATE_SOCKET_FD + 1);
 
     //Unshare all namspaces
     cant_fail(unshare(CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWCGROUP | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWUTS));

@@ -150,32 +150,39 @@ typedef enum _VARENUM {
 // typedef struct _PROPVARIANT PROPVARIANT;
 
 struct PROPVARIANT {
-    uint16_t vt;
-    uint16_t wReserved1;
-    uint16_t wReserved2;
-    uint16_t wReserved3;
     union {
-        CHAR cVal;
-        UCHAR bVal;
-        SHORT iVal;
-        USHORT uiVal;
-        LONG lVal;
-        ULONG ulVal;
-        INT intVal;
-        UINT uintVal;
-        CHAR *pcVal;
-        UCHAR *pbVal;
-        SHORT *piVal;
-        USHORT *puiVal;
-        LONG *plVal;
-        ULONG *pulVal;
-        INT *pintVal;
-        UINT *puintVal;
-        PROPVARIANT *pvarVal;
-        BLOB              blob;
+        struct {
+            uint16_t vt;
+            uint16_t wReserved1;
+            uint16_t wReserved2;
+            uint16_t wReserved3;
+            union {
+                CHAR cVal;
+                UCHAR bVal;
+                SHORT iVal;
+                USHORT uiVal;
+                LONG lVal;
+                ULONG ulVal;
+                INT intVal;
+                UINT uintVal;
+                CHAR *pcVal;
+                UCHAR *pbVal;
+                SHORT *piVal;
+                USHORT *puiVal;
+                LONG *plVal;
+                ULONG *pulVal;
+                INT *pintVal;
+                UINT *puintVal;
+                PROPVARIANT *pvarVal;
+                BLOB blob;
+            };
+        };
+        DECIMAL decVal;
     };
-    DECIMAL decVal __align(8);
 };
+
+static_assert(sizeof(PROPVARIANT) == 24,
+              "64-bit PROPVARIANT must match the Windows ABI");
 
 
 typedef enum _WDF_TRI_STATE {
@@ -454,6 +461,7 @@ public:
 
 class IWDFDriver;
 class IWDFIoRequest;
+class IRequestCallbackCancel;
 class IWDFFile;
 class IQueueCallbackStateChange;
 class IWDFIoTarget;
@@ -462,6 +470,13 @@ class IWDFIoQueue;
 class IWDFDeviceInitialize;
 class IWDFMemory;
 class IWDFNamedPropertyStore;
+
+class IRequestCallbackCancel : public IUnknown
+{
+public:
+    virtual void STDMETHODCALLTYPE OnCancel(
+        _In_ IWDFIoRequest *pWdfRequest) = 0;
+};
 
 
 class IWDFDevice : public IWDFObject
@@ -1057,7 +1072,7 @@ public:
     
     virtual void STDMETHODCALLTYPE MarkCancelable( 
         /* [annotation][in] */ 
-        _In_  void* pCancelCallback) = 0;
+        _In_  IRequestCallbackCancel *pCancelCallback) = 0;
     
     virtual HRESULT STDMETHODCALLTYPE UnmarkCancelable( void) = 0;
     

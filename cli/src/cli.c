@@ -14,6 +14,34 @@ static void sigint_handler(int sig) {
     abort_cmd_loop = false;
 }
 
+static bool wait_capture(tudor_async_res_t res, bool *capture_timed_out) {
+    if(capture_timed_out) *capture_timed_out = false;
+    const char *timeout_env = secure_getenv("SYNA_TUDOR_CAPTURE_TIMEOUT_SECONDS");
+    if(!timeout_env || !timeout_env[0]) return tudor_wait_async(res);
+
+    char *end = NULL;
+    unsigned long timeout_seconds = strtoul(timeout_env, &end, 10);
+    if(end == timeout_env || *end != '\0' || timeout_seconds == 0 ||
+       timeout_seconds > UINT_MAX / 1000) {
+        log_warn("Ignoring invalid SYNA_TUDOR_CAPTURE_TIMEOUT_SECONDS='%s'",
+                 timeout_env);
+        return tudor_wait_async(res);
+    }
+
+    bool timed_out = false;
+    bool success = tudor_wait_async_timeout(res,
+                                             (unsigned int) timeout_seconds * 1000,
+                                             &timed_out);
+    if(!timed_out) return success;
+    if(capture_timed_out) *capture_timed_out = true;
+
+    log_warn("Capture timed out after %lu seconds; cancelling request...",
+             timeout_seconds);
+    tudor_cancel_async(res);
+    (void) tudor_wait_async(res);
+    return false;
+}
+
 void cli_main_loop(struct tudor_device *device) {
     signal(SIGINT, sigint_handler);
 
@@ -26,6 +54,7 @@ void cli_main_loop(struct tudor_device *device) {
         puts("  v - verify finger");
         puts("  i - identify finger");
         puts("  q - query information about enrolled fingers");
+        puts("  d - query on-sensor database size");
         puts("  w - wipe enrolled finger(s)");
         puts("  s - shutdown driver");
 
@@ -62,15 +91,28 @@ void cli_main_loop(struct tudor_device *device) {
                 }
 
                 puts("Put your finger on the sensor");
+                unsigned int consecutive_timeouts = 0;
                 while(true) {
                     //Update enrollment
                     bool is_done;
+                    bool timed_out = false;
                     tudor_async_res_t async_res = NULL;
-                    if(!tudor_enroll_capture(device, &is_done, &async_res) || !tudor_wait_async(async_res)) {
+                    if(!tudor_enroll_capture(device, &is_done, &async_res) || !wait_capture(async_res, &timed_out)) {
                         if(async_res) tudor_cleanup_async(async_res);
+
+                        /* Cancelling one capture does not discard the engine's
+                         * enrollment. Keep accepted samples through transient
+                         * stalls, but bound repeated no-progress attempts. */
+                        if(timed_out && ++consecutive_timeouts < 12) {
+                            log_warn("Retrying stalled capture; keeping accepted enrollment samples (%u/12 timeouts)",
+                                     consecutive_timeouts);
+                            puts("Put your finger on the sensor");
+                            continue;
+                        }
 
                         if(!is_done) {
                             log_warn("Retrying enrollment update...");
+                            puts("Put your finger on the sensor");
                             continue;
                         }
 
@@ -79,6 +121,7 @@ void cli_main_loop(struct tudor_device *device) {
                         goto cmdend;
                     }
                     tudor_cleanup_async(async_res);
+                    consecutive_timeouts = 0;
 
                     if(is_done) break;
                     puts("Driver requested more samples");
@@ -115,7 +158,7 @@ void cli_main_loop(struct tudor_device *device) {
 
                     bool retry;
                     tudor_async_res_t async_res = NULL;
-                    if(!tudor_verify(device, guid, TUDOR_FINGER_ANY, &retry, &matches, &async_res) || !tudor_wait_async(async_res)) {
+                    if(!tudor_verify(device, guid, TUDOR_FINGER_ANY, &retry, &matches, &async_res) || !wait_capture(async_res, NULL)) {
                         if(async_res) tudor_cleanup_async(async_res);
 
                         if(retry) {
@@ -141,7 +184,7 @@ void cli_main_loop(struct tudor_device *device) {
                     puts("Put your finger on the sensor");
                     bool retry;
                     tudor_async_res_t async_res = NULL;
-                    if(!tudor_identify(device, &retry, &found_match, &match_guid, &match_finger, &async_res) || !tudor_wait_async(async_res)) {
+                    if(!tudor_identify(device, &retry, &found_match, &match_guid, &match_finger, &async_res) || !wait_capture(async_res, NULL)) {
                         if(async_res) tudor_cleanup_async(async_res);
 
                         if(retry) {
@@ -182,6 +225,14 @@ void cli_main_loop(struct tudor_device *device) {
                 printf("Total: %d record(s)\n", num_matched);
 
                 cant_fail_ret(pthread_mutex_unlock(&device->records_lock));
+            } goto cmdend;
+            case 'd': {
+                uint64_t record_count;
+                if(tudor_get_sensor_database_size(&record_count))
+                    printf("On-sensor database: %llu record(s)\n",
+                           (unsigned long long) record_count);
+                else
+                    log_error("Could not query on-sensor database size");
             } goto cmdend;
             case 'w': {
                 //Read identity GUID

@@ -444,8 +444,7 @@ static inline const PROV_ENUMALGS_EX* get_algid_info(HCRYPTPROV hProv, ALG_ID al
     KEYCONTAINER *pKeyContainer;
 
     if (!(pKeyContainer = get_key_container(hProv))) return NULL;
-    printf("personality: %d\n", pKeyContainer->dwPersonality);
-    fflush(stdout);
+	TRACE("personality: %d\n", pKeyContainer->dwPersonality);
 
     for (iterator = aProvEnumAlgsEx[pKeyContainer->dwPersonality]; iterator->aiAlgid; iterator++) {
         if (iterator->aiAlgid == algid) return iterator;
@@ -1287,10 +1286,10 @@ static HCRYPTPROV new_key_container(PCCH pszContainerName, DWORD dwFlags, const 
         pKeyContainer->dwEnumAlgsCtr = 0;
         pKeyContainer->hKeyExchangeKeyPair = (HCRYPTKEY)INVALID_HANDLE_VALUE;
         pKeyContainer->hSignatureKeyPair = (HCRYPTKEY)INVALID_HANDLE_VALUE;
-        printf("new_key_container: vtable %p\n", pVTable);
+	    TRACE("new_key_container: vtable %p\n", pVTable);
         if (pVTable && pVTable->pszProvName) {
             lstrcpynA(pKeyContainer->szProvName, pVTable->pszProvName, MAX_PATH);
-            printf("Set personality: %s\n", pVTable->pszProvName);
+	        TRACE("Set personality: %s\n", pVTable->pszProvName);
             if (!strcmp(pVTable->pszProvName, MS_DEF_PROV_A)) {
                 pKeyContainer->dwPersonality = RSAENH_PERSONALITY_BASE;
             } else if (!strcmp(pVTable->pszProvName, MS_ENHANCED_PROV_A)) {
@@ -1299,7 +1298,7 @@ static HCRYPTPROV new_key_container(PCCH pszContainerName, DWORD dwFlags, const 
                 pKeyContainer->dwPersonality = RSAENH_PERSONALITY_SCHANNEL;
             } else if (!strcmp(pVTable->pszProvName, MS_ENH_RSA_AES_PROV_A) ||
                        !strcmp(pVTable->pszProvName, MS_ENH_RSA_AES_PROV_XP_A)) {
-                printf("SET PERSONALITY AES\n");
+	            TRACE("SET PERSONALITY AES\n");
                 pKeyContainer->dwPersonality = RSAENH_PERSONALITY_AES;
             } else {
                 pKeyContainer->dwPersonality = RSAENH_PERSONALITY_STRONG;
@@ -1421,6 +1420,7 @@ static HCRYPTPROV read_key_container(PCHAR pszContainerName, DWORD dwFlags, cons
                            (OBJECTHDR**)&pKeyContainer)) {
 
             TRACE("err lookup handle");
+            RegCloseKey(hKey);
             return (HCRYPTPROV)INVALID_HANDLE_VALUE;
         }
     
@@ -1438,6 +1438,7 @@ static HCRYPTPROV read_key_container(PCHAR pszContainerName, DWORD dwFlags, cons
             release_handle(&handle_table, hCryptKey, RSAENH_MAGIC_KEY);
     }
 
+    RegCloseKey(hKey);
     return hKeyContainer;
 }
 
@@ -2126,7 +2127,7 @@ BOOL WINAPI RSAENH_CPAcquireContext(HCRYPTPROV *phProv, LPSTR pszContainer,
     switch (dwFlags & (CRYPT_NEWKEYSET|CRYPT_VERIFYCONTEXT|CRYPT_DELETEKEYSET)) 
     {
         case 0:
-            printf("cont name: %s\n", szKeyContainerName);
+	            TRACE("cont name: %s\n", szKeyContainerName);
             *phProv = read_key_container(szKeyContainerName, dwFlags, pVTable);
             break;
 
@@ -3461,7 +3462,7 @@ static BOOL import_key(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataLen, HC
 BOOL WINAPI RSAENH_CPImportKey(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataLen,
                                HCRYPTKEY hPubKey, DWORD dwFlags, HCRYPTKEY *phKey)
 {
-    printf("hProv: %lu\n", hProv);
+	TRACE("hProv: %lu\n", hProv);
     TRACE("(hProv=%08lx, pbData=%p, dwDataLen=%d, hPubKey=%08lx, dwFlags=%08x, phKey=%p)\n",
         hProv, pbData, dwDataLen, hPubKey, dwFlags, phKey);
 

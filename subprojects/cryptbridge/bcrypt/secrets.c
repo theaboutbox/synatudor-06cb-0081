@@ -161,8 +161,6 @@ derive_ec_pubkey(unsigned char *buf)
     pub = EC_POINT_new(curve);
     prv = BN_bin2bn(buf+32*2, 32, NULL);
 
-    ERR("d=%s\n", sBN_bn2hex(prv));
-
     if (1 != EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx))
         puts("oops, EC_POINT_mul");
 
@@ -205,10 +203,6 @@ int ecc_sign(
         return -1;
     }
 
-    ERR("x=%s\n", sBN_bn2hex(x));
-    ERR("y=%s\n", sBN_bn2hex(y));
-    ERR("d=%s\n", sBN_bn2hex(d));
-
     if(!EC_KEY_set_private_key(key, d)) {
         ERR("oops, EC_KEY_set_public_key_affine_coordinates failed: %s\n", pERR_error_string(pERR_get_error(), NULL));
         return -1;
@@ -229,9 +223,6 @@ int ecc_sign(
         ERR("oops, ECDSA_sign_setup failed\n");
         return -1;
     }
-    ERR("kinv=%s\n", sBN_bn2hex(kinv));
-    ERR("rp=%s\n", sBN_bn2hex(rp));
-
     ERR("After BIGNUM convert");
     ECDSA_SIG *sig = ECDSA_do_sign_ex(src, src_len, kinv, rp, key);
     BN_free(kinv);
@@ -293,11 +284,8 @@ NTSTATUS WINAPI BCryptSecretAgreement(
     }
     
     myXbn = BN_bin2bn(myX.data, myX.size, NULL);
-    ERR("my x=%s\n", sBN_bn2hex(myXbn));
     myYbn = BN_bin2bn(myY.data, myY.size, NULL);
-    ERR("my y=%s\n", sBN_bn2hex(myYbn));
     myDbn = BN_bin2bn(myD.data, myD.size, NULL);
-    ERR("my d=%s\n", sBN_bn2hex(myDbn));
 
 
     if(!myXbn || !myYbn || !myDbn) {
@@ -323,9 +311,7 @@ NTSTATUS WINAPI BCryptSecretAgreement(
     BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB *)peerKeyInt->u.a.pubkey;
 
     peerXbn = BN_bin2bn((unsigned char *)(ecc_blob+1), ecc_blob->cbKey, NULL);
-    ERR("peer x=%s\n", BN_bn2hex(peerXbn));
     peerYbn = BN_bin2bn((unsigned char *)(ecc_blob+1) + ecc_blob->cbKey, ecc_blob->cbKey, NULL);
-    ERR("peer y=%s\n", BN_bn2hex(peerYbn));
 
     if(!peerXbn || !peerYbn) {
         ERR("oops, one of pBN_bin2bn failed\n");
@@ -339,52 +325,35 @@ NTSTATUS WINAPI BCryptSecretAgreement(
 
     ERR("Yay! created both keys!\n");
 
-    // shared secret
-    
+    /* OpenSSL 3 no longer reliably derives from EVP_PKEY objects populated
+     * through the deprecated EVP_PKEY_set1_EC_KEY bridge.  In particular,
+     * EVP_PKEY_derive_init() and set_peer() can succeed while the size query
+     * still fails.  CNG's ECDH secret is the raw P-256 shared point x
+     * coordinate, which ECDH_compute_key returns directly in big-endian
+     * form. */
+    struct my_secret *secret = heap_alloc(sizeof(*secret));
+    if(!secret) return STATUS_NO_MEMORY;
 
-    EVP_PKEY *priv = EVP_PKEY_new(), *pub = EVP_PKEY_new();
-    EVP_PKEY_set1_EC_KEY(priv, myKey);
-    EVP_PKEY_set1_EC_KEY(pub, peerKey);
+    secret->secret_size = 32;
+    secret->secret = heap_alloc(secret->secret_size);
+    if(!secret->secret) {
+        heap_free(secret);
+        return STATUS_NO_MEMORY;
+    }
 
-    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(priv, NULL);
-    if(!ctx) {
-        ERR("oops, pEVP_PKEY_CTX_new failed");
+    int secret_size = ECDH_compute_key(secret->secret, secret->secret_size,
+                                       EC_KEY_get0_public_key(peerKey),
+                                       myKey, NULL);
+    if(secret_size <= 0) {
+        ERR("oops, ECDH_compute_key failed: %s\n",
+            ERR_error_string(ERR_get_error(), NULL));
+        heap_free(secret->secret);
+        heap_free(secret);
         return STATUS_INTERNAL_ERROR;
     }
 
-    ERR("ctx created\n");
-
-    if(EVP_PKEY_derive_init(ctx) <= 0) {
-        ERR("oops, pEVP_PKEY_CTX_new failed");
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    ERR("derive initiated\n");
-
-    if(EVP_PKEY_derive_set_peer(ctx, pub) <= 0) {
-        ERR("oops, EVP_PKEY_derive_set_peer failed");
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    ERR("peer set\n");
-
-    struct my_secret *secret = heap_alloc(sizeof(struct my_secret));
+    secret->secret_size = secret_size;
     *phAgreedSecret = secret;
-
-    size_t sz = 0;
-
-    if(EVP_PKEY_derive(ctx, NULL, &sz) <= 0) {
-        ERR("oops, EVP_PKEY_derive failed");
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    secret->secret = heap_alloc(sz);
-
-    if(EVP_PKEY_derive(ctx, secret->secret, &secret->secret_size) <= 0) {
-        ERR("oops, EVP_PKEY_derive failed");
-        return STATUS_INTERNAL_ERROR;
-    }
-
 
     // FIXME - release all the memory
     // FIXME - fix error handling
@@ -435,19 +404,14 @@ NTSTATUS WINAPI BCryptDeriveKey(
     if(pParameterList) {
         for(int i=0;i<pParameterList->cBuffers;i++) {
             PBCryptBuffer bcb = pParameterList->pBuffers + i;            
-            char hex[1024], *p;
-            int j;
-
             switch(bcb->BufferType) {
                 case 4:
                     memcpy(label, bcb->pvBuffer, bcb->cbBuffer);
                     label[bcb->cbBuffer] = 0;
-                    FIXME("  Label: %s\n", label);
                     break;
 
                 case 7:
                     proto = *(DWORD*)bcb->pvBuffer;
-                    FIXME("  Protocol: %x\n", proto);
                     break;
 
                 case 5:
@@ -457,21 +421,11 @@ NTSTATUS WINAPI BCryptDeriveKey(
                     }
                     seed = bcb->pvBuffer;
 
-                    p = hex;
-                    for(j=0;j<64;j++) {
-                        p += sprintf(p, "%02x", seed[j]);
-                    }
-                    *p = 0;
-                    FIXME("  Seed: %s\n", hex);
                     break;
 
                 default:
-                    p = hex;
-                    for(j=0;j<bcb->cbBuffer;j++) {
-                        p += sprintf(p, "%02x", ((PUCHAR)bcb->pvBuffer)[j]);
-                    }
-                    *p = 0;
-                    FIXME("  %04x: %s\n", bcb->BufferType, hex);
+                    FIXME("Unsupported KDF parameter type %04x (%u bytes)\n",
+                          bcb->BufferType, bcb->cbBuffer);
             }
         }
     }
@@ -516,12 +470,6 @@ NTSTATUS WINAPI BCryptDeriveKey(
         return STATUS_INTERNAL_ERROR;
     }
 
-    char hex[1024], *p = hex;
-    for(int i=0;i < sz;i++)
-        p += sprintf(p, "%02x", buf[i]);
-    *p = 0;
-    ERR("tls_prf: %s\n", hex);
-
     ERR("%d < %ld?\n", cbDerivedKey, sz);
 
     if(pbDerivedKey && cbDerivedKey >= sz) {
@@ -542,6 +490,9 @@ NTSTATUS WINAPI BCryptDestroySecret(
 )
 {
     FIXME("BCryptDestroySecret %p\n", hSecret);
-    // FIXME
+    struct my_secret *secret = hSecret;
+    if(!secret) return STATUS_INVALID_HANDLE;
+    heap_free(secret->secret);
+    heap_free(secret);
     return STATUS_SUCCESS;
 }

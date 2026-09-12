@@ -1,5 +1,7 @@
 #include "internal.h"
+#include <errno.h>
 #include <libusb.h>
+#include <limits.h>
 #include <unistd.h>
 
 typedef enum _USBD_PIPE_TYPE {
@@ -44,6 +46,9 @@ struct driver_info {
     int supported_devices_cnt;
     struct libusb_device_descriptor descr;
     libusb_device_handle * dev;
+    bool owns_ctx;
+    bool owns_dev;
+    bool interface_claimed;
 
     DWORD timeouts[0x100];
     volatile char abort[0x100];
@@ -53,44 +58,281 @@ struct driver_info {
     int script_line;
 };
 
-void err(int ec)
-{
-    if (ec != 0) {
-        printf("Encountered libusb error!\n");
-        abort();
-    }
+/* The old playback path reserved an eight-megabyte array in every caller's
+ * stack frame, even when playback was disabled.  Keep the historical input
+ * limit, but allocate it only while a script record is actually being read. */
+#define USB_PLAYBACK_MAX_TRANSFER_LENGTH 4000000U
+#define USB_PLAYBACK_LINE_SLACK 64U
+
+static int playback_hex_digit(char value) {
+    if(value >= '0' && value <= '9') return value - '0';
+    if(value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if(value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
 }
 
-bool claim_device(struct driver_info *info)
-{
-    libusb_device ** dev_list;
-    int i, j;
-    int dev_cnt = libusb_get_device_list(info->ctx, &dev_list);
+static char *playback_skip_horizontal_space(char *cursor) {
+    while(*cursor == ' ' || *cursor == '\t') cursor++;
+    return cursor;
+}
 
-    for (i = 0; i < dev_cnt; i++) {
-        struct libusb_device_descriptor descriptor;
+static BOOL playback_transfer(struct driver_info *info, int expected_selector,
+                              const char *expected_direction, PUCHAR buffer,
+                              ULONG buffer_length, PULONG length_transferred,
+                              bool compare_output) {
+    static const char prefix[] = "blackbox: usb ";
 
-        libusb_get_device_descriptor(dev_list[i], &descriptor);
+    if(!length_transferred) {
+        log_error("USB playback requires a transfer-length output");
+        winerr_set_code(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE;
+    }
+    *length_transferred = 0;
 
-        for(j = 0;j < info->supported_devices_cnt;j++) {
-            if (info->supported_devices[j].vend_id == descriptor.idVendor && 
-                    info->supported_devices[j].prod_id == descriptor.idProduct) {
-                printf("Found device %04x:%04x\n", descriptor.idVendor, descriptor.idProduct);
+    if(!info || !info->script || (!buffer && buffer_length != 0)) {
+        log_error("USB playback received invalid arguments");
+        winerr_set_code(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE;
+    }
+    if(buffer_length > USB_PLAYBACK_MAX_TRANSFER_LENGTH) {
+        log_error("USB playback transfer is too large: %lu bytes",
+                  (unsigned long)buffer_length);
+        winerr_set_code(122); /* ERROR_INSUFFICIENT_BUFFER */
+        return FALSE;
+    }
 
-                err(libusb_get_device_descriptor(dev_list[i], &info->descr));
-                err(libusb_open(dev_list[i], &info->dev));
-                err(libusb_reset_device(info->dev));
-                err(libusb_set_configuration(info->dev, 1));
-                err(libusb_claim_interface(info->dev, 0));
+    size_t line_capacity = (size_t)buffer_length * 2U +
+                           USB_PLAYBACK_LINE_SLACK;
+    char *line = malloc(line_capacity);
+    if(!line) {
+        log_error("Allocating the USB playback input buffer failed");
+        winerr_set_code(8); /* ERROR_NOT_ENOUGH_MEMORY */
+        return FALSE;
+    }
 
-                printf("libusb initialized, device = %p\n", info->dev);
-                return TRUE;
+    info->script_line++;
+    if(!fgets(line, (int)line_capacity, info->script)) {
+        log_error("Missing USB playback record on script line %d",
+                  info->script_line);
+        free(line);
+        winerr_set_code(38); /* ERROR_HANDLE_EOF */
+        return FALSE;
+    }
+
+    size_t line_length = strlen(line);
+    if(line_length == line_capacity - 1U &&
+       line[line_length - 1U] != '\n') {
+        log_error("USB playback record exceeds its bounded input on script line %d",
+                  info->script_line);
+        free(line);
+        winerr_set_code(13); /* ERROR_INVALID_DATA */
+        return FALSE;
+    }
+
+    char *cursor = line;
+    if(strncmp(cursor, prefix, sizeof(prefix) - 1U) != 0) {
+        log_error("Malformed USB playback prefix on script line %d",
+                  info->script_line);
+        goto invalid_record;
+    }
+    cursor += sizeof(prefix) - 1U;
+
+    errno = 0;
+    char *selector_end = NULL;
+    long selector = strtol(cursor, &selector_end, 10);
+    if(errno == ERANGE || selector_end == cursor || selector < 0 ||
+       selector > INT_MAX ||
+       (*selector_end != ' ' && *selector_end != '\t')) {
+        log_error("Malformed USB selector on script line %d",
+                  info->script_line);
+        goto invalid_record;
+    }
+    if(selector != expected_selector) {
+        log_error("Wrong USB selector on script line %d (expected %ld, requested %d)",
+                  info->script_line, selector, expected_selector);
+        goto invalid_record;
+    }
+    cursor = playback_skip_horizontal_space(selector_end);
+
+    size_t direction_length = strlen(expected_direction);
+    if(strncmp(cursor, expected_direction, direction_length) != 0 ||
+       (cursor[direction_length] != ' ' &&
+        cursor[direction_length] != '\t')) {
+        log_error("Wrong USB direction on script line %d (requested %s)",
+                  info->script_line, expected_direction);
+        goto invalid_record;
+    }
+    cursor = playback_skip_horizontal_space(cursor + direction_length);
+
+    char *hex = cursor;
+    while(*cursor && *cursor != ' ' && *cursor != '\t' &&
+          *cursor != '\r' && *cursor != '\n')
+        cursor++;
+    size_t hex_length = (size_t)(cursor - hex);
+    cursor = playback_skip_horizontal_space(cursor);
+    while(*cursor == '\r' || *cursor == '\n') cursor++;
+    if(*cursor != '\0' || (hex_length & 1U) != 0) {
+        log_error("Malformed USB hex payload on script line %d",
+                  info->script_line);
+        goto invalid_record;
+    }
+
+    size_t transfer_length = hex_length / 2U;
+    if(transfer_length > buffer_length ||
+       (compare_output && transfer_length != buffer_length)) {
+        log_error("USB playback length mismatch on script line %d "
+                  "(script %zu, buffer %lu)", info->script_line,
+                  transfer_length, (unsigned long)buffer_length);
+        goto invalid_record;
+    }
+
+    for(size_t i = 0; i < transfer_length; i++) {
+        int high = playback_hex_digit(hex[i * 2U]);
+        int low = playback_hex_digit(hex[i * 2U + 1U]);
+        if(high < 0 || low < 0) {
+            log_error("Invalid USB hex byte on script line %d at byte %zu",
+                      info->script_line, i);
+            goto invalid_record;
+        }
+
+        UCHAR value = (UCHAR)((high << 4) | low);
+        if(compare_output) {
+            if(buffer[i] != value) {
+                log_error("USB output mismatch on script line %d at byte %zu",
+                          info->script_line, i);
+                goto invalid_record;
             }
+        } else {
+            buffer[i] = value;
         }
     }
 
-    printf("!!!!!!!!!!!! No matching devices found\n");
+    *length_transferred = (ULONG)transfer_length;
+    free(line);
+    winerr_clear();
+    return TRUE;
+
+invalid_record:
+    free(line);
+    winerr_set_code(13); /* ERROR_INVALID_DATA */
     return FALSE;
+}
+
+/* The TOD host receives an already-open device FD over IPC and wraps it in
+ * its sandbox-owned libusb context.  OnPrepareHardware runs during
+ * tudor_init(), so make that handle available before the vendor driver calls
+ * WinUsb_Initialize.  Each host process owns one sensor and sets this only
+ * before init or after shutdown, so no synchronization is required here. */
+static libusb_device_handle *borrowed_usb_dev;
+
+void tudor_set_usb_device(libusb_device_handle *usb_dev) {
+    borrowed_usb_dev = usb_dev;
+}
+
+static bool usb_call_succeeded(const char *operation, int status) {
+    if(status == LIBUSB_SUCCESS) return true;
+    log_error("%s failed: %d [%s]", operation, status,
+              libusb_error_name(status));
+    return false;
+}
+
+static bool supported_device(const struct driver_info *info,
+                             const struct libusb_device_descriptor *descr) {
+    for(int i = 0; i < info->supported_devices_cnt; i++) {
+        if(info->supported_devices[i].vend_id == descr->idVendor &&
+           info->supported_devices[i].prod_id == descr->idProduct)
+            return true;
+    }
+    return false;
+}
+
+static bool prepare_device(struct driver_info *info) {
+    libusb_device *device = libusb_get_device(info->dev);
+    if(!device) {
+        log_error("The libusb handle has no device");
+        return false;
+    }
+
+    int status = libusb_get_device_descriptor(device, &info->descr);
+    if(!usb_call_succeeded("Getting USB device descriptor", status))
+        return false;
+    if(!supported_device(info, &info->descr)) {
+        log_error("Refusing unexpected USB device %04x:%04x",
+                  info->descr.idVendor, info->descr.idProduct);
+        return false;
+    }
+
+    int config;
+    status = libusb_get_configuration(info->dev, &config);
+    if(!usb_call_succeeded("Getting USB configuration", status))
+        return false;
+
+    /* Re-applying the active configuration can reset the device. */
+    if(config != 1) {
+        status = libusb_set_configuration(info->dev, 1);
+        if(!usb_call_succeeded("Setting USB configuration", status))
+            return false;
+    }
+
+    status = libusb_claim_interface(info->dev, 0);
+    if(!usb_call_succeeded("Claiming USB interface 0", status))
+        return false;
+    info->interface_claimed = true;
+    return true;
+}
+
+static bool claim_device(struct driver_info *info) {
+    libusb_device **dev_list = NULL;
+    ssize_t dev_cnt = libusb_get_device_list(info->ctx, &dev_list);
+    if(dev_cnt < 0) {
+        log_error("Listing USB devices failed: %d [%s]", (int)dev_cnt,
+                  libusb_error_name((int)dev_cnt));
+        return false;
+    }
+
+    bool found = false;
+    for(ssize_t i = 0; i < dev_cnt; i++) {
+        struct libusb_device_descriptor descriptor;
+        int status = libusb_get_device_descriptor(dev_list[i], &descriptor);
+        if(status != LIBUSB_SUCCESS) continue;
+        if(!supported_device(info, &descriptor)) continue;
+
+        printf("Found device %04x:%04x\n", descriptor.idVendor,
+               descriptor.idProduct);
+        status = libusb_open(dev_list[i], &info->dev);
+        if(!usb_call_succeeded("Opening USB device", status)) break;
+        info->owns_dev = true;
+        found = prepare_device(info);
+        if(!found) {
+            libusb_close(info->dev);
+            info->dev = NULL;
+            info->owns_dev = false;
+        }
+        break;
+    }
+
+    libusb_free_device_list(dev_list, true);
+    if(!found) {
+        log_error("No usable Synaptics 06cb:0081 device found");
+    } else {
+        printf("libusb initialized, device = %p\n", info->dev);
+    }
+    return found;
+}
+
+static void free_driver_info(struct driver_info *info) {
+    if(!info) return;
+
+    if(info->interface_claimed) {
+        int status = libusb_release_interface(info->dev, 0);
+        if(status != LIBUSB_SUCCESS && status != LIBUSB_ERROR_NO_DEVICE)
+            log_warn("Releasing USB interface 0 failed: %d [%s]", status,
+                     libusb_error_name(status));
+    }
+    if(info->owns_dev && info->dev) libusb_close(info->dev);
+    if(info->owns_ctx && info->ctx) libusb_exit(info->ctx);
+    if(info->script) fclose(info->script);
+    free(info);
 }
 
 
@@ -100,19 +342,15 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
     TRACE();
     printf("Winusb_initialize enter\n");
     fflush(stdout);
-    struct driver_info *info = malloc(sizeof(struct driver_info));
+    if(!InterfaceHandle || DeviceHandle == INVALID_HANDLE_VALUE) return FALSE;
+    *InterfaceHandle = NULL;
 
-    memset(info, 0, sizeof(*info));
-    *InterfaceHandle = info;
+    struct driver_info *info = calloc(1, sizeof(*info));
+    if(!info) return FALSE;
 
     printf("DeviceHandle: %p\n", DeviceHandle);
     printf("ppInterfaceHandle: %p\n", InterfaceHandle);
     printf("pInterfaceHandle: %p\n", info);
-
-
-    if(DeviceHandle == INVALID_HANDLE_VALUE) {
-        return FALSE;
-    }
 
     // o.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
 
@@ -130,36 +368,52 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
     info->script_line = 0;
     info->playback = 0;
 
-    info->dev = NULL;
-
     if(info->playback) {
         info->script = fopen("usb_script.txt", "rt");
         info->playback = 1;
         if(info->script == NULL) {
             log_error("failed to open the USB script \n");
-            abort();
+            free_driver_info(info);
             return FALSE;
         }
 
         info->script_line = 0;
+        *InterfaceHandle = info;
         return TRUE;
 
     } else {
-        int rc = libusb_init(&info->ctx);
-        if (rc != 0) {
-            abort();
+        bool ready;
+        if(borrowed_usb_dev) {
+            info->dev = borrowed_usb_dev;
+            ready = prepare_device(info);
+        } else {
+            int status = libusb_init(&info->ctx);
+            if(!usb_call_succeeded("Initializing fallback libusb context",
+                                   status)) {
+                free_driver_info(info);
+                return FALSE;
+            }
+            info->owns_ctx = true;
+            ready = claim_device(info);
         }
 
-        return claim_device(info);
+        if(!ready) {
+            free_driver_info(info);
+            return FALSE;
+        }
+        *InterfaceHandle = info;
+        return TRUE;
     }
 
 }
 WINAPI(WinUsb_Initialize)
 
 
-__winfnc bool WinUsb_Free(HANDLE InterfaceHandle)
+__winfnc BOOL WinUsb_Free(HANDLE InterfaceHandle)
 {
     TRACE();
+    if(!InterfaceHandle) return FALSE;
+    free_driver_info((struct driver_info*)InterfaceHandle);
     return TRUE;
 }
 WINAPI(WinUsb_Free)
@@ -178,41 +432,12 @@ __winfnc BOOL WinUsb_GetDescriptor(
     TRACE();
 
     struct driver_info *info = InterfaceHandle;
-    int rc, i;
+    int rc;
     uint16_t dti = (uint16_t)((DescriptorType << 8) | Index);
 
     if (info->playback) {
-        int p;
-        char dir[10];
-        char hex[8000000], *hp;
-
-        info->script_line++;
-        fscanf(info->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
-        
-        if(p != dti) {
-            log_error("wrong dtype or index on script line %d (expected %d, requested %d)\n", info->script_line, p, dti);
-            exit(0);
-        }
-        if(strcmp(dir, "dsc") != 0) {
-            log_error("wrong direction on script line %d (expected %s, requested %s)\n", info->script_line, dir, "dsc");
-            exit(0);
-        }
-        rc=0;
-        for(hp=hex;*hp;hp+=2) {
-            char hh[] = { hp[0], hp[1], 0 }, *hhp;
-            int b = strtol(hh, &hhp, 0x10);
-
-            if(hhp - hh != 2) {
-                log_error("broken hex value on script line %d: %s\n", info->script_line, hp);
-                exit(0);
-            }
-            Buffer[rc] = b;
-            rc++;
-        }
-
-        log_error("rc=%d\n", rc);
-        *LengthTransferred = rc;
-        return TRUE;
+        return playback_transfer(info, dti, "dsc", Buffer, BufferLength,
+                                 LengthTransferred, false);
     }
 
 
@@ -231,7 +456,7 @@ __winfnc BOOL WinUsb_GetDescriptor(
         //     fflush(info->script);
         // }
 
-    printf("rc = %d\n", rc);
+	    TRACE_PRINTF("rc = %d\n", rc);
     *LengthTransferred = rc;
 
     if(rc < 0)
@@ -263,7 +488,7 @@ __winfnc BOOL WinUsb_ControlTransfer(
     TRACE();
     int rc, i;
 
-    printf("%x %x %x %x %x\n", 
+	    TRACE_PRINTF("%x %x %x %x %x\n",
                 SetupPacket.RequestType, 
                 SetupPacket.Request, 
                 SetupPacket.Value, 
@@ -298,7 +523,7 @@ __winfnc BOOL WinUsb_ControlTransfer(
         printf("%02x ", Buffer[i]);
     printf("\r\n");
 #endif
-    printf("ControlTransfer rc = %d\n", rc);
+	    TRACE_PRINTF("ControlTransfer rc = %d\n", rc);
 
     ULONG res = (ULONG) rc;
     *LengthTransferred = res;
@@ -321,9 +546,10 @@ WinUsb_ReadPipe(
     struct driver_info *dev = InterfaceHandle;
     WINUSB_PIPE_INFORMATION *wpi = NULL;
     int i, rc;
+    bool was_aborted = false;
 
 
-    printf("PipeID=%d\n", PipeID);
+	    TRACE_PRINTF("PipeID=%d\n", PipeID);
 
     for(i=0;i<sizeof(pipe_types)/sizeof(*pipe_types);i++) {
         if(pipe_types[i].PipeId == PipeID)
@@ -335,39 +561,13 @@ WinUsb_ReadPipe(
     }
 
     if (dev->playback) {
-        int p;
-        char dir[10];
-        char hex[8000000], *hp;
-
-        dev->script_line++;
-        fscanf(dev->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
-        if(p != PipeID) {
-            log_error("wrong pipe on script line %d (expected %d, requested %d)\n", dev->script_line, p, PipeID);
-            exit(0);
-        }
-        if(strcmp(dir, "<<<") != 0) {
-            log_error("wrong direction on script line %d (expected %s, requested %s)\n", dev->script_line, dir, "<<<");
-            exit(0);
-        }
-        *LengthTransferred=0;
-        for(hp=hex;*hp;hp+=2) {
-            char hh[] = { hp[0], hp[1], 0 }, *hhp;
-            int b = strtol(hh, &hhp, 0x10);
-
-            if(hhp - hh != 2) {
-                log_error("broken hex value on script line %d: %s\n", dev->script_line, hp);
-                exit(0);
-            }
-            Buffer[*LengthTransferred] = b;
-            (*LengthTransferred)++;
-        }
-
-        return TRUE;
+        return playback_transfer(dev, PipeID, "<<<", Buffer, BufferLength,
+                                 LengthTransferred, false);
     }
 
     switch(wpi->PipeType) {
         case UsbdPipeTypeBulk:
-            printf("bulk xfer\n");
+	            TRACE_PRINTF("bulk xfer\n");
             rc = libusb_bulk_transfer(
                     dev->dev, 
                     PipeID, 
@@ -376,11 +576,11 @@ WinUsb_ReadPipe(
                     (int*)LengthTransferred, 
                     dev->timeouts[PipeID]+1000);
             //sleep(3);
-            printf("LengthTransferred: %d\n", *LengthTransferred);
+	            TRACE_PRINTF("LengthTransferred: %d\n", *LengthTransferred);
             break;
 
         case UsbdPipeTypeInterrupt:
-            printf("interrupt xfer?\n");
+	            TRACE_PRINTF("interrupt xfer?\n");
             dev->abort[PipeID] = 1;
             for(i=0;;) {
                 rc = libusb_interrupt_transfer(
@@ -391,12 +591,12 @@ WinUsb_ReadPipe(
                         (int*)LengthTransferred, 
                         200);
                 
-                printf("libusb_interrupt_transfer=%d!\n", rc);
+	                TRACE_PRINTF("libusb_interrupt_transfer=%d!\n", rc);
 
                 if(rc == LIBUSB_ERROR_TIMEOUT) {
                     if(dev->abort[PipeID] == 2) {
                         printf("W: Pipe was aborted!\n");
-                        rc = 0;
+                        was_aborted = true;
                         break;
                     }
 
@@ -419,11 +619,18 @@ WinUsb_ReadPipe(
             return FALSE;
     }
 
+    if(was_aborted) {
+        /* An aborted read is not a successful zero-byte interrupt packet. */
+        *LengthTransferred = 0;
+        winerr_set_code(995); /* ERROR_OPERATION_ABORTED */
+        return FALSE;
+    }
+
     if(rc < 0)  {
         printf("E: xfer Failed - %s\n", libusb_error_name(rc));
 
         if(rc == LIBUSB_ERROR_TIMEOUT) {
-            // SetLastError(ERROR_SEM_TIMEOUT);
+            winerr_set_code(121); /* ERROR_SEM_TIMEOUT */
             return FALSE;
         }
 
@@ -450,7 +657,7 @@ WinUsb_WritePipe(
     int send;
 
     TRACE();
-    printf("PipeID=%x\n", PipeID);
+	    TRACE_PRINTF("PipeID=%x\n", PipeID);
     
 
     // if(Buffer[0] == 0x10 && Buffer[1] == 0 && Buffer[2] == 0) {
@@ -458,51 +665,8 @@ WinUsb_WritePipe(
     //     return FALSE;
     // }
     if (dev->playback) {
-        int p;
-        char dir[10];
-        char hex[8000000], *hp;
-
-        dev->script_line++;
-        fscanf(dev->script, "blackbox: usb %d %s %s\n", &p, dir, hex);
-        if(p != PipeID) {
-            log_error("wrong pipe on script line %d (expected %d, requested %d)\n", dev->script_line, p, PipeID);
-            exit(0);
-        }
-        if(strcmp(dir, ">>>") != 0) {
-            log_error("wrong direction on script line %d (expected %s, requested %s)\n", dev->script_line, dir, ">>>");
-            exit(0);
-        }
-        send=0;
-        for(hp=hex;*hp;hp+=2) {
-            char hh[] = { hp[0], hp[1], 0 }, *hhp;
-            int b = strtol(hh, &hhp, 0x10);
-
-            if(hhp - hh != 2) {
-                log_error("broken hex value on script line %d: %s\n", dev->script_line, hp);
-                // exit(0);
-            }
-
-            if(Buffer[send] != b) {
-                log_error("send byte mismatch onscript line %d, column %ld: %02x != %02x\n", dev->script_line, hp-hex, b, Buffer[send]);
-                printf("HEX GT: %d \n", (int) (strlen(hex) / 2));
-                printf("%s\n", hex);
-                printf("HEX Out: %d \n", (int) BufferLength);
-                for (int i = 0; i < BufferLength; ++i) {
-                    printf("%02x", Buffer[i]);
-                }
-                printf("\n");
-                sleep(2);
-                exit(0);
-            }
-            send++;
-        }
-        if(send != BufferLength) {
-            log_error("send != BufferLength on script line %d\n", dev->script_line);
-            exit(0);
-        }
-
-        *LengthTransferred = send;
-        return TRUE;
+        return playback_transfer(dev, PipeID, ">>>", Buffer, BufferLength,
+                                 LengthTransferred, true);
     }
 
     rc = libusb_bulk_transfer(dev->dev,
@@ -511,7 +675,7 @@ WinUsb_WritePipe(
             BufferLength, 
             &send, 
             dev->timeouts[PipeID]+1000);
-    printf("rc=%d send=%d\n", rc, send);
+	    TRACE_PRINTF("rc=%d send=%d\n", rc, send);
 
     if(rc < 0) {
         printf("E: xfer Failed - %s\n", libusb_error_name(rc));
@@ -532,7 +696,7 @@ WinUsb_QueryPipe(
             PWINUSB_PIPE_INFORMATION PipeInformation)
 {
     TRACE();
-    printf("alt-if=%d pipe=%d\n", AlternateInterfaceNumber, PipeIndex);
+	    TRACE_PRINTF("alt-if=%d pipe=%d\n", AlternateInterfaceNumber, PipeIndex);
 
     *PipeInformation = pipe_types[PipeIndex];
 
@@ -545,7 +709,7 @@ __winfnc BOOL
 WinUsb_ResetPipe (HANDLE InterfaceHandle, UCHAR PipeID)
 {
     TRACE();
-    printf("pipe=%d\n", PipeID);
+	    TRACE_PRINTF("pipe=%d\n", PipeID);
     return TRUE;
 }
 WINAPI(WinUsb_ResetPipe)
@@ -563,7 +727,7 @@ WinUsb_SetPipePolicy(
     struct driver_info *info = InterfaceHandle;
 
     TRACE();
-    printf("pipe=%d, policy type=%d, val length=%d, val=%x\n", PipeID, PolicyType, ValueLength, *(DWORD*)Value);
+	    TRACE_PRINTF("pipe=%d, policy type=%d, val length=%d, val=%x\n", PipeID, PolicyType, ValueLength, *(DWORD*)Value);
 
     if(PolicyType == PIPE_TRANSFER_TIMEOUT) {
         info->timeouts[PipeID] = *(DWORD*)Value;
@@ -585,14 +749,14 @@ WinUsb_AbortPipe (HANDLE InterfaceHandle, UCHAR PipeID)
 {
     struct driver_info *dev = InterfaceHandle;
     TRACE();
-    printf("%x\n", PipeID);
+	    TRACE_PRINTF("%x\n", PipeID);
     if(dev->abort[PipeID] == 1) {
         dev->abort[PipeID] = 2;
 
         while(dev->abort[PipeID] != 0)
             usleep(200);
     }
-    printf("abort complete\n");
+	    TRACE_PRINTF("abort complete\n");
     return TRUE;
 }
 WINAPI(WinUsb_AbortPipe)
@@ -629,14 +793,14 @@ WinUsb_GetPipePolicy(
 {
     struct driver_info *info = InterfaceHandle;
 
-    printf("PipeID=%d PolicyType=%d ValueLength=%d\n", 
+	    TRACE_PRINTF("PipeID=%d PolicyType=%d ValueLength=%d\n",
                 PipeID, 
                 PolicyType,
                 *ValueLength);
     if(PolicyType == PIPE_TRANSFER_TIMEOUT) {
         *(DWORD*)Value = info->timeouts[PipeID];
     }
-    printf("PipeID=%d PolicyType=%d ValueLength=%d Value=%x\n", 
+	    TRACE_PRINTF("PipeID=%d PolicyType=%d ValueLength=%d Value=%x\n",
                 PipeID, 
                 PolicyType,
                 *ValueLength,
@@ -644,4 +808,3 @@ WinUsb_GetPipePolicy(
     return TRUE;
 }
 WINAPI(WinUsb_GetPipePolicy)
-

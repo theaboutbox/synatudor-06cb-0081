@@ -111,32 +111,39 @@ typedef struct tagDEC {
 // struct PROPVARIANT;
 
 typedef struct PROPVARIANT {
-    uint16_t vt;
-    uint16_t wReserved1;
-    uint16_t wReserved2;
-    uint16_t wReserved3;
     union {
-        CHAR cVal;
-        UCHAR bVal;
-        SHORT iVal;
-        USHORT uiVal;
-        LONG lVal;
-        ULONG ulVal;
-        INT intVal;
-        UINT uintVal;
-        CHAR *pcVal;
-        UCHAR *pbVal;
-        SHORT *piVal;
-        USHORT *puiVal;
-        LONG *plVal;
-        ULONG *pulVal;
-        INT *pintVal;
-        UINT *puintVal;
-        struct PROPVARIANT *pvarVal;
-        BLOB              blob;
+        struct {
+            uint16_t vt;
+            uint16_t wReserved1;
+            uint16_t wReserved2;
+            uint16_t wReserved3;
+            union {
+                CHAR cVal;
+                UCHAR bVal;
+                SHORT iVal;
+                USHORT uiVal;
+                LONG lVal;
+                ULONG ulVal;
+                INT intVal;
+                UINT uintVal;
+                CHAR *pcVal;
+                UCHAR *pbVal;
+                SHORT *piVal;
+                USHORT *puiVal;
+                LONG *plVal;
+                ULONG *pulVal;
+                INT *pintVal;
+                UINT *puintVal;
+                struct PROPVARIANT *pvarVal;
+                BLOB blob;
+            };
+        };
+        DECIMAL decVal;
     };
-    DECIMAL decVal;
 } PROPVARIANT;
+
+_Static_assert(sizeof(PROPVARIANT) == 24,
+               "64-bit PROPVARIANT must match the Windows ABI");
 
 
 __winfnc HRESULT PropVariantClear(PROPVARIANT *pvar) {

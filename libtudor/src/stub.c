@@ -28,9 +28,7 @@ static uint8_t *import_cur_page;
 static int import_cur_slot;
 
 static void import_stub(char *lib, char *name) {
-    printf("Unresolved import %s@%s called!", name, lib);
-    fflush(stdout);
-    usleep(90000000);
+    log_error("Unresolved import %s@%s called!", name, lib);
     abort();
 }
 

@@ -497,7 +497,7 @@ HCRYPTKEY new_object(struct handle_table *lpTable, size_t cbSize, DWORD dwType, 
     }
     else
     {
-        printf("Handle alloc success\n");
+	    TRACE("Handle alloc success\n");
         if (ppObject)
             *ppObject = pObject;
     }

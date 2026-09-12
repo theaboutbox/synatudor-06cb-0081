@@ -4,13 +4,16 @@
 #include <sys/socket.h>
 #include <gio/gunixfdlist.h>
 #include <tudor/dbus-launcher.h>
+#include <tudor/state-proto.h>
 #include "dbus.h"
+#include "state.h"
 
 struct host_entry {
     bool alive, orphan;
     guint id;
     GPid pid;
-    int pipe_fd;
+    int pipe_fd, state_fd;
+    guint state_watch_id;
     guint8 usb_bus, usb_addr;
 };
 static GArray *hosts_array;
@@ -23,6 +26,10 @@ static int killpg_ignore_noproc(pid_t proc, int sig) {
 
 static void free_host(struct host_entry *entry) {
     if(entry->alive) g_assert_no_errno(killpg_ignore_noproc(entry->pid, SIGKILL));
+    GSource *state_source = g_main_context_find_source_by_id(
+        NULL, entry->state_watch_id);
+    if(state_source) g_source_destroy(state_source);
+    g_assert_no_errno(close(entry->state_fd));
     g_assert_no_errno(close(entry->pipe_fd));
 }
 
@@ -145,7 +152,7 @@ void launch_host_call(GDBusMethodInvocation *invoc, GVariant *params) {
         return;
     }
 
-    //Create the socket pair
+    //Create the libfprint protocol socket pair.
     int fds[2];
     if(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) < 0) {
         int err = errno;
@@ -154,9 +161,24 @@ void launch_host_call(GDBusMethodInvocation *invoc, GVariant *params) {
     }
     int pipe_sock = fds[0], host_sock = fds[1];
 
+    //Keep persistent-state traffic separate from the libfprint protocol so
+    //the driver can save a property while another operation is in flight.
+    int state_fds[2];
+    if(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, state_fds) < 0) {
+        int err = errno;
+        g_assert_no_errno(close(pipe_sock));
+        g_assert_no_errno(close(host_sock));
+        g_dbus_method_invocation_return_error(
+            invoc, G_IO_ERROR, G_IO_ERROR_FAILED,
+            "Failed creating state socket pair: %d [%s]",
+            err, g_strerror(err));
+        return;
+    }
+    int state_sock = state_fds[0], state_host_sock = state_fds[1];
+
     //Start the tudor_host process
-    char *argv[] = { "tudor_host", NULL };
-    char *envp[] = { NULL };
+    const char *const argv[] = { "tudor_host", NULL };
+    const char *const envp[] = { NULL };
     GPid pid;
 
     int fd_out, fd_err;
@@ -165,11 +187,19 @@ void launch_host_call(GDBusMethodInvocation *invoc, GVariant *params) {
 
     GError *error = NULL;
     gchar *cwd = g_get_current_dir();
-    if(!g_spawn_async_with_fds(cwd, argv, envp, G_SPAWN_DO_NOT_REAP_CHILD, host_setup, NULL, &pid, host_sock, fd_out, fd_err, &error)) {
+    const gint source_fds[] = { state_host_sock };
+    const gint target_fds[] = { TUDOR_STATE_SOCKET_FD };
+    if(!g_spawn_async_with_pipes_and_fds(
+           cwd, argv, envp, G_SPAWN_DO_NOT_REAP_CHILD,
+           host_setup, NULL, host_sock, fd_out, fd_err,
+           source_fds, target_fds, G_N_ELEMENTS(source_fds),
+           &pid, NULL, NULL, NULL, &error)) {
         g_assert_no_errno(close(fd_out));
         g_assert_no_errno(close(fd_err));
         g_assert_no_errno(close(pipe_sock));
         g_assert_no_errno(close(host_sock));
+        g_assert_no_errno(close(state_sock));
+        g_assert_no_errno(close(state_host_sock));
         g_free(cwd);
 
         g_dbus_method_invocation_return_gerror(invoc, error);
@@ -180,6 +210,7 @@ void launch_host_call(GDBusMethodInvocation *invoc, GVariant *params) {
     g_assert_no_errno(close(fd_out));
     g_assert_no_errno(close(fd_err));
     g_assert_no_errno(close(host_sock));
+    g_assert_no_errno(close(state_host_sock));
     g_free(cwd);
 
     //Add to hosts array
@@ -187,6 +218,8 @@ void launch_host_call(GDBusMethodInvocation *invoc, GVariant *params) {
     struct host_entry entry = (struct host_entry) {
         .alive = true, .orphan = false,
         .id = host_id, .pid = pid,
+        .state_fd = state_sock,
+        .state_watch_id = state_socket_watch(state_sock),
         .usb_bus = usb_bus, .usb_addr = usb_addr
     };
     g_assert_no_errno(entry.pipe_fd = dup(pipe_sock));
@@ -329,6 +362,12 @@ void init_launcher() {
 }
 
 void uninit_launcher() {
-    //Free hosts array
+    while(hosts_array->len) {
+        guint i = hosts_array->len - 1;
+        struct host_entry *entry =
+            &g_array_index(hosts_array, struct host_entry, i);
+        free_host(entry);
+        g_array_remove_index_fast(hosts_array, i);
+    }
     g_array_unref(hosts_array);
 }

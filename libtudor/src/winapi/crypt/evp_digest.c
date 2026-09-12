@@ -61,13 +61,6 @@ static BOOL evp_md_get_hash_param(struct evp_md_algorithm *algo, struct evp_md_h
             } else if(data) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
             *data_size = EVP_MD_size(hash->evp_md);
 
-            printf("Data size: %d\n", (int) *data_size);
-            printf("Hash out: ");
-            for (DWORD i = 0; i < *data_size; i++) {
-                printf("%02X", ((unsigned char*)data)[i]);  // two-digit uppercase hex
-            }
-            printf("\n");
-            fflush(stdout);
             return TRUE;
         }
         case HP_HASHSIZE: {

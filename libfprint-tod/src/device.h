@@ -24,6 +24,7 @@ struct _FpiDeviceTudor {
     IPCMessageBuf *send_msg;
 
     gchar *pdata_sensor_name;
+    gchar *state_id;
     GTask *close_task;
     GSource *close_timeout_src;
 

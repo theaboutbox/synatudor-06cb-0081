@@ -16,6 +16,7 @@
 #include "winbase.h"
 #include "winreg.h"
 #include "handle.h"
+#include "registry_state.h"
 #include "stdlib.h"
 #include "stdio.h"
 
@@ -85,20 +86,18 @@ static int remove_dir_recursive(const char *path);
 static const char *get_base_path(void)
 {
     if (registry_base_path) return registry_base_path;
-    // const char *home = getenv("HOME");
-    // if (home && home[0])
-    // {
-    //     size_t n = strlen(home) + strlen("/.local/share/regemu") + 1;
-    //     registry_base_path = malloc(n);
-    //     if (!registry_base_path) return NULL;
-    //     snprintf(registry_base_path, n, "%s/.local/share/regemu", home);
-    // }
-    // else
-    // {
-    //     registry_base_path = strdup("/tmp/regemu");
-    // }
-
-    registry_base_path = strdup("/tmp/synatudor-registry");
+    const char *state_dir = getenv("SYNA_TUDOR_STATE_DIR");
+    if (state_dir && state_dir[0])
+    {
+        size_t n = strlen(state_dir) + strlen("/registry") + 1;
+        registry_base_path = malloc(n);
+        if (!registry_base_path) return NULL;
+        snprintf(registry_base_path, n, "%s/registry", state_dir);
+    }
+    else
+    {
+        registry_base_path = strdup("./.synaTudor-registry");
+    }
     return registry_base_path;
 }
 
@@ -333,6 +332,9 @@ LSTATUS WINAPI RegCreateKeyExA(
     LPDWORD lpdwDisposition)
 {
     if (!hKey || !lpSubKey) return ERROR_INVALID_PARAMETER;
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_create_key(
+            hKey, lpSubKey, phkResult, lpdwDisposition);
     char *parent = hkey_to_path(hKey);
     if (!parent) return ERROR_INVALID_PARAMETER;
 
@@ -374,6 +376,9 @@ LSTATUS WINAPI RegOpenKeyExA(
     PHKEY phkResult)
 {
     if (!hKey || !lpSubKey || !phkResult) return ERROR_INVALID_PARAMETER;
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_open_key(
+            hKey, lpSubKey, phkResult);
     char *parent = hkey_to_path(hKey);
     if (!parent) return ERROR_INVALID_PARAMETER;
 
@@ -431,6 +436,9 @@ LSTATUS WINAPI RegSetValueExA(
     const BYTE *lpData,
     DWORD cbData)
 {
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_set_value(
+            hKey, lpValueName, dwType, lpData, cbData);
     printf("RegSetValueExA: %s\n", lpValueName);
     printf("lpdata = %p cbdata = %d\n", lpData, cbData);
     if (!hKey || !lpValueName) {
@@ -496,6 +504,9 @@ LSTATUS WINAPI RegQueryValueExA(
     (void)lpReserved;
     if (!hKey) return ERROR_INVALID_PARAMETER;
     if (!lpcbData) return ERROR_INVALID_PARAMETER;
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_query_value(
+            hKey, lpValueName, lpType, lpData, lpcbData);
 
     char *keypath = hkey_to_path(hKey);
     if (!keypath) return ERROR_INVALID_PARAMETER;
@@ -555,6 +566,8 @@ LSTATUS WINAPI RegQueryValueExA(
 LSTATUS WINAPI RegDeleteKeyA(HKEY hKey, LPCSTR lpSubKey)
 {
     if (!hKey || !lpSubKey) return ERROR_INVALID_PARAMETER;
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_delete_key(hKey, lpSubKey);
     char *parent = hkey_to_path(hKey);
     if (!parent) return ERROR_INVALID_PARAMETER;
 
@@ -601,6 +614,9 @@ LSTATUS WINAPI RegEnumKeyExA(
     (void)lpReserved; (void)lpClass; (void)lpdwClassLen;
     if (!hKey) return ERROR_INVALID_PARAMETER;
     if (!lpcName) return ERROR_INVALID_PARAMETER;
+    if (cryptbridge_registry_state_active())
+        return cryptbridge_registry_state_enum_key(
+            hKey, dwIndex, lpName, lpcName, lpftLastWriteTime);
 
     char *keypath = hkey_to_path(hKey);
     if (!keypath) return ERROR_INVALID_PARAMETER;
@@ -649,13 +665,6 @@ LSTATUS WINAPI RegEnumKeyExA(
 }
 
 /* ----------------- End of registry emulation ----------------- */
-
-/* For convenience: initialization on load (optional) */
-__attribute__((constructor))
-static void registry_init(void)
-{
-    ensure_base_and_roots();
-}
 
 /* Optional debug/test main (comment out when integrating) */
 #ifdef REGEMU_TEST

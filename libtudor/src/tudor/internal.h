@@ -64,6 +64,10 @@ extern struct winwdf_driver *tudor_wdf_driver;
 extern WINBIO_SENSOR_INTERFACE *tudor_sensor_adapter;
 extern WINBIO_ENGINE_INTERFACE *tudor_engine_adapter;
 extern WINBIO_STORAGE_INTERFACE *tudor_storage_adapter;
+extern WINBIO_STORAGE_INTERFACE *tudor_native_storage_adapter;
+
+bool tudor_open_native_storage_database(struct tudor_device *device);
+void tudor_refresh_native_storage_cache(struct tudor_device *device);
 
 bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const char *val_name, bool is_write, void *buf, size_t *buf_size, enum winreg_val_type *val_type);
 

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <libusb.h>
+#include <tudor/state.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,11 @@ typedef struct _WINBIO_IDENTITY WINBIO_IDENTITY;
 typedef struct _WINBIO_PIPELINE WINBIO_PIPELINE;
 
 extern bool tudor_log_traces;
+
+/* Use this borrowed libusb handle for the WinUSB bridge during tudor_init().
+ * The caller must keep it open through tudor_shutdown() and clear it before
+ * closing it.  Passing NULL restores the discovery-based CLI fallback. */
+void tudor_set_usb_device(libusb_device_handle *usb_dev);
 bool tudor_init();
 bool tudor_shutdown();
 
@@ -36,6 +42,8 @@ typedef void tudor_async_cb_fnc(tudor_async_res_t res, bool success, void *ctx);
 void tudor_set_async_callback(tudor_async_res_t res, tudor_async_cb_fnc *cb, void *ctx);
 void tudor_cancel_async(tudor_async_res_t res);
 bool tudor_wait_async(tudor_async_res_t res);
+bool tudor_wait_async_timeout(tudor_async_res_t res, unsigned int timeout_ms,
+                              bool *timed_out);
 void tudor_cleanup_async(tudor_async_res_t res);
 
 struct tudor_pair_data {
@@ -44,6 +52,16 @@ struct tudor_pair_data {
 };
 extern const struct tudor_pair_data *(*tudor_get_pdata_fnc)(const char *name);
 extern void (*tudor_set_pdata_fnc)(const char *name, const struct tudor_pair_data *pdata);
+
+/* Named values exposed by the emulated UMDF device property store.  A state
+ * getter that returns true transfers ownership of *data to libtudor; the
+ * buffer must have been allocated with malloc(). */
+extern bool (*tudor_get_state_fnc)(const char *name,
+                                   enum tudor_state_value_type *type,
+                                   void **data, size_t *data_size);
+extern void (*tudor_set_state_fnc)(const char *name,
+                                   enum tudor_state_value_type type,
+                                   const void *data, size_t data_size);
 
 struct tudor_device_state {
     bool pairing_in_process, unpairing_in_process;
@@ -107,6 +125,7 @@ bool tudor_close(struct tudor_device *device);
 
 int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_finger finger);
 bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, const void *data, size_t data_size);
+bool tudor_uses_native_storage(struct tudor_device *device);
 
 bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_finger finger);
 bool tudor_enroll_capture(struct tudor_device *device, bool *done, tudor_async_res_t *res);
@@ -115,6 +134,7 @@ bool tudor_enroll_discard(struct tudor_device *device);
 
 bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, bool *retry, bool *matches, tudor_async_res_t *res);
 bool tudor_identify(struct tudor_device *device, bool *retry, bool *found_match, RECGUID *guid, enum tudor_finger *finger, tudor_async_res_t *res);
+bool tudor_get_sensor_database_size(uint64_t *record_count);
 
 #ifdef __cplusplus
 }

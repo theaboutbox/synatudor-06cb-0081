@@ -1,3 +1,4 @@
 option('DBGIMPORT', type: 'boolean', value: true, description: 'Enable Windows API import debugging')
 option('DBGWDF', type: 'boolean', value: true, description: 'Enable WDF debugging')
 option('UNMOUNTFS', type: 'boolean', value: true, description: 'Unmount the file system for the Tudor host process - disable to make GDB work properly')
+option('TOD', type: 'boolean', value: true, description: 'Build the libfprint TOD module')

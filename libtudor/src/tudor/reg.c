@@ -2,6 +2,12 @@
 
 const struct tudor_pair_data *(*tudor_get_pdata_fnc)(const char *name);
 void (*tudor_set_pdata_fnc)(const char *name, const struct tudor_pair_data *pdata);
+bool (*tudor_get_state_fnc)(const char *name,
+                            enum tudor_state_value_type *type,
+                            void **data, size_t *data_size);
+void (*tudor_set_state_fnc)(const char *name,
+                            enum tudor_state_value_type type,
+                            const void *data, size_t data_size);
 
 bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const char *val_name, bool is_write, void *buf, size_t *buf_size, enum winreg_val_type *val_type) {
     if(!buf_size) return false;
@@ -97,6 +103,7 @@ bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const cha
                 } else if(buf) return false;
                 *buf_size = pdata->data_size;
                 *val_type = WINREG_BINARY;
+                return true;
             }
         } else {
             if(tudor_set_pdata_fnc) {

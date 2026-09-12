@@ -94,29 +94,35 @@ static void enroll_cb(tudor_async_res_t *res, bool success, struct handler_state
         }
         if(is_dupl) log_warn("Overwritting duplicate enrollment...");
 
-        //Find the resulting record
-        cant_fail_ret(pthread_mutex_lock(&state->dev->records_lock));
-
+        size_t rec_size = 0;
         struct tudor_record *enroll_rec = NULL;
-        for(struct tudor_record *rec = state->dev->records_head; rec; rec = rec->next) {
-            if(memcmp(&rec->guid, &state->action.enroll.guid, sizeof(RECGUID)) == 0 && rec->finger == state->action.enroll.finger) {
-                enroll_rec = rec;
-                break;
-            }
-        }
-        if(!enroll_rec) {
-            log_error("Couldn't find enrollment record!");
-            abort();
-        }
+        bool native_storage = tudor_uses_native_storage(state->dev);
+        if(!native_storage) {
+            //Find the resulting host-side record.
+            cant_fail_ret(pthread_mutex_lock(&state->dev->records_lock));
 
-        //Allocate response message
-        size_t rec_size = enroll_rec->data_size, resp_size = sizeof(struct ipc_msg_resp_enroll) + rec_size;
+            for(struct tudor_record *rec = state->dev->records_head; rec; rec = rec->next) {
+                if(memcmp(&rec->guid, &state->action.enroll.guid, sizeof(RECGUID)) == 0 && rec->finger == state->action.enroll.finger) {
+                    enroll_rec = rec;
+                    break;
+                }
+            }
+            if(!enroll_rec) {
+                log_error("Couldn't find enrollment record!");
+                abort();
+            }
+
+            rec_size = enroll_rec->data_size;
+        }
 
         if(rec_size > IPC_MAX_RECORD_SIZE) {
             log_error("Enrollment record size exceeding maximum size: %lu > %d!", rec_size, IPC_MAX_RECORD_SIZE);
             abort();
         }
 
+        //Native storage keeps the biometric data in the vendor database.  The
+        //libfprint record contains only its GUID and finger metadata.
+        size_t resp_size = sizeof(struct ipc_msg_resp_enroll) + rec_size;
         struct ipc_msg_resp_enroll *resp = (struct ipc_msg_resp_enroll*) malloc(resp_size);
         if(!resp) {
             perror("Couldn't allocate enrollment response buffer");
@@ -127,9 +133,10 @@ static void enroll_cb(tudor_async_res_t *res, bool success, struct handler_state
             .retry = false,
             .done = true
         };
-        memcpy(resp->record_data, enroll_rec->data, enroll_rec->data_size);
+        if(rec_size) memcpy(resp->record_data, enroll_rec->data, rec_size);
 
-        cant_fail_ret(pthread_mutex_unlock(&state->dev->records_lock));
+        if(!native_storage)
+            cant_fail_ret(pthread_mutex_unlock(&state->dev->records_lock));
 
         //Send response
         ipc_send_msg(state->ipc_sock, resp, resp_size);
@@ -179,15 +186,6 @@ static void verify_cb(tudor_async_res_t *res, bool success, struct handler_state
         abort();
     }
 
-    //If we're retrying, start again
-    if(!success) {
-        init_action(state);
-        if(!tudor_verify(state->dev, state->action.verify.guid, state->action.verify.finger, &state->action.verify.retry, &state->action.verify.matches, &state->async_res)) {
-            log_error("Couldn't start verify action retry!");
-            abort();
-        }
-    }
-
     //Send response
     struct ipc_msg_resp_verify msg = {
         .type = IPC_MSG_RESP_VERIFY,
@@ -199,13 +197,10 @@ static void verify_cb(tudor_async_res_t *res, bool success, struct handler_state
     if(success) {
         log_info("Verify GUID %08x... finger %d -> %s match", state->action.verify.guid.PartA, state->action.verify.finger, msg.did_match ? "does" : "doesn't");
     } else {
-        log_info("Verify GUID %08x... finger %d capture error -> retrying...", state->action.verify.guid.PartA, state->action.verify.finger);
+        log_info("Verify GUID %08x... finger %d capture error -> retry requested", state->action.verify.guid.PartA, state->action.verify.finger);
     }
 
     cant_fail_ret(pthread_mutex_unlock(&state->lock));
-
-    //Only set the callback now to avoid reentrance issues
-    if(!success) tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) verify_cb, state);
 }
 
 static void identify_cb(tudor_async_res_t *res, bool success, struct handler_state *state) {
@@ -217,18 +212,9 @@ static void identify_cb(tudor_async_res_t *res, bool success, struct handler_sta
     }
 
     //Check success
-    if(!success) {
+    if(!success && !state->action.identify.retry) {
         log_error("Identify action failed!");
         abort();
-    }
-
-    //If we're retrying, start again
-    if(!success && !state->action.verify.retry) {
-        init_action(state);
-        if(!tudor_identify(state->dev, &state->action.identify.retry, &state->action.identify.has_match, &state->action.identify.guid, &state->action.identify.finger, &state->async_res)) {
-            log_error("Couldn't start identify action retry!");
-            abort();
-        }
     }
 
     //Send response
@@ -246,13 +232,10 @@ static void identify_cb(tudor_async_res_t *res, bool success, struct handler_sta
     } else if(success) {
         log_info("Identify result -> no match");
     } else {
-        log_info("Identify capture error -> retrying...");
+        log_info("Identify capture error -> retry requested");
     }
 
     cant_fail_ret(pthread_mutex_unlock(&state->lock));
-
-    //Only set the callback now to avoid reentrance issues
-    if(!success) tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) identify_cb, state);
 }
 
 static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type type) {
@@ -294,8 +277,11 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
             if(!msg) { perror("Couldn't allocate ADD_RECORD IPC message buffer"); abort(); }
             size_t rec_size = ipc_recv_msg(state->ipc_sock, msg, type, sizeof(struct ipc_msg_add_record), sizeof(struct ipc_msg_add_record) + IPC_MAX_RECORD_SIZE, NULL) - sizeof(struct ipc_msg_add_record);
 
-            //Add the record
-            if(!tudor_add_record(state->dev, msg->guid, msg->finger, msg->record_data, rec_size)) {
+            //Native storage already owns the biometric data.  The ADD_RECORD
+            //message restores only libfprint's GUID/finger metadata.
+            if(tudor_uses_native_storage(state->dev)) {
+                log_info("Accepted native storage metadata GUID %08x... finger %d", msg->guid.PartA, msg->finger);
+            } else if(!tudor_add_record(state->dev, msg->guid, msg->finger, msg->record_data, rec_size)) {
                 //Delete the old one first
                 log_warn("Replacing old record GUID %08x... finger %d", msg->guid.PartA, msg->finger);
                 tudor_wipe_records(state->dev, &msg->guid, msg->finger);
@@ -321,6 +307,7 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
 
             //Delete the record
             int num_recs = tudor_wipe_records(state->dev, &msg.guid, msg.finger);
+            if(num_recs < 0) abort();
             log_info("Deleted %d records with GUID %08x... finger %d", num_recs, msg.guid.PartA, msg.finger);
 
             //Send ACK
@@ -333,9 +320,23 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
 
             //Wipe records
             int num_recs = tudor_wipe_records(state->dev, NULL, TUDOR_FINGER_ANY);
+            if(num_recs < 0) abort();
             log_info("Cleared %d records", num_recs);
 
             //Send ACK
+            send_ack(state->ipc_sock);
+        } break;
+
+        case IPC_MSG_CLEAR_HOST_RECORDS: {
+            check_in_action(state, type);
+            consume_simple_msg(state->ipc_sock, type);
+
+            int num_recs = tudor_uses_native_storage(state->dev)
+                ? 0
+                : tudor_wipe_records(state->dev, NULL, TUDOR_FINGER_ANY);
+            if(num_recs < 0) abort();
+            log_info("Cleared %d host records", num_recs);
+
             send_ack(state->ipc_sock);
         } break;
 
