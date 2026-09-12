@@ -218,7 +218,7 @@ payload_sha256=$(sha256sum "$payload" | awk '{print $1}')
 sudo systemctl stop fprintd.service tudor-host-launcher.service \
   2>/dev/null || true
 sudo pacman --noconfirm -U \
-  "$package_dir/synatudor-0081-0.1.0-6-x86_64.pkg.tar.zst"
+  "$package_dir/synatudor-0081-0.1.0-7-x86_64.pkg.tar.zst"
 sudo systemctl daemon-reload
 sudo udevadm control --reload
 sudo systemctl start tudor-host-launcher.service
