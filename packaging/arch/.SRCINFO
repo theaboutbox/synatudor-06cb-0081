@@ -35,7 +35,7 @@ pkgbase = synatudor-0081
 	options = !lto
 	source = synatudor-06cb-0081-0.1.0.tar.gz::https://github.com/theaboutbox/synatudor-06cb-0081/releases/download/v0.1.0/synatudor-06cb-0081-0.1.0.tar.gz
 	source = huy103af07m6.exe::https://download.lenovo.com/consumer/mobiles/huy103af07m6.exe
-	sha256sums = a4c73d0c1b31d2f2521fa295576a9a895038984b7a23cb4d74658407ccd12a35
+	sha256sums = 1155f2c7346ddda6008d17cd8cf2295251c005c124e916f459a11adae2cd32b7
 	sha256sums = 2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343
 
 pkgname = synatudor-0081
