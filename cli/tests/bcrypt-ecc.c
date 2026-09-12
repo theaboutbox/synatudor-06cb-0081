@@ -77,21 +77,10 @@ static bool store_identity(void *context, const void *data, size_t data_size)
     return true;
 }
 
-static void reset_identity_cache(void)
+static void enable_identity_callbacks(void)
 {
     cryptbridge_identity_set_state_callbacks(
         load_identity, store_identity, &identity_loads);
-}
-
-static unsigned char *find_bytes(void *haystack, size_t haystack_size,
-                                 const void *needle, size_t needle_size)
-{
-    unsigned char *bytes = haystack;
-    if(!needle_size || needle_size > haystack_size) return NULL;
-    for(size_t i = 0; i <= haystack_size - needle_size; i++) {
-        if(!memcmp(bytes + i, needle, needle_size)) return bytes + i;
-    }
-    return NULL;
 }
 
 static void test_component_padding(void)
@@ -124,6 +113,28 @@ static void test_component_padding(void)
 
     signed_component[0] = 1;
     assert(!cryptbridge_copy_be_component(dst, sizeof(dst), &datum));
+}
+
+static void test_random(void)
+{
+    BCRYPT_ALG_HANDLE algorithm;
+    UCHAR first[32] = {0}, second[32] = {0};
+    const UCHAR zeros[32] = {0};
+
+    assert(!BCryptGenRandom(NULL, first, sizeof(first),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+    assert(memcmp(first, zeros, sizeof(first)));
+
+    assert(!BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_RNG_ALGORITHM,
+                                         MS_PRIMITIVE_PROVIDER, 0));
+    assert(!BCryptGenRandom(algorithm, second, sizeof(second), 0));
+    assert(memcmp(second, zeros, sizeof(second)));
+    assert(memcmp(first, second, sizeof(first)));
+    assert(BCryptGenRandom(NULL, second, sizeof(second), 0) ==
+           STATUS_INVALID_HANDLE);
+    assert(BCryptGenRandom(algorithm, NULL, 1, 0) ==
+           STATUS_INVALID_PARAMETER);
+    assert(!BCryptCloseAlgorithmProvider(algorithm, 0));
 }
 
 static void test_tls_prf_known_answer(void)
@@ -188,6 +199,7 @@ int main(void)
     unsigned int i;
 
     test_component_padding();
+    test_random();
     test_tls_prf_known_answer();
 
     assert(resolve_windows_api( "BCryptGenerateKeyPair" ));
@@ -226,24 +238,72 @@ int main(void)
     }
 
     {
-        BCRYPT_KEY_HANDLE first, second, corrupted;
+        BCRYPT_KEY_HANDLE first, second;
         UCHAR first_blob[P256_PRIVATE_BLOB_SIZE];
         UCHAR second_blob[P256_PRIVATE_BLOB_SIZE];
         ULONG blob_size = 0;
 
-        reset_identity_cache();
+        /* Registered persistence alone never changes generic or TLS-style
+         * generation. */
+        enable_identity_callbacks();
         assert(!BCryptGenerateKeyPair( algorithm, &first, 256, 0 ));
         assert(!BCryptFinalizeKeyPair( first, 0 ));
         assert(!BCryptExportKey( first, NULL, BCRYPT_ECCPRIVATE_BLOB,
                                  first_blob, sizeof(first_blob), &blob_size, 0 ));
         assert(blob_size == sizeof(first_blob));
-        assert(saved_identity && identity_loads == 1 && identity_stores == 1);
 
-        /* Resetting the callbacks discards the process cache and simulates
-         * the replacement host started after a USB re-enumeration. */
-        reset_identity_cache();
+        enable_identity_callbacks();
         assert(!BCryptGenerateKeyPair( algorithm, &second, 256, 0 ));
         assert(!BCryptFinalizeKeyPair( second, 0 ));
+        assert(!BCryptExportKey( second, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 second_blob, sizeof(second_blob), &blob_size,
+                                 0 ));
+        assert(blob_size == sizeof(second_blob));
+        assert(memcmp(first_blob, second_blob, sizeof(first_blob)));
+        assert(identity_loads == 0 && identity_stores == 0);
+        assert(!saved_identity);
+
+        assert(!BCryptDestroyKey( second ));
+        assert(!BCryptDestroyKey( first ));
+        cryptbridge_identity_set_state_callbacks(NULL, NULL, NULL);
+    }
+
+    {
+        BCRYPT_KEY_HANDLE first, second, one_shot, corrupted;
+        UCHAR first_blob[P256_PRIVATE_BLOB_SIZE];
+        UCHAR second_blob[P256_PRIVATE_BLOB_SIZE];
+        UCHAR one_shot_blob[P256_PRIVATE_BLOB_SIZE];
+        ULONG blob_size = 0;
+        enum cryptbridge_identity_key_role previous, outer_previous;
+
+        /* A pairing role persists exactly one generation and resolves the
+         * same identity after a simulated replacement-host callback reset. */
+        enable_identity_callbacks();
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
+        assert(previous == CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        assert(!BCryptGenerateKeyPair( algorithm, &first, 256, 0 ));
+        assert(!BCryptFinalizeKeyPair( first, 0 ));
+        cryptbridge_identity_end_key_role(previous);
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        assert(previous == CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        cryptbridge_identity_end_key_role(previous);
+        assert(!BCryptExportKey( first, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 first_blob, sizeof(first_blob), &blob_size, 0 ));
+        assert(blob_size == sizeof(first_blob));
+        assert(saved_identity && identity_loads == 1 && identity_stores == 1);
+
+        enable_identity_callbacks();
+        outer_previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
+        assert(outer_previous == CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
+        assert(previous == CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
+        assert(!BCryptGenerateKeyPair( algorithm, &second, 256, 0 ));
+        assert(!BCryptFinalizeKeyPair( second, 0 ));
+        cryptbridge_identity_end_key_role(previous);
         assert(!BCryptExportKey( second, NULL, BCRYPT_ECCPRIVATE_BLOB,
                                  second_blob, sizeof(second_blob), &blob_size,
                                  0 ));
@@ -251,18 +311,36 @@ int main(void)
         assert(!memcmp(first_blob, second_blob, sizeof(first_blob)));
         assert(identity_loads == 2 && identity_stores == 1);
 
-        unsigned char *stored_key = find_bytes(
-            saved_identity, saved_identity_size,
-            first_blob, sizeof(first_blob));
-        assert(stored_key);
-        stored_key[sizeof(BCRYPT_ECCKEY_BLOB)] ^= 1;
-        reset_identity_cache();
+        /* Ending the inner scope must not restore and re-arm the consumed
+         * outer pairing role.  The next generation therefore stays fresh. */
+        assert(!BCryptGenerateKeyPair( algorithm, &one_shot, 256, 0 ));
+        assert(!BCryptFinalizeKeyPair( one_shot, 0 ));
+        cryptbridge_identity_end_key_role(outer_previous);
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        assert(previous == CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        cryptbridge_identity_end_key_role(previous);
+        assert(!BCryptExportKey( one_shot, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 one_shot_blob, sizeof(one_shot_blob),
+                                 &blob_size, 0 ));
+        assert(blob_size == sizeof(one_shot_blob));
+        assert(memcmp(second_blob, one_shot_blob, sizeof(second_blob)));
+        assert(identity_loads == 2 && identity_stores == 1);
+
+        /* Persisted private material is still validated before import. */
+        assert(saved_identity_size == sizeof(first_blob));
+        ((UCHAR *)saved_identity)[sizeof(BCRYPT_ECCKEY_BLOB)] ^= 1;
+        enable_identity_callbacks();
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
         assert(!BCryptGenerateKeyPair( algorithm, &corrupted, 256, 0 ));
         assert(BCryptFinalizeKeyPair( corrupted, 0 ) ==
                STATUS_INVALID_PARAMETER);
+        cryptbridge_identity_end_key_role(previous);
         assert(!BCryptDestroyKey( corrupted ));
         assert(identity_loads == 3 && identity_stores == 1);
 
+        assert(!BCryptDestroyKey( one_shot ));
         assert(!BCryptDestroyKey( second ));
         assert(!BCryptDestroyKey( first ));
         cryptbridge_identity_set_state_callbacks(NULL, NULL, NULL);
@@ -273,15 +351,26 @@ int main(void)
 
     {
         BCRYPT_KEY_HANDLE generated;
+        enum cryptbridge_identity_key_role previous;
 
+        /* A pairing generation fails closed when durable storage rejects the
+         * new identity, and its one-shot role is still consumed. */
         reject_identity_store = true;
-        reset_identity_cache();
+        enable_identity_callbacks();
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
         assert(!BCryptGenerateKeyPair( algorithm, &generated, 256, 0 ));
         assert(BCryptFinalizeKeyPair( generated, 0 ) ==
                STATUS_INTERNAL_ERROR);
+        cryptbridge_identity_end_key_role(previous);
+        previous = cryptbridge_identity_begin_key_role(
+            CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        assert(previous == CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED);
+        cryptbridge_identity_end_key_role(previous);
         assert(!BCryptDestroyKey( generated ));
         cryptbridge_identity_set_state_callbacks(NULL, NULL, NULL);
         reject_identity_store = false;
+        assert(!saved_identity);
     }
 
     {

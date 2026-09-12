@@ -23,6 +23,8 @@ static void *created_cookie;
 static void *returned_cookie;
 static unsigned int created_count;
 static unsigned int returned_count;
+static unsigned int filter_count;
+static unsigned int filtered_worker_runs;
 
 static void observe_thread_lifecycle(struct winmodule *module,
                                      void *start_proc, void *start_param,
@@ -60,6 +62,21 @@ static DWORD __winfnc finish_later(void *unused) {
     (void) unused;
     usleep(80000);
     return 0;
+}
+
+static DWORD __winfnc filtered_worker(void *unused) {
+    (void) unused;
+    filtered_worker_runs++;
+    return 0;
+}
+
+static bool suppress_filtered_worker(struct winmodule *module,
+                                     void *start_proc, void *start_param) {
+    assert(module == winmodule_get_cur());
+    assert(start_proc == (void*)filtered_worker);
+    assert(start_param == &filtered_worker_runs);
+    filter_count++;
+    return false;
 }
 
 int main(void) {
@@ -116,6 +133,16 @@ int main(void) {
     assert(pthread_mutex_unlock(&lifecycle_lock) == 0);
 
     win_set_thread_lifecycle_observer(NULL);
+    assert(CloseHandle(thread));
+
+    win_set_thread_start_filter(suppress_filtered_worker);
+    thread = CreateThread(NULL, 0, filtered_worker, &filtered_worker_runs,
+                          0, NULL);
+    assert(thread);
+    win_set_thread_start_filter(NULL);
+    assert(win_wait_sync_obj(thread, 1000) == 0);
+    assert(filter_count == 1);
+    assert(filtered_worker_runs == 0);
     assert(CloseHandle(thread));
     puts("PASS: timed event and thread waits, signals, and reset semantics");
     return 0;

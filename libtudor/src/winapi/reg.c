@@ -24,7 +24,8 @@ struct reg_key {
     char *name;
 };
 
-static void key_destr(struct reg_key *key) {
+static void key_destr(void *data) {
+    struct reg_key *key = (struct reg_key*) data;
     free(key->name);
     free(key);
 }
@@ -53,7 +54,7 @@ HANDLE winreg_open_key(void *ctx_obj, const char *key_name) {
     key->ctx_obj = ctx_obj;
     key->name = strdup(key_name);
 
-    return winhandle_create(key, (winhandle_destr_fnc*) key_destr);
+    return winhandle_create(key, key_destr);
 }
 
 const char *winreg_get_key_name(HANDLE hkey) {

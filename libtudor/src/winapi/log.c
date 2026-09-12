@@ -149,7 +149,8 @@ struct trace_provider {
     struct trace_guid *guids;
 };
 
-static void trace_prov_destr(struct trace_provider *prov) {
+static void trace_prov_destr(void *data) {
+    struct trace_provider *prov = (struct trace_provider*) data;
     for(int i = 0; i < prov->num_guids; i++) winhandle_destroy(prov->guids[i].handle);
     free(prov->guids);
     free(prov);
@@ -176,7 +177,7 @@ __winfnc DWORD RegisterTraceGuidsA(Wmidprequest *request_fnc, void *request_ctx,
         trace_guids[i].RegHandle = prov->guids[i].handle;
     }
 
-    *handle = winhandle_create(prov, (winhandle_destr_fnc*) trace_prov_destr);
+    *handle = winhandle_create(prov, trace_prov_destr);
 
     return ERROR_SUCCESS;
 }

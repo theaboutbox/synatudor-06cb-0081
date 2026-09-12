@@ -7,10 +7,15 @@ typedef DWORD __winfnc THREAD_START_ROUTINE(void *param);
 #define CREATE_SUSPENDED 0x00000004
 
 static win_thread_lifecycle_observer_fnc *thread_lifecycle_observer;
+static win_thread_start_filter_fnc *thread_start_filter;
 
 void win_set_thread_lifecycle_observer(
         win_thread_lifecycle_observer_fnc *observer) {
     __atomic_store_n(&thread_lifecycle_observer, observer, __ATOMIC_RELEASE);
+}
+
+void win_set_thread_start_filter(win_thread_start_filter_fnc *filter) {
+    __atomic_store_n(&thread_start_filter, filter, __ATOMIC_RELEASE);
 }
 
 struct win_thread {
@@ -29,6 +34,7 @@ struct win_thread {
     struct winmodule *start_module;
     THREAD_START_ROUTINE *start_proc;
     void *start_param;
+    bool run_start_proc;
 };
 
 static void notify_thread_lifecycle(struct win_thread *thread, bool created) {
@@ -40,7 +46,8 @@ static void notify_thread_lifecycle(struct win_thread *thread, bool created) {
     }
 }
 
-static void thread_destr(struct win_thread *thread) {
+static void thread_destr(void *data) {
+    struct win_thread *thread = (struct win_thread*) data;
     //Free memory
     if(!thread->has_detached) cant_fail_ret(pthread_detach(thread->thread));
     cant_fail_ret(pthread_mutex_lock(&thread->lock));
@@ -50,7 +57,8 @@ static void thread_destr(struct win_thread *thread) {
     free(thread);
 }
 
-static DWORD thread_wait(struct win_thread *thread, DWORD timeout) {
+static DWORD thread_wait(struct win_sync_object *sync_obj, DWORD timeout) {
+    struct win_thread *thread = (struct win_thread*) sync_obj;
     TRACE();
     if(thread->has_detached) return 0;
 
@@ -93,7 +101,7 @@ static void *thread_entry(void *arg) {
     THREAD_START_ROUTINE *start_proc = thread->start_proc;
     void *start_param = thread->start_param;
     DWORD thread_id = thread->thread_id;
-    DWORD result = start_proc(start_param);
+    DWORD result = thread->run_start_proc ? start_proc(start_param) : 0;
     log_debug("Windows thread %u returned from %p with status 0x%x",
               thread_id, (void*) start_proc, result);
 
@@ -112,7 +120,7 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
     //Allocate thread
     struct win_thread *thread = (struct win_thread*) malloc(sizeof(struct win_thread));
     if(!thread) { winerr_set_errno(); return NULL; }
-    thread->sync_obj.wait_fnc = (win_sync_obj_wait_fnc*) thread_wait;
+    thread->sync_obj.wait_fnc = thread_wait;
 
     cant_fail_ret(pthread_mutex_init(&thread->lock, NULL));
     thread->suspend_cntr = ((flags & CREATE_SUSPENDED) != 0) ? 1 : 0;
@@ -122,8 +130,12 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
     thread->start_module = winmodule_get_cur();
     thread->start_proc = start_proc;
     thread->start_param = param;
+    win_thread_start_filter_fnc *filter =
+        __atomic_load_n(&thread_start_filter, __ATOMIC_ACQUIRE);
+    thread->run_start_proc = !filter ||
+        filter(thread->start_module, (void*)start_proc, param);
 
-    thread->handle = winhandle_create(thread, (winhandle_destr_fnc*) thread_destr);
+    thread->handle = winhandle_create(thread, thread_destr);
 
     /* Notify before pthread_create: a short-lived Windows worker can return
      * before CreateThread itself regains the CPU. */

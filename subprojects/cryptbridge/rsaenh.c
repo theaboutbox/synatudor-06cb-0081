@@ -2788,7 +2788,6 @@ static BOOL crypt_export_simple(CRYPTKEY *pCryptKey, CRYPTKEY *pPubKey,
     DWORD dwFlags, BYTE *pbData, DWORD *pdwDataLen)
 {
     BLOBHEADER *pBlobHeader = (BLOBHEADER*)pbData;
-    ALG_ID *pAlgid = (ALG_ID*)(pBlobHeader+1);
     DWORD dwDataLen;
 
     if (!(GET_ALG_CLASS(pCryptKey->aiAlgid)&(ALG_CLASS_DATA_ENCRYPT|ALG_CLASS_MSG_ENCRYPT))) {
@@ -2798,6 +2797,7 @@ static BOOL crypt_export_simple(CRYPTKEY *pCryptKey, CRYPTKEY *pPubKey,
 
     dwDataLen = sizeof(BLOBHEADER) + sizeof(ALG_ID) + pPubKey->dwBlockLen;
     if (pbData) {
+        ALG_ID *pAlgid = (ALG_ID*)(pBlobHeader+1);
         if (*pdwDataLen < dwDataLen) {
             SetLastError(ERROR_MORE_DATA);
             *pdwDataLen = dwDataLen;
@@ -2828,7 +2828,6 @@ static BOOL crypt_export_public_key(CRYPTKEY *pCryptKey, BYTE *pbData,
     DWORD *pdwDataLen)
 {
     BLOBHEADER *pBlobHeader = (BLOBHEADER*)pbData;
-    RSAPUBKEY *pRSAPubKey = (RSAPUBKEY*)(pBlobHeader+1);
     DWORD dwDataLen;
 
     if ((pCryptKey->aiAlgid != CALG_RSA_KEYX) && (pCryptKey->aiAlgid != CALG_RSA_SIGN)) {
@@ -2838,6 +2837,7 @@ static BOOL crypt_export_public_key(CRYPTKEY *pCryptKey, BYTE *pbData,
 
     dwDataLen = sizeof(BLOBHEADER) + sizeof(RSAPUBKEY) + pCryptKey->dwKeyLen;
     if (pbData) {
+        RSAPUBKEY *pRSAPubKey = (RSAPUBKEY*)(pBlobHeader+1);
         if (*pdwDataLen < dwDataLen) {
             SetLastError(ERROR_MORE_DATA);
             *pdwDataLen = dwDataLen;
@@ -2863,7 +2863,6 @@ static BOOL crypt_export_private_key(CRYPTKEY *pCryptKey, BOOL force,
     BYTE *pbData, DWORD *pdwDataLen)
 {
     BLOBHEADER *pBlobHeader = (BLOBHEADER*)pbData;
-    RSAPUBKEY *pRSAPubKey = (RSAPUBKEY*)(pBlobHeader+1);
     DWORD dwDataLen;
 
     if ((pCryptKey->aiAlgid != CALG_RSA_KEYX) && (pCryptKey->aiAlgid != CALG_RSA_SIGN)) {
@@ -2879,6 +2878,7 @@ static BOOL crypt_export_private_key(CRYPTKEY *pCryptKey, BOOL force,
     dwDataLen = sizeof(BLOBHEADER) + sizeof(RSAPUBKEY) +
                 2 * pCryptKey->dwKeyLen + 5 * ((pCryptKey->dwKeyLen + 1) >> 1);
     if (pbData) {
+        RSAPUBKEY *pRSAPubKey = (RSAPUBKEY*)(pBlobHeader+1);
         if (*pdwDataLen < dwDataLen) {
             SetLastError(ERROR_MORE_DATA);
             *pdwDataLen = dwDataLen;
@@ -2904,12 +2904,12 @@ static BOOL crypt_export_plaintext_key(CRYPTKEY *pCryptKey, BYTE *pbData,
     DWORD *pdwDataLen)
 {
     BLOBHEADER *pBlobHeader = (BLOBHEADER*)pbData;
-    DWORD *pKeyLen = (DWORD*)(pBlobHeader+1);
-    BYTE *pbKey = (BYTE*)(pKeyLen+1);
     DWORD dwDataLen;
 
     dwDataLen = sizeof(BLOBHEADER) + sizeof(DWORD) + pCryptKey->dwKeyLen;
     if (pbData) {
+        DWORD *pKeyLen = (DWORD*)(pBlobHeader+1);
+        BYTE *pbKey = (BYTE*)(pKeyLen+1);
         if (*pdwDataLen < dwDataLen) {
             SetLastError(ERROR_MORE_DATA);
             *pdwDataLen = dwDataLen;

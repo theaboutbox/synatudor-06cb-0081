@@ -56,7 +56,8 @@ struct ovlp_cb {
     void *ctx;
 };
 
-static void *ovlp_cb_thread_func(struct ovlp_cb *cb) {
+static void *ovlp_cb_thread_func(void *context) {
+    struct ovlp_cb *cb = (struct ovlp_cb*) context;
     cb->cb(cb->ovlp, cb->status, cb->ctx);
     free(cb);
     return NULL;
@@ -73,7 +74,7 @@ static inline void call_overlapped_cb(OVERLAPPED *ovlp, NTSTATUS status, winio_o
     *c = (struct ovlp_cb) { .ovlp = ovlp, .status = status, .cb = cb, .ctx = ctx };
 
     pthread_t thread;
-    cant_fail_ret(pthread_create(&thread, NULL, (void *(*)(void*)) ovlp_cb_thread_func, c));
+    cant_fail_ret(pthread_create(&thread, NULL, ovlp_cb_thread_func, c));
     cant_fail_ret(pthread_detach(thread));
 }
 
@@ -144,7 +145,8 @@ inline void winio_cleanup_overlapped(OVERLAPPED *ovlp) {
     free(op);
 }
 
-static void file_destr(struct winfile *file) {
+static void file_destr(void *data) {
+    struct winfile *file = (struct winfile*) data;
     if(file->destroy_fnc) file->destroy_fnc(file->ctx);
     free(file);
 }
@@ -160,7 +162,7 @@ HANDLE winio_create_file(void *ctx, bool is_async, winio_read_fnc *read_fnc, win
     file->cancel_fnc = cancel_fnc;
     file->cleanup_fnc = cleanup_fnc;
     file->destroy_fnc = destroy_fnc;
-    return winhandle_create(file, (winhandle_destr_fnc*) file_destr);
+    return winhandle_create(file, file_destr);
 }
 
 void *winio_get_file_context(HANDLE file) { return ((struct winfile*) file->data)->ctx; }

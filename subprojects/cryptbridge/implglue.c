@@ -23,6 +23,9 @@
  */
 #include "config.h"
 
+#include <limits.h>
+#include <openssl/rand.h>
+
 #include "wine/port.h"
 #include "wine/library.h"
 
@@ -317,9 +320,27 @@ BOOL encrypt_stream_impl(ALG_ID aiAlgid, KEY_CONTEXT *pKeyContext, BYTE *stream,
 
 BOOL gen_rand_impl(BYTE *pbBuffer, DWORD dwLen)
 {
-    // return SystemFunction036(pbBuffer, dwLen);
-    bzero(pbBuffer, dwLen);
-    return 1;
+    size_t offset = 0;
+
+    if (!pbBuffer && dwLen)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    while (offset < dwLen)
+    {
+        size_t remaining = (size_t)dwLen - offset;
+        int chunk = remaining > INT_MAX ? INT_MAX : (int)remaining;
+
+        if (RAND_bytes(pbBuffer + offset, chunk) != 1)
+        {
+            SetLastError(NTE_FAIL);
+            return FALSE;
+        }
+        offset += (size_t)chunk;
+    }
+    return TRUE;
 }
 
 BOOL export_public_key_impl(BYTE *pbDest, const KEY_CONTEXT *pKeyContext, DWORD dwKeyLen,DWORD *pdwPubExp)

@@ -132,10 +132,12 @@ native_storage_test = executable('native-storage-test',
 test('native-storage', native_storage_test, timeout: 5)
 
 native_storage_lifecycle_test = executable('native-storage-lifecycle-test',
-    'tests/native-storage-lifecycle.c',
-    dependencies: [thread_dep, libusb_dep, libtudor_dep],
+    [libtudor_src, driver_dll_blobs, 'tests/native-storage-lifecycle.c'],
+    dependencies: [thread_dep, libcrypto_dep, libusb_dep, cryptbridge_dep],
     include_directories: ['src', libtudor_inc],
-    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    c_args: ['-D_GNU_SOURCE', '-DTUDOR_RECOVERY_TEST_HOOK', '-UNDEBUG'] + libtudor_flags,
+    cpp_args: ['-D_GNU_SOURCE', '-DTUDOR_RECOVERY_TEST_HOOK'] + libtudor_flags,
+    link_args: ['-Wl,-z,noexecstack', '-Wl,--copy-dt-needed-entries'],
     install: false)
 test('native-storage-lifecycle', native_storage_lifecycle_test, timeout: 5)
 

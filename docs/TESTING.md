@@ -13,15 +13,17 @@ $ meson compile -C build
 $ meson test -C build --print-errorlogs
 ```
 
-The suite covers Windows wait and string behavior, cryptographic context and
-SHA-1 behavior, random standalone P-256 key generation, persistent per-reader
-identity reload and corruption rejection, ECDH agreement, ECDSA signing,
-persistent crypto-registry state, WinUSB ownership and bounded diagnostic
-playback, capture recovery, native storage calls and lifecycle, native storage
-IPC, stable host identity, persistent launcher state, ownership-failure
-guarding, the host's one-shot ownership-reset transaction, and the privileged
-reset helper's refusal and cleanup paths. Calibration fixtures verify that
-reader-scoped and legacy blobs are bound to the exact `06cb:0081` USB serial.
+The suite covers Windows wait, thread-start filtering, and string behavior;
+cryptographic context, random generation, RSA key generation/export/signing,
+SHA-1, P-256 key generation, ECDH agreement, and ECDSA signing; persistent
+crypto-registry state; WinUSB access and bounded diagnostic playback; capture
+recovery; native storage calls, lifecycle, and IPC; stable host identity;
+persistent launcher state; the joined pairing-worker and nonnull-strategy
+guard; the host's one-shot vendor-unpair transaction; its resumable
+pending-validation marker, its conditional one-to-zero completion, and its
+durable replay guard; and the privileged helper's refusal, cleanup, and
+service-mask paths. Calibration fixtures verify that reader-scoped and legacy
+blobs are bound to the exact `06cb:0081` USB serial.
 
 For a Clang sanitizer build:
 
@@ -35,45 +37,64 @@ $ meson test -C build-asan --print-errorlogs
 
 ## Hardware validation
 
-Automated tests do not prove that a vendor-driver ABI works on hardware. A
-release candidate should pass this sequence on USB `06cb:0081`. The
-ownership-reset portion permanently erases the sensor database, so back up any
-state needed for investigation and keep password login available:
+Automated tests do not prove that a vendor-driver ABI works on hardware. The
+package revision 8 candidate should pass this sequence on USB `06cb:0081`.
+Keep password login available. The optional vendor-unpair step changes pairing
+and local enrollment state and may invalidate existing Windows and Linux
+enrollments; it is not a proven secure erase of the sensor database.
 
-1. Present a known mismatched local identity and confirm that one bounded
-   initialization writes a nonzero ownership-failure count, exits before
-   advertising the adapters, records `OwnershipFailureDetected.bool` for this
-   run, and never enters capture. Confirm `synatudor-reset` clears a stale
-   marker while services are stopped and a successful run records false.
-2. Run `synatudor-reset-ownership`; confirm that it creates a private backup,
-   establishes its barrier and consumes its request before the vendor call,
-   reports success, clears incompatible per-reader pairing, every legacy
-   `.tpd` pairing record, and every local user's stale fprintd state for this
-   driver, and does not run a second reset during service restart. Confirm that
-   a matching legacy calibration is migrated into the exact reader directory
-   and all unscoped variants are removed. Confirm that D-Bus activation cannot
-   reopen either service while backup or local cleanup is in progress.
-3. Run `synatudor-setup` and confirm that the first clean initialization leaves
-   the ownership-failure marker false, leaves the vendor counter absent or
-   zero, and generates or reuses only calibration belonging to that reader.
-4. Enroll one finger with `fprintd-enroll`.
-5. Match it repeatedly with `fprintd-verify`.
-6. Confirm that a different finger is rejected.
-7. Restart `fprintd` and the launcher, then repeat both checks.
-8. Reset or re-enumerate the USB device, confirm that only one host remains
-   for the reader, then repeat both checks.
-9. Reboot, then repeat both checks.
-10. Delete the enrolled finger, confirm that it no longer matches, and enroll it
-   again.
-11. If PAM integration is enabled, test sudo, polkit, the Omarchy lock screen,
-   and password fallback separately.
+1. Run `synatudor-setup` with the sensor uncovered. Confirm that it makes no
+   more than three ordinary initialization attempts and never invokes the
+   vendor-unpair callback. If `SetOwnershipFailureCount` becomes nonzero,
+   confirm the value is reported only as diagnostic context and a later normal
+   attempt can continue after USB re-enumeration.
+2. Confirm that a successful start joins the exact vendor pairing worker,
+   observes a nonnull capture-strategy pointer, opens every biometric pipeline
+   stage, reaches `WINBIO_SENSOR_READY`, and only then clears
+   `OwnershipFailureDetected.bool` and advertises the device. In a controlled
+   incomplete-pairing test, confirm a missing strategy never reaches capture
+   or `READY`.
+3. If explicitly validating recovery, run `synatudor-reset-ownership` once.
+   Confirm that it creates a private backup, consumes its one-shot request
+   before the custom `OnResetOwnership` to `DoUnpairing` callback, suppresses
+   only the exact normal pairing worker during maintenance, records the callback
+   result, and never identifies the operation as standard
+   `IOCTL_BIOMETRIC_RESET` or a proven template erase.
+4. After reported callback success, confirm that incompatible per-reader
+   pairing, every legacy `.tpd` record, and every local user's stale fprintd
+   state for this driver are removed. Confirm that matching legacy calibration
+   is migrated into the exact reader directory and all unscoped variants are
+   removed. Confirm D-Bus activation cannot reopen either service during
+   protected backup or cleanup.
+5. Confirm the helper durably sets
+   `OwnershipResetPendingValidation.bool` before removing its transaction
+   barrier and makes at most three ordinary validation cycles. A complete safe
+   open must change the marker to zero. In an injected validation failure, both services
+   must remain runtime-masked and rerunning the helper must retry validation
+   without invoking the vendor callback again. Inject interrupted and failed
+   request/result combinations and confirm that stale enabled requests are
+   disabled without replay, malformed combinations fail unchanged, and a
+   separate callback requires a later explicit `--new`. Confirm ordinary
+   `synatudor-reset` refuses to bypass a pending or malformed validation marker.
+6. Run `synatudor-setup` and enroll one finger with `fprintd-enroll`.
+7. Match it repeatedly with `fprintd-verify` and confirm that a different
+   finger is rejected.
+8. Restart `fprintd` and the launcher, then repeat both checks.
+9. Reset or re-enumerate the USB device, confirm that only one host remains for
+   the reader, then repeat both checks.
+10. Reboot, then repeat both checks.
+11. Delete the enrolled finger, confirm that it no longer matches, and enroll
+    it again.
+12. If PAM integration is enabled, test sudo, polkit, the Omarchy lock screen,
+    and password fallback separately.
 
 The earlier `06cb:0081` bring-up passed the automated suite with GCC and Clang,
 AddressSanitizer/UndefinedBehaviorSanitizer, and ThreadSanitizer. It also passed
 enrollment, correct and incorrect finger checks, service restart, USB reset,
 sudo, polkit, and the Omarchy lock screen on a Lenovo Yoga C930-13IKB running
-Arch Linux with Omarchy. Reinstall testing later exposed the mismatched
-ownership capture failure described in [Validation](VALIDATION.md). The new
-guard and ownership-reset flow still require the complete hardware sequence
-above; the earlier results do not validate that recovery path. Other laptop
-models remain unverified.
+Arch Linux with Omarchy. Reinstall testing later exposed the incomplete-pairing
+capture failure described in
+[Validation](VALIDATION.md). The joined-worker guard, corrected cryptographic
+pairing support, and vendor-unpair validation lifecycle intended for package
+revision 8 still require the complete hardware sequence above; the earlier
+results do not validate that path. Other laptop models remain unverified.

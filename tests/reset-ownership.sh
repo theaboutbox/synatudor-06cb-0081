@@ -4,6 +4,7 @@ set -Eeuo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 script=$repo_dir/scripts/reset-ownership
 reset_script=$repo_dir/scripts/reset
+setup_script=$repo_dir/scripts/setup
 
 fail() {
   printf 'reset-ownership test failed: %s\n' "$*" >&2
@@ -12,6 +13,7 @@ fail() {
 
 bash -n "$script"
 bash -n "$reset_script"
+bash -n "$setup_script"
 # shellcheck disable=SC1090,SC1091
 source "$script"
 
@@ -20,9 +22,112 @@ grep -Fq 'for every local user' <<<"$help_text" ||
   fail 'help does not disclose system-wide local metadata removal'
 grep -Fq 'unscoped calibration' <<<"$help_text" ||
   fail 'help does not disclose legacy calibration migration and removal'
+grep -Fq 'up to three bounded normal initialization' <<<"$help_text" ||
+  fail 'help does not disclose post-reset validation'
+grep -Fq 'runtime masks' <<<"$help_text" ||
+  fail 'help does not disclose validation-failure containment'
+grep -Fq 'durable completed marker' <<<"$help_text" ||
+  fail 'help does not disclose the completed-reset replay guard'
+grep -Fq -- '--new' <<<"$help_text" ||
+  fail 'help does not disclose explicit authorization for another reset'
+grep -Fq 'completed or failed one' <<<"$help_text" ||
+  fail 'help does not explain that --new can authorize a new operation after failure'
+
+run_recovery_phase_case() {
+  local name=$1 marker=$2 completed=$3 start_new=$4 expected=$5 actual
+  actual=$(
+    pending_validation=$marker
+    reset_completed=$completed
+    new_reset_requested=$start_new
+    select_recovery_phase
+  )
+  [[ $actual == "$expected" ]] ||
+    fail "$name selected recovery phase $actual instead of $expected"
+}
+
+run_recovery_phase_case first-run missing 0 0 reset
+run_recovery_phase_case completed-default 0 0 0 completed
+run_recovery_phase_case completed-explicit-new 0 0 1 reset
+run_recovery_phase_case pending-default 1 0 0 validate
+run_recovery_phase_case pending-explicit-new 1 0 1 validate
+run_recovery_phase_case successful-result 0 1 1 cleanup
+
+grep -Fq 'root_args+=(--new)' "$script" ||
+  fail 'the regular-user wrapper does not forward explicit --new authorization'
+
+setup_help=$(bash "$setup_script" --help)
+grep -Fq -- 'never issues the separate vendor-unpair' <<<"$setup_help" ||
+  fail 'setup help does not state its non-destructive boundary'
+if grep -Fq -- 'sudo /usr/bin/synatudor-reset-ownership' "$setup_script"; then
+  fail 'setup can invoke vendor-unpair maintenance automatically'
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+
+completed_guard=$tmp/completed-guard
+mkdir -p "$completed_guard"
+printf '0\n' >"$completed_guard/OwnershipResetPendingValidation.bool"
+completed_output=$(
+  (
+    device_state_dir=$completed_guard
+    pending_validation_file=$completed_guard/OwnershipResetPendingValidation.bool
+    services_stopped=1
+    ownership_reset_transaction_is_absent() { return 0; }
+    start_services() {
+      : >"$completed_guard/services-started"
+      services_stopped=0
+    }
+    finish_completed_validation
+  )
+)
+[[ -e $completed_guard/services-started &&
+   $(<"$completed_guard/OwnershipResetPendingValidation.bool") == 0 ]] ||
+  fail 'completed-reset guard did not restore services while preserving its marker'
+grep -Fq 'no vendor-unpair callback was issued' <<<"$completed_output" ||
+  fail 'completed-reset guard did not report its non-destructive result'
+if (
+  ownership_reset_transaction_is_absent() { return 1; }
+  start_services() { : >"$completed_guard/conflicting-services-started"; }
+  finish_completed_validation
+) >/dev/null 2>&1; then
+  fail 'completed-reset guard accepted conflicting transaction state'
+fi
+[[ ! -e $completed_guard/conflicting-services-started ]] ||
+  fail 'completed-reset guard started services with conflicting transaction state'
+
+# Read the protected marker through a sudo-shaped fixture, including missing,
+# false, true, and wrong-type states. Only ownership metadata is mocked because
+# this unprivileged test cannot create root-owned files.
+(
+  # shellcheck disable=SC1090
+  source <(sed -n \
+    '/^ownership_reset_pending_validation() {$/,/^}$/p' "$setup_script")
+  sensor_state_dir=$tmp/setup-pending
+  mkdir -p "$sensor_state_dir"
+  sudo() {
+    if [[ $1 == stat && ${2:-} == -Lc && ${3:-} == %u:%g:%a ]]; then
+      printf '0:0:600\n'
+      return
+    fi
+    command "$@"
+  }
+
+  [[ $(ownership_reset_pending_validation) == missing ]] ||
+    fail 'setup did not recognize an absent validation marker'
+  printf '1\n' >"$sensor_state_dir/OwnershipResetPendingValidation.bool"
+  chmod 0600 "$sensor_state_dir/OwnershipResetPendingValidation.bool"
+  [[ $(ownership_reset_pending_validation) == 1 ]] ||
+    fail 'setup did not recognize pending reset validation'
+  printf '0\n' >"$sensor_state_dir/OwnershipResetPendingValidation.bool"
+  [[ $(ownership_reset_pending_validation) == 0 ]] ||
+    fail 'setup did not recognize completed reset validation'
+  rm -f -- "$sensor_state_dir/OwnershipResetPendingValidation.bool"
+  printf '0\n' >"$sensor_state_dir/OwnershipResetPendingValidation.uint"
+  if (ownership_reset_pending_validation) >/dev/null 2>&1; then
+    fail 'setup accepted a validation marker with the wrong type'
+  fi
+)
 
 # A development build could leave the dedicated backup root at the process
 # default mode. Tighten a real root-owned directory, but never follow a link
@@ -140,6 +245,53 @@ fi
 source <(sed -n \
   '/^clear_ownership_failure_marker() {$/,/^}$/p' "$reset_script")
 clear_ownership_failure_marker "$tmp/absent-reader-state"
+source <(sed -n \
+  '/^ownership_validation_allows_reset() {$/,/^}$/p' "$reset_script")
+
+# Ordinary USB reset may proceed with no ownership-validation marker or a
+# completed marker. Pending, malformed, wrong-type, and conflicting markers
+# must keep the ownership-recovery path in control.
+reset_state_root=$tmp/reset-validation-state
+reset_state_dir=$reset_state_root/devices/fixture-reader
+mkdir -p "$reset_state_dir"
+run_reset_validation_gate() {
+  local expected=$1 status
+  set +e
+  (
+    sensor_state_dir=$reset_state_dir
+    stat() {
+      local format=$2 target=${4:-}
+      case $format in
+        %u:%g:%a)
+          if [[ -d $target ]]; then printf '0:0:700\n';
+          else printf '0:0:600\n'; fi
+          ;;
+        %s) printf '2\n' ;;
+        *) return 1 ;;
+      esac
+    }
+    ownership_validation_allows_reset
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ $status == "$expected" ]] ||
+    fail "ordinary-reset validation gate returned $status instead of $expected"
+}
+
+run_reset_validation_gate 0
+printf '0\n' >"$reset_state_dir/OwnershipResetPendingValidation.bool"
+run_reset_validation_gate 0
+printf '1\n' >"$reset_state_dir/OwnershipResetPendingValidation.bool"
+run_reset_validation_gate 1
+printf 'x\n' >"$reset_state_dir/OwnershipResetPendingValidation.bool"
+run_reset_validation_gate 1
+rm -f -- "$reset_state_dir/OwnershipResetPendingValidation.bool"
+printf '0\n' >"$reset_state_dir/OwnershipResetPendingValidation.uint"
+run_reset_validation_gate 1
+printf '0\n' >"$reset_state_dir/OwnershipResetPendingValidation.bool"
+run_reset_validation_gate 1
+rm -f -- "$reset_state_dir"/OwnershipResetPendingValidation.{uint,bool}
+
 reset_restart_tail=$(sed -n '/^\/usr\/bin\/usbreset 06cb:0081$/,$p' \
   "$reset_script")
 grep -Fxq 'timeout --kill-after=2s 10s systemctl start --no-block fprintd.service' \
@@ -164,6 +316,50 @@ grep -Fxq 'start tudor-host-launcher.service' "$service_start_log" ||
   fail 'ownership reset did not start the host launcher'
 grep -Fxq 'start --no-block fprintd.service' "$service_start_log" ||
   fail 'ownership reset waits synchronously for its one-shot maintenance host'
+
+# Post-reset validation is a bounded fprintd probe plus the marker written by
+# the normal host after tudor_open. Either a failed command or a marker that is
+# still pending must fail validation.
+run_validation_case() {
+  local name=$1 marker=$2 probe_status=$3 expect_success=$4
+  local case_dir=$tmp/validation-$name status
+  mkdir -p "$case_dir"
+  if [[ $marker != missing ]]; then
+    printf '%s\n' "$marker" >"$case_dir/OwnershipResetPendingValidation.bool"
+  fi
+
+  set +e
+  (
+    target_user=fixture-user
+    device_state_dir=$case_dir
+    pending_validation_file=$case_dir/OwnershipResetPendingValidation.bool
+    validation_call_log=$case_dir/probe-arguments
+    mock_probe_status=$probe_status
+    assert_status_file() { [[ -f $1 && ! -L $1 ]]; }
+    timeout() {
+      printf '%s\n' "$*" >"$validation_call_log"
+      return "$mock_probe_status"
+    }
+    validate_normal_startup
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ $(<"$case_dir/probe-arguments") == \
+     '--kill-after=2s 45s runuser -u fixture-user -- fprintd-list fixture-user' ]] ||
+    fail "$name validation did not use the bounded normal probe"
+  if (( expect_success )); then
+    [[ $status == 0 ]] || fail "$name validation unexpectedly failed"
+  else
+    [[ $status != 0 ]] || fail "$name validation unexpectedly succeeded"
+  fi
+}
+
+run_validation_case validated 0 0 1
+run_validation_case still-pending 1 0 0
+run_validation_case late-client-timeout 0 124 1
+run_validation_case probe-failed 1 124 0
+run_validation_case marker-missing missing 0 0
 
 mkdir -p "$tmp/usb/1-1"
 printf '06cb\n' >"$tmp/usb/1-1/idVendor"
@@ -213,7 +409,8 @@ state=$tmp/state
 mkdir "$state"
 printf keep >"$state/CalibrationData.blob"
 printf keep >"$state/SystemWakeEnabled.bool"
-for name in CryptoRegistry OwnershipFailureDetected PairingContext PairingData \
+for name in CryptoRegistry OwnershipFailureDetected \
+            OwnershipResetPendingValidation PairingContext PairingData \
             SecureChannelIdentity SetOwnershipFailureCount UnpairingContext \
             deviceInitializeFailures; do
   printf remove >"$state/$name.blob"
@@ -232,6 +429,7 @@ if find "$state" -maxdepth 1 -type f \
     \( -name 'CryptoRegistry.*' -o -name 'PairingContext.*' -o \
        -name 'PairingData.*' -o -name 'SecureChannelIdentity.*' -o \
        -name 'OwnershipFailureDetected.*' -o \
+       -name 'OwnershipResetPendingValidation.*' -o \
        -name 'SetOwnershipFailureCount.*' -o -name 'UnpairingContext.*' -o \
        -name 'deviceInitializeFailures.*' \) -print -quit | grep -q .; then
   fail 'left incompatible pairing state behind'
@@ -239,6 +437,19 @@ fi
 
 clear_incompatible_reader_state "$state" 0
 [[ ! -e $state/CalibrationData.blob ]] || fail 'kept invalid calibration'
+
+validation_arm=$tmp/validation-arm
+mkdir -p "$validation_arm"
+printf stale >"$validation_arm/OwnershipResetPendingValidation.blob"
+printf stale >"$validation_arm/OwnershipResetPendingValidation.uint"
+(
+  atomic_write_status() { printf '%s\n' "$2" >"$1"; }
+  arm_ownership_reset_validation "$validation_arm"
+)
+[[ $(<"$validation_arm/OwnershipResetPendingValidation.bool") == 1 &&
+   ! -e $validation_arm/OwnershipResetPendingValidation.blob &&
+   ! -e $validation_arm/OwnershipResetPendingValidation.uint ]] ||
+  fail 'did not durably arm one normalized pending-validation marker'
 
 clear_reset_markers "$state"
 [[ ! -e $state/ResetOwnershipRequest.bool ]] || fail 'left reset request marker'
@@ -384,6 +595,17 @@ request_file=$tmp/missing-reset-request.bool
 reset_request_is_disabled ||
   fail 'did not treat a missing request as disabled for success resumption'
 
+transaction_dir=$tmp/absent-transaction
+mkdir -p "$transaction_dir"
+device_state_dir=$transaction_dir
+ownership_reset_transaction_is_absent ||
+  fail 'did not recognize an absent ownership-reset transaction'
+printf '1\n' >"$transaction_dir/ResetOwnershipRequest.uint"
+if ownership_reset_transaction_is_absent; then
+  fail 'pending validation accepted a wrong-type ownership-reset request'
+fi
+rm -f -- "$transaction_dir/ResetOwnershipRequest.uint"
+
 # A durable SUCCEEDED result is authoritative even if a previous recovery
 # failed before replacing an enabled request with Request=0.
 (
@@ -404,6 +626,206 @@ reset_request_is_disabled ||
      $recovery_armed == 1 && $reset_completed == 1 ]] ||
     fail 'could not resume cleanup from success plus an enabled request'
 )
+
+# Terminal failure is a durable replay guard. An ordinary rerun must preserve
+# FAILED and stop. If its request is still enabled, even --new only repairs that
+# tuple; a later invocation is required to authorize a separate operation.
+failed_guard=$tmp/failed-reset-guard
+mkdir -p "$failed_guard"
+printf '0\n' >"$failed_guard/ResetOwnershipRequest.bool"
+printf '3\n' >"$failed_guard/ResetOwnershipResult.uint"
+set +e
+(
+  device_state_dir=$failed_guard
+  request_file=$failed_guard/ResetOwnershipRequest.bool
+  result_file=$failed_guard/ResetOwnershipResult.uint
+  new_reset_requested=0
+  recovery_armed=0
+  atomic_write_status() { printf '%s\n' "$2" >"$1"; }
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  handle_existing_reset_result
+) >/dev/null 2>&1
+failed_guard_status=$?
+set -e
+[[ $failed_guard_status == 1 &&
+   $(<"$failed_guard/ResetOwnershipRequest.bool") == 0 &&
+   $(<"$failed_guard/ResetOwnershipResult.uint") == 3 ]] ||
+  fail 'ordinary rerun did not preserve the failed-reset replay guard'
+
+explicit_new_output=$(
+  (
+    device_state_dir=$failed_guard
+    request_file=$failed_guard/ResetOwnershipRequest.bool
+    result_file=$failed_guard/ResetOwnershipResult.uint
+    new_reset_requested=1
+    recovery_armed=0
+    atomic_write_status() { printf '%s\n' "$2" >"$1"; }
+    assert_status_file() {
+      [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+    }
+    handle_existing_reset_result
+  )
+)
+[[ $(<"$failed_guard/ResetOwnershipRequest.bool") == 0 &&
+   $(<"$failed_guard/ResetOwnershipResult.uint") == 3 ]] ||
+  fail 'explicit new operation did not first consume the stale failed request'
+grep -Fq 'explicit --new option authorizes a separate' <<<"$explicit_new_output" ||
+  fail 'explicit new operation did not report its separate authorization'
+
+for prior_result in missing 0 1 3; do
+  interrupted_case=$tmp/interrupted-reset-$prior_result
+  mkdir -p "$interrupted_case"
+  printf '1\n' >"$interrupted_case/ResetOwnershipRequest.bool"
+  if [[ $prior_result != missing ]]; then
+    printf '%s\n' "$prior_result" >"$interrupted_case/ResetOwnershipResult.uint"
+  fi
+  set +e
+  (
+    device_state_dir=$interrupted_case
+    request_file=$interrupted_case/ResetOwnershipRequest.bool
+    result_file=$interrupted_case/ResetOwnershipResult.uint
+    new_reset_requested=1
+    recovery_armed=0
+    atomic_write_status() { printf '%s\n' "$2" >"$1"; }
+    assert_status_file() {
+      [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+    }
+    handle_existing_reset_result
+  ) >/dev/null 2>&1
+  interrupted_status=$?
+  set -e
+  [[ $interrupted_status == 1 &&
+     $(<"$interrupted_case/ResetOwnershipRequest.bool") == 0 &&
+     $(<"$interrupted_case/ResetOwnershipResult.uint") == 3 ]] ||
+    fail "interrupted result=$prior_result was not retired without replay"
+done
+
+# Wrong or conflicting property types must fail before transaction state is
+# normalized, including when --new was supplied.
+malformed_transaction=$tmp/malformed-reset-transaction
+mkdir -p "$malformed_transaction"
+printf '0\n' >"$malformed_transaction/ResetOwnershipRequest.bool"
+printf 'stale\n' >"$malformed_transaction/ResetOwnershipRequest.uint"
+printf '3\n' >"$malformed_transaction/ResetOwnershipResult.uint"
+set +e
+(
+  device_state_dir=$malformed_transaction
+  request_file=$malformed_transaction/ResetOwnershipRequest.bool
+  result_file=$malformed_transaction/ResetOwnershipResult.uint
+  new_reset_requested=1
+  atomic_write_status() { printf '%s\n' "$2" >"$1"; }
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  handle_existing_reset_result
+) >/dev/null 2>&1
+malformed_status=$?
+set -e
+[[ $malformed_status == 1 &&
+   -e $malformed_transaction/ResetOwnershipRequest.bool &&
+   -e $malformed_transaction/ResetOwnershipRequest.uint &&
+   $(<"$malformed_transaction/ResetOwnershipResult.uint") == 3 ]] ||
+  fail 'malformed transaction did not fail without mutation'
+
+# The pending marker is written before a successful transaction barrier is
+# removed, so that exact crash window must finish barrier removal and proceed
+# to validation. A completed marker may coexist transiently with a newer,
+# already-authorized transaction; the newer result then becomes authoritative.
+pending_success=$tmp/pending-success-transition
+mkdir -p "$pending_success"
+printf '1\n' >"$pending_success/OwnershipResetPendingValidation.bool"
+printf '0\n' >"$pending_success/ResetOwnershipRequest.bool"
+printf '2\n' >"$pending_success/ResetOwnershipResult.uint"
+(
+  device_state_dir=$pending_success
+  pending_validation_file=$pending_success/OwnershipResetPendingValidation.bool
+  pending_validation=1
+  request_file=$pending_success/ResetOwnershipRequest.bool
+  result_file=$pending_success/ResetOwnershipResult.uint
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  reconcile_reset_state >/dev/null
+)
+[[ -e $pending_success/OwnershipResetPendingValidation.bool &&
+   ! -e $pending_success/ResetOwnershipRequest.bool &&
+   ! -e $pending_success/ResetOwnershipResult.uint ]] ||
+  fail 'pending-validation crash window did not finish barrier removal'
+
+pending_conflict=$tmp/pending-conflicting-failure
+mkdir -p "$pending_conflict"
+printf '1\n' >"$pending_conflict/OwnershipResetPendingValidation.bool"
+printf '0\n' >"$pending_conflict/ResetOwnershipRequest.bool"
+printf '3\n' >"$pending_conflict/ResetOwnershipResult.uint"
+set +e
+(
+  device_state_dir=$pending_conflict
+  pending_validation_file=$pending_conflict/OwnershipResetPendingValidation.bool
+  pending_validation=1
+  request_file=$pending_conflict/ResetOwnershipRequest.bool
+  result_file=$pending_conflict/ResetOwnershipResult.uint
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  reconcile_reset_state
+) >/dev/null 2>&1
+pending_conflict_status=$?
+set -e
+[[ $pending_conflict_status == 1 &&
+   -e $pending_conflict/OwnershipResetPendingValidation.bool &&
+   -e $pending_conflict/ResetOwnershipRequest.bool &&
+   -e $pending_conflict/ResetOwnershipResult.uint ]] ||
+  fail 'conflicting pending-validation transaction did not fail unchanged'
+
+completed_transition=$tmp/completed-new-transition
+mkdir -p "$completed_transition"
+printf '0\n' >"$completed_transition/OwnershipResetPendingValidation.bool"
+printf '0\n' >"$completed_transition/ResetOwnershipRequest.bool"
+printf '0\n' >"$completed_transition/ResetOwnershipResult.uint"
+(
+  device_state_dir=$completed_transition
+  pending_validation_file=$completed_transition/OwnershipResetPendingValidation.bool
+  pending_validation=0
+  request_file=$completed_transition/ResetOwnershipRequest.bool
+  result_file=$completed_transition/ResetOwnershipResult.uint
+  reset_completed=0
+  new_reset_requested=0
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  reconcile_reset_state
+)
+[[ ! -e $completed_transition/OwnershipResetPendingValidation.bool &&
+   $(<"$completed_transition/ResetOwnershipRequest.bool") == 0 &&
+   $(<"$completed_transition/ResetOwnershipResult.uint") == 0 ]] ||
+  fail 'new transaction did not supersede its prior completed marker'
+
+completed_ambiguous=$tmp/completed-ambiguous-transition
+mkdir -p "$completed_ambiguous"
+printf '0\n' >"$completed_ambiguous/OwnershipResetPendingValidation.bool"
+printf '1\n' >"$completed_ambiguous/ResetOwnershipRequest.bool"
+set +e
+(
+  device_state_dir=$completed_ambiguous
+  pending_validation_file=$completed_ambiguous/OwnershipResetPendingValidation.bool
+  pending_validation=0
+  request_file=$completed_ambiguous/ResetOwnershipRequest.bool
+  result_file=$completed_ambiguous/ResetOwnershipResult.uint
+  new_reset_requested=1
+  assert_status_file() {
+    [[ -f $1 && ! -L $1 && $(stat -Lc '%s' -- "$1") == 2 ]]
+  }
+  reconcile_reset_state
+) >/dev/null 2>&1
+completed_ambiguous_status=$?
+set -e
+[[ $completed_ambiguous_status == 1 &&
+   -e $completed_ambiguous/OwnershipResetPendingValidation.bool &&
+   -e $completed_ambiguous/ResetOwnershipRequest.bool &&
+   ! -e $completed_ambiguous/ResetOwnershipResult.uint ]] ||
+  fail 'completed marker with a resultless request did not fail unchanged'
 
 # A failure before local cleanup finishes must leave a success barrier that
 # can resume cleanup. Once cleanup has finished and the barrier is released,
@@ -749,7 +1171,15 @@ for cleanup_state in 0 1; do
     result_file=$case_dir/ResetOwnershipResult.uint
     trigger_pid=
     stop_trigger() { :; }
-    stop_services() { services_stopped=1; return 0; }
+    stop_services() {
+      services_stopped=1
+      : >"$case_dir/helper-masks-retained"
+      return 0
+    }
+    allow_service_activation() {
+      rm -f -- "$case_dir/helper-masks-retained"
+      : >"$case_dir/masks-released"
+    }
     timeout() { return 0; }
     atomic_write_status() {
       : >"$case_dir/write-attempted"
@@ -766,6 +1196,9 @@ for cleanup_state in 0 1; do
     fail "post-reset cleanup=$cleanup_state did not preserve the exit status"
   [[ ! -e $case_dir/restarted ]] ||
     fail "post-reset cleanup=$cleanup_state restarted fingerprint services"
+  [[ -e $case_dir/helper-masks-retained &&
+     ! -e $case_dir/masks-released ]] ||
+    fail "post-reset cleanup=$cleanup_state released helper-owned masks"
   if (( cleanup_state )); then
     [[ ! -e $case_dir/write-attempted ]] ||
       fail 'completed cleanup recreated a reset barrier during recovery'

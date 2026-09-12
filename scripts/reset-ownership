@@ -23,11 +23,15 @@ device_state_dir=
 request_file=
 result_file=
 reset_result=
+reset_request=
+pending_validation_file=
+pending_validation=
 target_user=
 trigger_pid=
 recovery_armed=0
 reset_completed=0
 cleanup_completed=0
+new_reset_requested=0
 services_stopped=0
 maintenance_lock_fd=
 activation_inhibited=0
@@ -53,21 +57,38 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: synatudor-reset-ownership [--yes]
+Usage: synatudor-reset-ownership [--yes] [--new]
 
-Resets ownership of exactly one connected Synaptics 06cb:0081 fingerprint
-reader. This permanently erases every fingerprint stored on that reader,
-including Windows Hello enrollments, and requires Linux fingerprints to be
-enrolled again. Matching Linux fingerprint references for every local user
-are also removed. Legacy pairing records for every reader managed by this
-driver are cleared because older installs did not record which reader owned
-each file. Old unscoped calibration is migrated only when it identifies this
-reader, then removed. Reader state is backed up privately before the reset.
+Runs the pinned vendor driver's unpair maintenance callback for exactly one
+connected Synaptics 06cb:0081 fingerprint reader. It changes pairing state and
+removes matching Linux fingerprint references for every local user, so those
+fingers must be enrolled again. Static analysis does not prove that this
+callback erases the sensor's template database; do not use it as a secure-erase
+tool. Legacy pairing records for every reader managed by this driver are
+cleared because older installs did not record which reader owned each file.
+Old unscoped calibration is migrated only when it identifies this reader, then
+removed. Reader state is backed up privately before the operation.
+
+After cleanup, the helper makes up to three bounded normal initialization
+attempts. Completion is reported only after the complete fingerprint pipeline
+opens. If validation fails, both fingerprint services remain stopped behind
+helper-owned runtime masks and rerunning this command retries validation
+without issuing another vendor-unpair request.
+
+Successful validation leaves a durable completed marker. A later invocation
+reports that completed result and does not issue another vendor-unpair request
+unless --new is supplied explicitly.
+
+An interrupted or failed callback is recorded as a durable failure and is not
+retried automatically. If an interrupted transaction still has an enabled
+request, the next invocation only disables it; a later --new invocation is
+required to authorize a separate vendor-unpair operation.
 
 Run this command as the regular desktop user. It asks for confirmation before
 using sudo to perform the protected state and service operations.
 
-  --yes      Accept the destructive reset without an interactive prompt.
+  --yes      Accept the maintenance operation without an interactive prompt.
+  --new      Start another vendor-unpair operation after a completed or failed one.
   -h, --help Show this help text.
 EOF
 }
@@ -119,15 +140,16 @@ confirm_reset() {
     die 'ownership reset needs an interactive terminal unless --yes is supplied'
   cat <<EOF
 
-WARNING: this will reset ownership of Synaptics reader $sensor_state_id.
+WARNING: this will unpair Synaptics reader $sensor_state_id from the saved host identity.
 
-It will permanently erase every fingerprint stored on the reader, including
-Windows Hello fingerprints. Existing Linux fingerprint references for every
-local user of this driver will also be removed. You must run synatudor-setup
-and enroll again when the reset finishes. Legacy pairing records for every
-reader managed by this driver will be backed up and removed. Old unscoped
-calibration will also be backed up, migrated only if it matches this reader,
-and removed from its legacy location.
+Existing Linux fingerprint references for every local user of this driver
+will be removed, and Windows or Linux enrollments may stop working after the
+pairing change. Static analysis does not prove that the callback erases the
+sensor's template database. You must run synatudor-setup and enroll again when
+maintenance finishes. Legacy pairing records for every reader managed by this
+driver will be backed up and removed. Old unscoped calibration will also be
+backed up, migrated only if it matches this reader, and removed from its legacy
+location.
 
 EOF
   read -r -p "Type '$expected' to continue: " answer
@@ -323,9 +345,20 @@ find_legacy_pairing_files() {
 }
 
 read_reset_result() {
-  local value
-  reset_result=
-  [[ -e $result_file ]] || return 1
+  local extension path value found=0 state_dir=${result_file%/*}
+  reset_result=missing
+
+  for extension in blob uint bool; do
+    path=$state_dir/ResetOwnershipResult.$extension
+    [[ -e $path || -L $path ]] || continue
+    ((++found))
+    [[ $extension == uint && $path == "$result_file" ]] ||
+      die 'the ownership-reset result has an invalid type'
+  done
+  (( found <= 1 )) ||
+    die 'the ownership-reset result has conflicting types'
+  (( found == 1 )) || return 1
+
   assert_status_file "$result_file"
   value=$(<"$result_file")
   case $value in
@@ -337,19 +370,96 @@ read_reset_result() {
   esac
 }
 
-reset_request_is_disabled() {
-  local value
-  # A missing request is disabled. This also makes a durable SUCCEEDED result
-  # resumable after a crash that removed the request marker first.
-  [[ -e $request_file || -L $request_file ]] || return 0
+read_reset_request() {
+  local extension path value found=0 state_dir=${request_file%/*}
+  reset_request=missing
+
+  for extension in blob uint bool; do
+    path=$state_dir/ResetOwnershipRequest.$extension
+    [[ -e $path || -L $path ]] || continue
+    ((++found))
+    [[ $extension == bool && $path == "$request_file" ]] ||
+      die 'the ownership-reset request has an invalid type'
+  done
+  (( found <= 1 )) ||
+    die 'the ownership-reset request has conflicting types'
+  (( found == 1 )) || return 1
+
   assert_status_file "$request_file"
   value=$(<"$request_file")
-  [[ $value == 0 ]]
+  [[ $value == 0 || $value == 1 ]] ||
+    die 'the ownership-reset request is malformed'
+  reset_request=$value
+}
+
+read_pending_validation() {
+  local extension path value found=0
+  pending_validation=missing
+
+  for extension in blob uint bool; do
+    path=$device_state_dir/OwnershipResetPendingValidation.$extension
+    [[ -e $path || -L $path ]] || continue
+    ((++found))
+    [[ $extension == bool && $path == "$pending_validation_file" ]] ||
+      die 'the ownership-reset validation marker has an invalid type'
+  done
+  (( found <= 1 )) ||
+    die 'the ownership-reset validation marker has conflicting types'
+  (( found == 1 )) || return 0
+
+  assert_status_file "$pending_validation_file"
+  value=$(<"$pending_validation_file")
+  [[ $value == 0 || $value == 1 ]] ||
+    die 'the ownership-reset validation marker is malformed'
+  pending_validation=$value
+}
+
+select_recovery_phase() {
+  if (( reset_completed )); then
+    printf 'cleanup\n'
+  elif [[ $pending_validation == 1 ]]; then
+    printf 'validate\n'
+  elif [[ $pending_validation == 0 ]] && (( ! new_reset_requested )); then
+    printf 'completed\n'
+  else
+    printf 'reset\n'
+  fi
+}
+
+finish_completed_validation() {
+  ownership_reset_transaction_is_absent ||
+    die 'completed ownership-reset validation conflicts with transaction state'
+  start_services ||
+    die 'the previous ownership reset validated, but the fingerprint services did not restart'
+  services_stopped=0
+  trap - EXIT INT TERM
+  printf '%s\n' \
+    'A previous vendor-unpair operation already completed and passed normal reader validation.' \
+    'Its durable completion marker was preserved, and no vendor-unpair callback was issued.' \
+    'Run synatudor-reset-ownership --new only if you deliberately want to start another vendor-unpair operation.'
+}
+
+reset_request_is_disabled() {
+  # A missing request is disabled. This also makes a durable SUCCEEDED result
+  # resumable after a crash that removed the request marker first.
+  read_reset_request || return 0
+  [[ $reset_request == 0 ]]
 }
 
 reset_result_blocks_startup() {
   read_reset_result || return 1
   [[ $reset_result != "$RESET_RESULT_NONE" ]]
+}
+
+ownership_reset_transaction_is_absent() {
+  local extension path
+  for extension in blob uint bool; do
+    for path in \
+      "$device_state_dir/ResetOwnershipRequest.$extension" \
+      "$device_state_dir/ResetOwnershipResult.$extension"; do
+      [[ ! -e $path && ! -L $path ]] || return 1
+    done
+  done
 }
 
 calibration_is_valid() {
@@ -481,6 +591,7 @@ clear_incompatible_reader_state() {
     PairingContext
     PairingData
     OwnershipFailureDetected
+    OwnershipResetPendingValidation
     SecureChannelIdentity
     SetOwnershipFailureCount
     UnpairingContext
@@ -499,6 +610,14 @@ clear_incompatible_reader_state() {
   else
     rm -f -- "$dir/CalibrationData.uint" "$dir/CalibrationData.bool"
   fi
+}
+
+arm_ownership_reset_validation() {
+  local dir=$1
+
+  rm -f -- "$dir/OwnershipResetPendingValidation.blob" \
+    "$dir/OwnershipResetPendingValidation.uint"
+  atomic_write_status "$dir/OwnershipResetPendingValidation.bool" 1
 }
 
 clear_reset_markers() {
@@ -529,6 +648,118 @@ resume_successful_reset_cleanup() {
   rm -f -- "$device_state_dir/ResetOwnershipRequest.blob" \
     "$device_state_dir/ResetOwnershipRequest.uint"
   atomic_write_status "$request_file" 0
+}
+
+load_reset_transaction() {
+  read_reset_result || true
+  read_reset_request || true
+}
+
+handle_loaded_reset_result() {
+
+  case $reset_result in
+    "$RESET_RESULT_SUCCEEDED")
+      resume_successful_reset_cleanup
+      printf 'A previous ownership reset succeeded; resuming local cleanup.\n'
+      ;;
+    "$RESET_RESULT_IN_PROGRESS")
+      # The host writes IN_PROGRESS before entering vendor code. Its outcome is
+      # therefore indeterminate after an interruption, so this invocation may
+      # only make the old request harmless. A later explicit --new invocation
+      # is required before another vendor callback can run.
+      recovery_armed=1
+      atomic_write_status "$result_file" "$RESET_RESULT_FAILED"
+      atomic_write_status "$request_file" 0
+      die 'a previous ownership reset was interrupted while in progress; it was marked failed and will not retry automatically'
+      ;;
+    "$RESET_RESULT_FAILED")
+      # FAILED is a durable no-replay barrier. An enabled request first has to
+      # be made harmless in a standalone invocation; even --new cannot both
+      # repair that ambiguous tuple and dispatch another vendor operation.
+      if [[ $reset_request == 1 ]]; then
+        recovery_armed=1
+        atomic_write_status "$request_file" 0
+        die 'a failed ownership reset still had an enabled request; the request was disabled and no vendor operation was started (rerun with --new only if you intend a separate operation)'
+      fi
+      if (( ! new_reset_requested )); then
+        recovery_armed=1
+        die 'a previous ownership reset failed or had an indeterminate outcome; it will not retry automatically (use --new only to authorize a separate vendor-unpair operation)'
+      fi
+      printf '%s\n' \
+        'A previous ownership reset failed or had an indeterminate outcome.' \
+        'The explicit --new option authorizes a separate vendor-unpair operation now.'
+      ;;
+    "$RESET_RESULT_NONE")
+      if [[ $reset_request == 1 ]]; then
+        # The host promises to persist IN_PROGRESS before entering vendor code,
+        # but a leftover enabled request still represents an interrupted helper
+        # transaction. Conservatively retire it and require a later --new so one
+        # invocation cannot both repair an ambiguous tuple and issue a callback.
+        recovery_armed=1
+        atomic_write_status "$result_file" "$RESET_RESULT_FAILED"
+        atomic_write_status "$request_file" 0
+        die 'a previous ownership-reset request was interrupted before its outcome was recorded; it was marked failed and will not retry automatically'
+      fi
+      ;;
+    missing)
+      if [[ $reset_request == 1 ]]; then
+        recovery_armed=1
+        atomic_write_status "$result_file" "$RESET_RESULT_FAILED"
+        atomic_write_status "$request_file" 0
+        die 'a previous ownership-reset request had no durable result; it was marked failed and will not retry automatically'
+      fi
+      ;;
+  esac
+}
+
+handle_existing_reset_result() {
+  load_reset_transaction
+  handle_loaded_reset_result
+}
+
+reconcile_reset_state() {
+  local transaction_absent=0
+  if ownership_reset_transaction_is_absent; then
+    transaction_absent=1
+  fi
+
+  case $pending_validation in
+    1)
+      (( transaction_absent )) && return 0
+      load_reset_transaction
+      if [[ $reset_result != "$RESET_RESULT_SUCCEEDED" ]]; then
+        die 'ownership-reset transaction state conflicts with its pending validation marker'
+      fi
+
+      # Cleanup and its pending marker were durable before the result barrier
+      # was removed. A crash between those ordered writes can leave SUCCEEDED
+      # beside PendingValidation=1; finish only the non-destructive barrier
+      # removal, then continue with normal validation.
+      clear_reset_markers "$device_state_dir"
+      sync -f -- "$device_state_dir" ||
+        die 'could not synchronize resumed ownership-reset barrier removal'
+      printf 'A previous ownership-reset cleanup completed; resuming its normal validation.\n'
+      ;;
+    0)
+      (( transaction_absent )) && return 0
+      load_reset_transaction
+      [[ $reset_result != missing ]] ||
+        die 'the completed ownership-reset marker conflicts with a request that has no result'
+
+      # A new operation authorized with --new begins while the prior completed
+      # marker still exists. Once a well-formed new transaction is durable, it
+      # supersedes that marker. Removing it makes any later recovery decision
+      # depend only on the newer transaction's authoritative result.
+      rm -f -- "$pending_validation_file"
+      sync -f -- "$device_state_dir" ||
+        die 'could not synchronize completed ownership-reset marker removal'
+      pending_validation=missing
+      handle_loaded_reset_result
+      ;;
+    missing)
+      handle_existing_reset_result
+      ;;
+  esac
 }
 
 clear_libfprint_metadata() {
@@ -732,6 +963,27 @@ start_services() {
     systemctl start --no-block fprintd.service
 }
 
+validate_normal_startup() {
+  local probe_status=0
+
+  printf 'Validating one fresh normal reader initialization (up to 45 seconds)...\n'
+  timeout --kill-after=2s 45s runuser -u "$target_user" -- \
+    fprintd-list "$target_user" >/dev/null 2>&1 || probe_status=$?
+  read_pending_validation
+
+  # The client command is only the bounded trigger. The host's durable marker
+  # is authoritative: it becomes completed only at the stronger safe-open
+  # boundary, and may reach that boundary just as the client deadline expires.
+  if [[ $pending_validation == 0 ]]; then
+    if (( probe_status != 0 )); then
+      printf 'The reader validated even though the triggering client exited with status %s.\n' \
+        "$probe_status" >&2
+    fi
+    return 0
+  fi
+  return 1
+}
+
 stop_trigger() {
   [[ -n $trigger_pid ]] || return 0
   if kill -0 "$trigger_pid" 2>/dev/null; then
@@ -765,11 +1017,13 @@ recover_after_failure() {
     fi
 
     if (( reset_completed && cleanup_completed )); then
-      # The sensor reset and all state cleanup are complete, and the barrier
-      # has already been released. Never recreate it here: normal startup may
-      # already have generated a replacement pairing identity.
+      # The reset and cleanup reached the validation phase, but this invocation
+      # did not prove a complete normal open. stop_services above recreated and
+      # verified the helper-owned masks; retain them across this failure.
       printf '%s\n' \
-        'Ownership reset and local cleanup succeeded, but USB or service restart did not finish. Run synatudor-reset to retry only the transport and services.' >&2
+        'Ownership reset cleanup completed, but a fresh normal reader initialization was not validated.' \
+        'Both fingerprint services remain stopped behind helper-owned runtime masks.' \
+        'Rerun synatudor-reset-ownership to retry validation without resetting ownership again.' >&2
     elif (( reset_completed )); then
       # Keep a durable barrier that blocks normal initialization with stale
       # state. A later invocation recognizes this pair and resumes cleanup
@@ -778,12 +1032,12 @@ recover_after_failure() {
       (atomic_write_status "$request_file" 0) || true
       if (reset_result_blocks_startup); then barrier_is_safe=1; fi
       printf '%s\n' \
-        'The reader reset succeeded, but local cleanup did not finish. Rerun synatudor-reset-ownership to resume cleanup without resetting the reader again.' >&2
+        'The vendor unpair completed, but local cleanup did not finish. Rerun synatudor-reset-ownership to resume cleanup without issuing it again.' >&2
     else
       (atomic_write_status "$result_file" "$RESET_RESULT_FAILED") || true
       (atomic_write_status "$request_file" 0) || true
       printf '%s\n' \
-        'The ownership reset did not report successful completion. Its physical outcome may be indeterminate, and it will not be retried automatically.' >&2
+        'The vendor-unpair callback did not report successful completion. Its outcome may be indeterminate, and it will not be retried automatically.' >&2
     fi
   fi
 
@@ -795,7 +1049,7 @@ recover_after_failure() {
       safe_to_restart=1
     else
       printf '%s\n' \
-        'Could not prove that the ownership-reset request is disabled. Fingerprint services remain stopped to prevent an automatic destructive retry; repair the protected status files or restore the private backup before starting them.' >&2
+        'Could not prove that the vendor-unpair request is disabled. Fingerprint services remain stopped to prevent an automatic retry; repair the protected status files or restore the private backup before starting them.' >&2
     fi
   fi
   if (( safe_to_restart )); then
@@ -811,11 +1065,11 @@ recover_after_failure() {
       printf '%s\n' \
         'Could not prove that an earlier ownership-reset request is disabled. Helper-owned runtime masks remain in place; rerun synatudor-reset-ownership to recover it safely.' >&2
     fi
-  elif (( status != 0 && reset_completed )); then
-    # Completed cleanup or a verified terminal barrier makes activation safe.
-    # Leave services stopped for the recovery named above, but release only
-    # the runtime masks carrying this helper's owner marker.
-    if (( cleanup_completed || barrier_is_safe )); then
+  elif (( status != 0 && reset_completed && ! cleanup_completed )); then
+    # Before cleanup completes, a verified result barrier makes service
+    # activation harmless: every host refuses normal initialization. Once the
+    # validation phase starts, its masks stay in place until validation passes.
+    if (( barrier_is_safe )); then
       allow_service_activation >/dev/null 2>&1 || true
     else
       printf '%s\n' \
@@ -826,7 +1080,7 @@ recover_after_failure() {
 }
 
 run_recovery() {
-  local sensor_path result='' i preserve_calibration=0
+  local sensor_path result='' i preserve_calibration=0 recovery_phase
   local migrate_legacy_calibration=0
 
   for command in cp date find flock fprintd-list install mktemp od runuser \
@@ -847,6 +1101,7 @@ run_recovery() {
   device_state_dir=$TUDOR_STATE_ROOT/devices/$sensor_state_id
   request_file=$device_state_dir/ResetOwnershipRequest.bool
   result_file=$device_state_dir/ResetOwnershipResult.uint
+  pending_validation_file=$device_state_dir/OwnershipResetPendingValidation.bool
 
   if [[ -e $TUDOR_STATE_ROOT ]]; then
     assert_secure_dir "$TUDOR_STATE_ROOT"
@@ -868,23 +1123,35 @@ run_recovery() {
     install -d -o root -g root -m 0700 -- "$device_state_dir"
   fi
 
-  # A prior invocation can be interrupted after the sensor reset but before
-  # local identity cleanup. The host leaves this durable barrier and refuses
-  # normal initialization. Resume at cleanup instead of dispatching a second
-  # destructive request.
-  if read_reset_result; then
-    case $reset_result in
-      "$RESET_RESULT_SUCCEEDED")
-        resume_successful_reset_cleanup
-        printf 'A previous ownership reset succeeded; resuming local cleanup.\n'
-        ;;
-      "$RESET_RESULT_IN_PROGRESS")
-        atomic_write_status "$result_file" "$RESET_RESULT_FAILED"
-        atomic_write_status "$request_file" 0
-        die 'a previous ownership reset was interrupted while in progress; it was marked failed and will not retry automatically'
-        ;;
-    esac
-  fi
+  read_pending_validation
+  # Reconcile transaction and validation markers as one ordered state machine.
+  # This accepts the two intentional crash windows around barrier removal while
+  # rejecting malformed or ambiguous combinations before normal startup.
+  reconcile_reset_state
+  recovery_phase=$(select_recovery_phase)
+  case $recovery_phase in
+    validate)
+      recovery_armed=1
+      reset_completed=1
+      cleanup_completed=1
+      ownership_reset_transaction_is_absent ||
+        die 'ownership-reset transaction state conflicts with its pending validation marker'
+      printf '%s\n' \
+        'A previous ownership reset is awaiting validation.' \
+        'Retrying only normal initialization; ownership will not be reset again.'
+      ;;
+    completed)
+      finish_completed_validation
+      return 0
+      ;;
+    reset)
+      if [[ $pending_validation == 0 ]]; then
+        printf '%s\n' \
+          'The durable completion marker records an earlier validated vendor-unpair operation.' \
+          'The explicit --new option authorizes a separate vendor-unpair operation now.'
+      fi
+      ;;
+  esac
 
   if (( ! reset_completed )); then
     # Arm failure cleanup before writing the one-shot request. From this point
@@ -904,7 +1171,7 @@ run_recovery() {
     atomic_write_status "$result_file" "$RESET_RESULT_NONE"
     atomic_write_status "$request_file" 1
 
-    printf 'Requesting one ownership reset from the reader...\n'
+    printf 'Requesting one vendor-unpair operation for the reader...\n'
     start_services || die 'could not start the fingerprint services for recovery'
     services_stopped=0
 
@@ -925,7 +1192,7 @@ run_recovery() {
             break
             ;;
           "$RESET_RESULT_FAILED")
-            die 'the ownership reset did not report successful completion; its physical outcome may be indeterminate and it will not retry automatically'
+            die 'the vendor-unpair callback did not report successful completion; its outcome may be indeterminate and it will not retry automatically'
             ;;
         esac
       fi
@@ -945,55 +1212,75 @@ run_recovery() {
     services_stopped=1
   fi
 
-  if calibration_is_valid \
-      "$device_state_dir/CalibrationData.blob" "$sensor_calibration_id"; then
-    preserve_calibration=1
+  if (( ! cleanup_completed )); then
+    if calibration_is_valid \
+        "$device_state_dir/CalibrationData.blob" "$sensor_calibration_id"; then
+      preserve_calibration=1
+    fi
+    if calibration_is_valid \
+        "$TUDOR_STATE_ROOT/CalibrationData.blob" "$sensor_calibration_id"; then
+      migrate_legacy_calibration=1
+    fi
+
+    assert_secure_tree "$device_state_dir"
+    clear_incompatible_reader_state "$device_state_dir" "$preserve_calibration"
+    if (( ! preserve_calibration && migrate_legacy_calibration )); then
+      migrate_legacy_calibration_data \
+        "$TUDOR_STATE_ROOT" "$device_state_dir" "$sensor_calibration_id"
+    fi
+    clear_legacy_pairing_data "$TUDOR_STATE_ROOT"
+    clear_legacy_calibration_data "$TUDOR_STATE_ROOT"
+    clear_libfprint_metadata "$FPRINT_STATE_ROOT"
+
+    # Make every incompatible-state deletion persistent before removing the
+    # terminal result that blocks normal initialization.
+    sync -f -- "$TUDOR_STATE_ROOT" ||
+      die 'could not synchronize Tudor state cleanup'
+    if [[ -e $FPRINT_STATE_ROOT ]]; then
+      sync -f -- "$FPRINT_STATE_ROOT" ||
+        die 'could not synchronize fprint metadata cleanup'
+    fi
+
+    # The result barrier can be removed only after this marker is durable. A
+    # crash from this point can retry the normal probe without dispatching the
+    # vendor ownership reset a second time.
+    arm_ownership_reset_validation "$device_state_dir"
+    clear_reset_markers "$device_state_dir"
+    sync -f -- "$TUDOR_STATE_ROOT" ||
+      die 'could not synchronize ownership-reset barrier removal'
+
+    cleanup_completed=1
   fi
-  if calibration_is_valid \
-      "$TUDOR_STATE_ROOT/CalibrationData.blob" "$sensor_calibration_id"; then
-    migrate_legacy_calibration=1
-  fi
 
-  assert_secure_tree "$device_state_dir"
-  clear_incompatible_reader_state "$device_state_dir" "$preserve_calibration"
-  if (( ! preserve_calibration && migrate_legacy_calibration )); then
-    migrate_legacy_calibration_data \
-      "$TUDOR_STATE_ROOT" "$device_state_dir" "$sensor_calibration_id"
-  fi
-  clear_legacy_pairing_data "$TUDOR_STATE_ROOT"
-  clear_legacy_calibration_data "$TUDOR_STATE_ROOT"
-  clear_libfprint_metadata "$FPRINT_STATE_ROOT"
+  local validation_attempt validated=0
+  for validation_attempt in 1 2 3; do
+    /usr/bin/usbreset 06cb:0081
+    udevadm settle --timeout=10
+    start_services ||
+      die 'vendor unpair completed, but the fingerprint services did not restart'
+    services_stopped=0
 
-  # Make every incompatible-state deletion persistent before removing the
-  # terminal result that blocks normal initialization.
-  sync -f -- "$TUDOR_STATE_ROOT" ||
-    die 'could not synchronize Tudor state cleanup'
-  if [[ -e $FPRINT_STATE_ROOT ]]; then
-    sync -f -- "$FPRINT_STATE_ROOT" ||
-      die 'could not synchronize fprint metadata cleanup'
-  fi
-
-  # Removing the terminal marker releases normal initialization only after
-  # every incompatible local value is durably gone while services are down.
-  clear_reset_markers "$device_state_dir"
-  sync -f -- "$TUDOR_STATE_ROOT" ||
-    die 'could not synchronize ownership-reset barrier removal'
-
-  # The cleanup and barrier removal both succeeded while services were down.
-  # A later transport/service failure must never recreate the barrier over a
-  # replacement identity that normal startup may generate.
-  cleanup_completed=1
-
-  /usr/bin/usbreset 06cb:0081
-  udevadm settle --timeout=10
-  start_services || die 'ownership reset succeeded, but the fingerprint services did not restart'
-  services_stopped=0
+    if validate_normal_startup; then
+      validated=1
+      break
+    fi
+    if (( validation_attempt < 3 )); then
+      printf 'Normal pairing validation attempt %s did not finish; restarting the ordinary USB session.\n' \
+        "$validation_attempt" >&2
+      stop_services ||
+        die 'could not stop the fingerprint services between validation attempts'
+      services_stopped=1
+    fi
+  done
+  (( validated )) ||
+    die 'post-unpair normal initialization did not complete successfully after three attempts'
 
   recovery_armed=0
   trap - EXIT INT TERM
   printf '%s\n' \
-    'Ownership reset succeeded and incompatible local pairing data was removed.' \
-    'Every fingerprint formerly stored on this reader has been erased.' \
+    'Vendor unpair completed and a fresh normal reader initialization was validated.' \
+    'A durable completion marker now prevents an accidental repeat; use --new to authorize a later vendor-unpair operation.' \
+    'Incompatible local pairing data was removed.' \
     'Stale Linux references were removed for every local user of this driver.' \
     'Legacy pairing records were removed for every reader managed by this driver.' \
     'Legacy calibration was backed up, migrated only if it matched this reader, and removed from its unscoped location.' \
@@ -1002,10 +1289,12 @@ run_recovery() {
 
 main() {
   local assume_yes=0 sensor_path invoking_uid
+  local -a root_args=(--yes)
 
   while (( $# )); do
     case $1 in
       --yes) assume_yes=1 ;;
+      --new) new_reset_requested=1 ;;
       -h|--help) usage; return 0 ;;
       *) usage >&2; die "unknown option: $1" ;;
     esac
@@ -1036,7 +1325,8 @@ main() {
   target_user=$(id -un) || die 'could not determine the current desktop user'
   (( assume_yes )) || confirm_reset
   self=$(readlink -f -- "$0") || die 'could not resolve this script path'
-  exec sudo -- "$self" --yes
+  (( new_reset_requested )) && root_args+=(--new)
+  exec sudo -- "$self" "${root_args[@]}"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

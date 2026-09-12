@@ -1,9 +1,61 @@
 #include <openssl/evp.h>
+#include <cryptbridge/identity.h>
 #include "winapi/windows.h"
 // #include "windef.h"
 #include "winapi/crypt/wincrypt.h"
 #include "winapi/api.h"
 #include "bcrypt.h"
+#include "loader.h"
+
+/* These two sites are the only direct callers of palCryptoEccKeypairGenerate
+ * in the pinned synaWudfBioUsb.dll.  The security-management site generates
+ * the pairing identity; the TLS site generates an ephemeral ECDH key. */
+#define SYNA_KEYPAIR_GENERATE_RVA 0x0e6480u
+#define SYNA_PAIRING_KEYGEN_CALL_RVA 0x06d00bu
+#define SYNA_TLS_KEYGEN_CALL_RVA 0x07e9d2u
+
+typedef DWORD (__winfnc *syna_keypair_generate_fnc)(
+    void *curve, void *seed, void **public_key, void **private_key);
+
+static void *syna_keypair_generate_target;
+
+static __winfnc DWORD syna_pairing_keypair_generate(
+    void *curve, void *seed, void **public_key, void **private_key)
+{
+    syna_keypair_generate_fnc generate =
+        (syna_keypair_generate_fnc)syna_keypair_generate_target;
+    if(!generate) return (DWORD)STATUS_INTERNAL_ERROR;
+
+    enum cryptbridge_identity_key_role previous =
+        cryptbridge_identity_begin_key_role(CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
+    DWORD result = generate(curve, seed, public_key, private_key);
+    cryptbridge_identity_end_key_role(previous);
+    return result;
+}
+
+static struct dll_callsite_hook syna_pairing_keygen_hook = {
+    .image_name = "synaWudfBioUsb.dll",
+    .call_rva = SYNA_PAIRING_KEYGEN_CALL_RVA,
+    .expected_target_rva = SYNA_KEYPAIR_GENERATE_RVA,
+    .expected_instruction = {0xe8, 0x70, 0x94, 0x07, 0x00},
+    .replacement = &syna_pairing_keypair_generate,
+    .original_target = &syna_keypair_generate_target,
+};
+
+/* Validation-only: this call must remain pointed directly at the shared
+ * helper, outside the pairing role scope. */
+static struct dll_callsite_hook syna_tls_keygen_validation = {
+    .image_name = "synaWudfBioUsb.dll",
+    .call_rva = SYNA_TLS_KEYGEN_CALL_RVA,
+    .expected_target_rva = SYNA_KEYPAIR_GENERATE_RVA,
+    .expected_instruction = {0xe8, 0xa9, 0x7a, 0x06, 0x00},
+};
+
+__constr static void register_syna_keygen_callsite_hooks(void)
+{
+    dll_register_callsite_hook(&syna_pairing_keygen_hook);
+    dll_register_callsite_hook(&syna_tls_keygen_validation);
+}
 
 
 __winfnc NTSTATUS  BCryptOpenAlgorithmProvider( BCRYPT_ALG_HANDLE *handle, LPCWSTR id, LPCWSTR implementation, DWORD flags );

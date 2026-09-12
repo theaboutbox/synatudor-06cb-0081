@@ -22,6 +22,7 @@ static void *identity_callback_context;
 static enum identity_load_status identity_status = IDENTITY_UNLOADED;
 static void *identity_data;
 static size_t identity_data_size;
+static _Thread_local enum cryptbridge_identity_key_role identity_key_role;
 
 static void wipe_bytes(void *data, size_t size)
 {
@@ -49,6 +50,35 @@ void cryptbridge_identity_set_state_callbacks(
     identity_callback_context = context;
     identity_status = IDENTITY_UNLOADED;
     pthread_mutex_unlock(&identity_mutex);
+}
+
+enum cryptbridge_identity_key_role cryptbridge_identity_begin_key_role(
+    enum cryptbridge_identity_key_role role)
+{
+    enum cryptbridge_identity_key_role previous = identity_key_role;
+
+    if(role != CRYPTBRIDGE_IDENTITY_KEY_PAIRING)
+        role = CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED;
+    identity_key_role = role;
+    return previous;
+}
+
+void cryptbridge_identity_end_key_role(
+    enum cryptbridge_identity_key_role previous_role)
+{
+    /* An unscoped current value means the one-shot authorization was already
+     * consumed.  Do not restore a nested PAIRING value and re-arm it. */
+    if(identity_key_role != CRYPTBRIDGE_IDENTITY_KEY_PAIRING) return;
+    if(previous_role != CRYPTBRIDGE_IDENTITY_KEY_PAIRING)
+        previous_role = CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED;
+    identity_key_role = previous_role;
+}
+
+bool cryptbridge_identity_state_take_pairing_role(void)
+{
+    if(identity_key_role != CRYPTBRIDGE_IDENTITY_KEY_PAIRING) return false;
+    identity_key_role = CRYPTBRIDGE_IDENTITY_KEY_UNSCOPED;
+    return true;
 }
 
 static bool ensure_identity_loaded(void)

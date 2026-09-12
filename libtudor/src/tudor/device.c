@@ -6,7 +6,8 @@
  * a fresh capture while other transport failures remain fatal. */
 #define TUDOR_CAPTURE_RESTART_STATUS ((NTSTATUS) 0x800703e3u)
 
-static void req_cb(struct winwdf_request *req, NTSTATUS status, OVERLAPPED *ovlp) {
+static void req_cb(struct winwdf_request *req, NTSTATUS status, void *context) {
+    OVERLAPPED *ovlp = context;
     //Get request info
     const void *out_buf = NULL;
     size_t out_buf_size, num_transfered = 0;
@@ -43,7 +44,7 @@ static NTSTATUS tudor_devctrl(struct tudor_device *device, OVERLAPPED *ovlp, ULO
     winmodule_set_cur(mod);
 
     //Add callback
-    if(status == STATUS_SUCCESS) winwdf_add_request_callback(*req, (winwdf_request_cb_fnc*) req_cb, ovlp);
+    if(status == STATUS_SUCCESS) winwdf_add_request_callback(*req, req_cb, ovlp);
 
     return status;
 }
@@ -216,7 +217,8 @@ bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_fi
     return true;
 }
 
-static void enroll_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) {
+static void enroll_cb(OVERLAPPED *ovlp, NTSTATUS status, void *context) {
+    tudor_async_res_t res = context;
     winmodule_set_cur(&tudor_adapter_dll->module);
     HRESULT hres;
     bool success = false, done = true;
@@ -272,7 +274,7 @@ bool tudor_enroll_capture(struct tudor_device *device, bool *done, tudor_async_r
 
     *res = async_new_res(device, ovlp);
     (*res)->args.enroll = (struct async_args_enroll) { .done = done };
-    winio_set_overlapped_callback(ovlp, (winio_overlapped_cb_fnc*) enroll_cb, *res, true);
+    winio_set_overlapped_callback(ovlp, enroll_cb, *res, true);
     return true;
 }
 
@@ -338,7 +340,8 @@ bool tudor_enroll_discard(struct tudor_device *device) {
     return true;
 }
 
-static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) {
+static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, void *context) {
+    tudor_async_res_t res = context;
     winmodule_set_cur(&tudor_adapter_dll->module);
     HRESULT hres;
     bool success = false, retry = false, matches = false;
@@ -407,11 +410,12 @@ bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger f
 
     *res = async_new_res(device, ovlp);
     (*res)->args.verify = (struct async_args_verify) { .retry = retry, .guid = guid, .finger = finger, .matches = matches };
-    winio_set_overlapped_callback(ovlp, (winio_overlapped_cb_fnc*) verify_cb, *res, true);
+    winio_set_overlapped_callback(ovlp, verify_cb, *res, true);
     return true;
 }
 
-static void identify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) {
+static void identify_cb(OVERLAPPED *ovlp, NTSTATUS status, void *context) {
+    tudor_async_res_t res = context;
     winmodule_set_cur(&tudor_adapter_dll->module);
     HRESULT hres;
     bool success = false, retry = false, found_match = false;
@@ -484,6 +488,6 @@ bool tudor_identify(struct tudor_device *device, bool *retry, bool *found_match,
 
     *res = async_new_res(device, ovlp);
     (*res)->args.identify = (struct async_args_identify) { .retry = retry, .found_match = found_match, .guid = guid, .finger = finger };
-    winio_set_overlapped_callback(ovlp, (winio_overlapped_cb_fnc*) identify_cb, *res, true);
+    winio_set_overlapped_callback(ovlp, identify_cb, *res, true);
     return true;
 }

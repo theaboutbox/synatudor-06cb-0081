@@ -75,6 +75,20 @@ trap 'rm -rf -- "$work_dir"' EXIT
 source_ref=${SYNA_TUDOR_SOURCE_REF:-HEAD}
 source_commit=$(git -C "$repo_dir" rev-parse --verify "$source_ref^{commit}" 2>/dev/null) || \
   die "Git ref does not resolve to a commit: $source_ref"
+
+# The wrapper and archive helper execute from the checkout, so require their
+# exact committed blobs before claiming that the selected Git tree is the sole
+# build input. Other modified and untracked worktree files are never read.
+for trusted_script in scripts/install scripts/make-source-archive; do
+  committed_blob=$(git -C "$repo_dir" rev-parse --verify \
+    "$source_commit:$trusted_script" 2>/dev/null) ||
+    die "$trusted_script is missing from $source_ref ($source_commit)"
+  worktree_blob=$(git -C "$repo_dir" hash-object --no-filters \
+    "$repo_dir/$trusted_script") || die "could not hash $trusted_script"
+  [[ $worktree_blob == "$committed_blob" ]] ||
+    die "$trusted_script differs from $source_ref ($source_commit); commit or restore it before building"
+done
+
 source_archive=$work_dir/synatudor-06cb-0081-0.1.0.tar.gz
 "$repo_dir/scripts/make-source-archive" "$source_archive" "$source_commit" >/dev/null
 source_sha256=$(sha256sum "$source_archive" | awk '{print $1}')

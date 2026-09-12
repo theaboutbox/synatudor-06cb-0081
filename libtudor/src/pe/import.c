@@ -54,22 +54,25 @@ bool pe_parse_import_dir(struct pe_file *pe, struct pe_data_dir *dir) {
             struct pe_import *import = &lib->imports[i];
             if(!pe->is_pe32_plus) {
                 uint32_t bits = pe_peek_mem_i32(pe, lookup_table_rva + i*sizeof(uint32_t));
-                if(bits & (1L << 31)) {
-                    import->ord = bits & ((1 << 16) - 1);
+                if(bits & (UINT32_C(1) << 31)) {
+                    import->ord = bits & UINT32_C(0xffff);
                     import->name = NULL;
                 } else {
                     import->ord = -1;
-                    import->name = pe_copy_mem_string(pe, (bits & ((1u << 31) - 1)) + 2);
+                    import->name = pe_copy_mem_string(
+                        pe, (bits & ~(UINT32_C(1) << 31)) + 2);
                 }
                 import->addr_off = addr_table_rva + i*sizeof(uint32_t);
             } else {
-                uint64_t bits = pe_peek_mem_i32(pe, lookup_table_rva + i*sizeof(uint64_t));
-                if(bits & (1L << 63)) {
-                    import->ord = bits & ((1 << 16) - 1);
+                uint64_t bits = pe_peek_mem_i64(
+                    pe, lookup_table_rva + i*sizeof(uint64_t));
+                if(bits & (UINT64_C(1) << 63)) {
+                    import->ord = bits & UINT64_C(0xffff);
                     import->name = NULL;
                 } else {
                     import->ord = -1;
-                    import->name = pe_copy_mem_string(pe, (bits & ((1u << 31) - 1)) + 2);
+                    import->name = pe_copy_mem_string(
+                        pe, (uint32_t)(bits & ~(UINT64_C(1) << 63)) + 2);
                 }
                 import->addr_off = addr_table_rva + i*sizeof(uint64_t);
             }

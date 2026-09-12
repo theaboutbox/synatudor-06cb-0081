@@ -7,7 +7,8 @@
 static pthread_rwlock_t modules_lock = PTHREAD_RWLOCK_INITIALIZER;
 static struct winmodule *modules_head;
 
-static void module_destr(struct winmodule *module) {
+static void module_destr(void *data) {
+    struct winmodule *module = (struct winmodule*) data;
     if(module->cmdline) return;
 
     //Free the module
@@ -35,7 +36,7 @@ struct winmodule *winmodule_find(const char *name) {
 void winmodule_register(struct winmodule *module) {
     cant_fail_ret(pthread_rwlock_wrlock(&modules_lock));
 
-    module->handle = winhandle_create(module, (winhandle_destr_fnc*) module_destr);
+    module->handle = winhandle_create(module, module_destr);
 
     module->prev = NULL;
     module->next = modules_head;

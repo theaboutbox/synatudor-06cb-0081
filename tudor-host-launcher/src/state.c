@@ -33,6 +33,7 @@ static const char *const allowed_properties[] = {
     "LastUpdateSystemTimeStamp",
     "OldCalDataDeleted",
     TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED,
+    TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION,
     "PairingContext",
     "PairingData",
     TUDOR_STATE_RESET_OWNERSHIP_REQUEST,

@@ -49,6 +49,16 @@ bcrypt_ecc_test = executable('bcrypt-ecc-test',
     install: false)
 test('bcrypt-ecc', bcrypt_ecc_test, timeout: 10)
 
+loader_callsite_test = executable('loader-callsite-test',
+    'tests/loader-callsite.c',
+    dependencies: [libtudor_dep],
+    include_directories: ['../libtudor/src'],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('loader-callsite', loader_callsite_test,
+    args: [driver_dlls[1]],
+    timeout: 10)
+
 winusb_borrowed_test = executable('winusb-borrowed-test',
     'tests/winusb-borrowed.c',
     dependencies: [thread_dep, libtudor_dep, libusb_dep],

@@ -91,6 +91,14 @@ __winfnc BOOL RSAENH_CPReleaseContext(HCRYPTPROV hProv, DWORD dwFlags);
 __winfnc BOOL RSAENH_CPImportKey(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataLen,
                                HCRYPTKEY hPubKey, DWORD dwFlags, HCRYPTKEY *phKey);
 
+__winfnc BOOL RSAENH_CPExportKey(HCRYPTPROV hProv, HCRYPTKEY hKey,
+                                HCRYPTKEY hPubKey, DWORD dwBlobType,
+                                DWORD dwFlags, BYTE *pbData,
+                                DWORD *pdwDataLen);
+
+__winfnc BOOL RSAENH_CPGenKey(HCRYPTPROV hProv, ALG_ID Algid, DWORD dwFlags,
+                             HCRYPTKEY *phKey);
+
 
 __winfnc BOOL RSAENH_CPCreateHash( HCRYPTPROV hProv, ALG_ID Algid, HCRYPTKEY hKey, DWORD dwFlags, HCRYPTHASH *phHash);
 
@@ -109,6 +117,16 @@ __winfnc BOOL RSAENH_CPDestroyKey(HCRYPTPROV hProv, HCRYPTKEY hKey);
 
 __winfnc BOOL RSAENH_CPDuplicateHash(HCRYPTPROV hUID, HCRYPTHASH hHash, DWORD *pdwReserved, 
                                    DWORD dwFlags, HCRYPTHASH *phHash);
+
+__winfnc BOOL RSAENH_CPSignHash(HCRYPTPROV hProv, HCRYPTHASH hHash,
+                               DWORD dwKeySpec, LPCWSTR sDescription,
+                               DWORD dwFlags, BYTE *pbSignature,
+                               DWORD *pdwSigLen);
+
+__winfnc BOOL RSAENH_CPVerifySignature(HCRYPTPROV hProv, HCRYPTHASH hHash,
+                                      const BYTE *pbSignature, DWORD dwSigLen,
+                                      HCRYPTKEY hPubKey,
+                                      LPCWSTR sDescription, DWORD dwFlags);
 
 __winfnc BOOL DllMainRSAENH(HINSTANCE hInstance, DWORD fdwReason, PVOID reserved);
 
@@ -247,6 +265,71 @@ __winfnc BOOL CryptImportKey(HCRYPTPROV hProv, const BYTE *pbData, DWORD dwDataL
 	return FALSE;
 }
 WINAPI(CryptImportKey)
+
+__winfnc BOOL CryptGenKey(HCRYPTPROV hProv, ALG_ID Algid, DWORD dwFlags,
+                          HCRYPTKEY *phKey)
+{
+    PCRYPTPROV prov = (PCRYPTPROV)hProv;
+    PCRYPTKEY key;
+
+    TRACE();
+    if(phKey) *phKey = 0;
+    if(!prov || !phKey || prov->dwMagic != MAGIC_CRYPTPROV) {
+        winerr_set_code(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    key = CRYPT_Alloc(sizeof(*key));
+    if(!key) {
+        winerr_set_code(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    key->dwMagic = MAGIC_CRYPTKEY;
+    key->pProvider = prov;
+    key->hPrivate = 0;
+
+    if(!RSAENH_CPGenKey(prov->hPrivate, Algid, dwFlags, &key->hPrivate)) {
+        DWORD error = GetErrorFromLib();
+        key->dwMagic = 0;
+        CRYPT_Free(key);
+        winerr_set_code(error);
+        return FALSE;
+    }
+
+    *phKey = (HCRYPTKEY)key;
+    return TRUE;
+}
+WINAPI(CryptGenKey)
+
+__winfnc BOOL CryptExportKey(HCRYPTKEY hKey, HCRYPTKEY hExpKey,
+                             DWORD dwBlobType, DWORD dwFlags, BYTE *pbData,
+                             DWORD *pdwDataLen)
+{
+    PCRYPTKEY key = (PCRYPTKEY)hKey;
+    PCRYPTKEY export_key = (PCRYPTKEY)hExpKey;
+    PCRYPTPROV prov;
+
+    TRACE();
+    if(!key || !pdwDataLen || !key->pProvider ||
+       key->dwMagic != MAGIC_CRYPTKEY ||
+       key->pProvider->dwMagic != MAGIC_CRYPTPROV ||
+       (export_key && (!export_key->pProvider ||
+                       export_key->dwMagic != MAGIC_CRYPTKEY ||
+                       export_key->pProvider->dwMagic != MAGIC_CRYPTPROV))) {
+        winerr_set_code(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    prov = key->pProvider;
+    if(!RSAENH_CPExportKey(prov->hPrivate, key->hPrivate,
+                          export_key ? export_key->hPrivate : 0,
+                          dwBlobType, dwFlags, pbData, pdwDataLen)) {
+        winerr_set_code(GetErrorFromLib());
+        return FALSE;
+    }
+    return TRUE;
+}
+WINAPI(CryptExportKey)
 
 __winfnc BOOL CryptDestroyKey(HCRYPTKEY hKey) {
     TRACE();
@@ -459,6 +542,98 @@ __winfnc BOOL CryptHashData (HCRYPTHASH hHash, const BYTE *pbData, DWORD dwDataL
 	return RSAENH_CPHashData(prov->hPrivate, hash->hPrivate, pbData, dwDataLen, dwFlags);
 }
 WINAPI(CryptHashData)
+
+__winfnc BOOL CryptSignHashW(HCRYPTHASH hHash, DWORD dwKeySpec,
+                             LPCWSTR sDescription, DWORD dwFlags,
+                             BYTE *pbSignature, DWORD *pdwSigLen)
+{
+    PCRYPTHASH hash = (PCRYPTHASH)hHash;
+    PCRYPTPROV prov;
+
+    TRACE();
+    if(!hash || !pdwSigLen || !hash->pProvider ||
+       hash->dwMagic != MAGIC_CRYPTHASH ||
+       hash->pProvider->dwMagic != MAGIC_CRYPTPROV) {
+        winerr_set_code(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    prov = hash->pProvider;
+    if(!RSAENH_CPSignHash(prov->hPrivate, hash->hPrivate, dwKeySpec,
+                         sDescription, dwFlags, pbSignature, pdwSigLen)) {
+        winerr_set_code(GetErrorFromLib());
+        return FALSE;
+    }
+    return TRUE;
+}
+WINAPI(CryptSignHashW)
+
+__winfnc BOOL CryptSignHashA(HCRYPTHASH hHash, DWORD dwKeySpec,
+                             LPCSTR sDescription, DWORD dwFlags,
+                             BYTE *pbSignature, DWORD *pdwSigLen)
+{
+    char16_t *description = sDescription ? winstr_from_str(sDescription) : NULL;
+    BOOL result;
+
+    if(sDescription && !description) {
+        winerr_set_code(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    result = CryptSignHashW(hHash, dwKeySpec, description, dwFlags,
+                           pbSignature, pdwSigLen);
+    free(description);
+    return result;
+}
+WINAPI(CryptSignHashA)
+
+__winfnc BOOL CryptVerifySignatureW(HCRYPTHASH hHash,
+                                    const BYTE *pbSignature, DWORD dwSigLen,
+                                    HCRYPTKEY hPubKey,
+                                    LPCWSTR sDescription, DWORD dwFlags)
+{
+    PCRYPTHASH hash = (PCRYPTHASH)hHash;
+    PCRYPTKEY key = (PCRYPTKEY)hPubKey;
+    PCRYPTPROV prov;
+
+    TRACE();
+    if(!hash || !key || !hash->pProvider || !key->pProvider ||
+       hash->dwMagic != MAGIC_CRYPTHASH ||
+       key->dwMagic != MAGIC_CRYPTKEY ||
+       hash->pProvider->dwMagic != MAGIC_CRYPTPROV ||
+       key->pProvider->dwMagic != MAGIC_CRYPTPROV) {
+        winerr_set_code(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    prov = hash->pProvider;
+    if(!RSAENH_CPVerifySignature(prov->hPrivate, hash->hPrivate,
+                                pbSignature, dwSigLen, key->hPrivate,
+                                sDescription, dwFlags)) {
+        winerr_set_code(GetErrorFromLib());
+        return FALSE;
+    }
+    return TRUE;
+}
+WINAPI(CryptVerifySignatureW)
+
+__winfnc BOOL CryptVerifySignatureA(HCRYPTHASH hHash,
+                                    const BYTE *pbSignature, DWORD dwSigLen,
+                                    HCRYPTKEY hPubKey,
+                                    LPCSTR sDescription, DWORD dwFlags)
+{
+    char16_t *description = sDescription ? winstr_from_str(sDescription) : NULL;
+    BOOL result;
+
+    if(sDescription && !description) {
+        winerr_set_code(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    result = CryptVerifySignatureW(hHash, pbSignature, dwSigLen, hPubKey,
+                                   description, dwFlags);
+    free(description);
+    return result;
+}
+WINAPI(CryptVerifySignatureA)
 
 __winfnc BOOL CryptSetKeyParam (HCRYPTKEY hKey, DWORD dwParam, const BYTE *pbData, DWORD dwFlags)
 {
@@ -681,7 +856,9 @@ __winfnc BOOL CryptGenRandom (HCRYPTPROV hProv, DWORD dwLen, BYTE *pbBuffer)
 		return FALSE;
 	}
 
-	return RSAENH_CPGenRandom(prov->hPrivate, dwLen, pbBuffer);
+	BOOL result = RSAENH_CPGenRandom(prov->hPrivate, dwLen, pbBuffer);
+	if(!result) winerr_set_code(GetErrorFromLib());
+	return result;
 
 }
 WINAPI(CryptGenRandom)

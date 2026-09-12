@@ -40,6 +40,8 @@
 #include "bcrypt_internal.h"
 #include "secrets.h"
 
+extern BOOL gen_rand_impl(BYTE *buffer, DWORD length);
+
 // #include "wine/debug.h"
 #include "wine/heap.h"
 #include "wine/library.h"
@@ -129,7 +131,7 @@ NTSTATUS WINAPI BCryptGenRandom(BCRYPT_ALG_HANDLE handle, UCHAR *buffer, ULONG c
     const DWORD supported_flags = BCRYPT_USE_SYSTEM_PREFERRED_RNG;
     struct algorithm *algorithm = handle;
 
-    TRACE("%p, %p, %u, %08x - semi-stub\n", handle, buffer, count, flags);
+    TRACE("%p, %p, %u, %08x\n", handle, buffer, count, flags);
 
     if (!algorithm)
     {
@@ -156,12 +158,8 @@ NTSTATUS WINAPI BCryptGenRandom(BCRYPT_ALG_HANDLE handle, UCHAR *buffer, ULONG c
         return STATUS_SUCCESS;
 
     if (algorithm || (flags & BCRYPT_USE_SYSTEM_PREFERRED_RNG))
-    {
-
-        bzero(buffer, count);
-        // if (RtlGenRandom(buffer, count))
-        return STATUS_SUCCESS;
-    }
+        return gen_rand_impl(buffer, count) ? STATUS_SUCCESS :
+                                             STATUS_INTERNAL_ERROR;
 
     FIXME("called with unsupported parameters, returning error\n");
     return STATUS_NOT_IMPLEMENTED;

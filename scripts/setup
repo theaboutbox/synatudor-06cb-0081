@@ -16,9 +16,9 @@ usage() {
   cat <<'EOF'
 Usage: synatudor-setup [--finger FINGER] [--no-pam] [--calibrate-only]
 
-Initializes a Synaptics 06cb:0081 reader, recovers incompatible ownership with
-explicit consent when necessary, enrolls and verifies one finger, then
-configures PAM on Omarchy. Password fallback is retained.
+Initializes a Synaptics 06cb:0081 reader, enrolls and verifies one finger,
+then configures PAM on Omarchy. Password fallback is retained. This command
+never issues the separate vendor-unpair maintenance operation.
 
 Options:
   --finger FINGER    Finger to enroll (default: right-index-finger).
@@ -128,6 +128,43 @@ ownership_failure_detected() {
   printf '%s\n' "$value"
 }
 
+ownership_reset_pending_validation() {
+  local extension candidate metadata size value found=0
+  local path=$sensor_state_dir/OwnershipResetPendingValidation.bool
+
+  for extension in blob uint bool; do
+    candidate=$sensor_state_dir/OwnershipResetPendingValidation.$extension
+    if sudo test -e "$candidate" 2>/dev/null ||
+       sudo test -L "$candidate" 2>/dev/null; then
+      ((++found))
+      [[ $extension == bool ]] ||
+        die 'the ownership-reset validation marker has an invalid type'
+    fi
+  done
+  (( found <= 1 )) ||
+    die 'the ownership-reset validation marker has conflicting types'
+  if (( found == 0 )); then
+    printf 'missing\n'
+    return
+  fi
+
+  sudo test -f "$path" 2>/dev/null && sudo test ! -L "$path" 2>/dev/null ||
+    die 'the ownership-reset validation marker is not a regular file'
+  metadata=$(sudo stat -Lc '%u:%g:%a' -- "$path" 2>/dev/null) ||
+    die 'could not inspect the ownership-reset validation marker'
+  [[ $metadata == 0:0:600 ]] ||
+    die 'the ownership-reset validation marker must be root:root with mode 0600'
+  size=$(sudo stat -Lc '%s' -- "$path" 2>/dev/null) ||
+    die 'could not inspect the ownership-reset validation marker size'
+  [[ $size == 2 ]] ||
+    die 'the ownership-reset validation marker is malformed'
+  value=$(sudo cat -- "$path" 2>/dev/null) ||
+    die 'could not read the ownership-reset validation marker'
+  [[ $value == 0 || $value == 1 ]] ||
+    die 'the ownership-reset validation marker is malformed'
+  printf '%s\n' "$value"
+}
+
 probe_reader_once() {
   printf 'Initializing the reader once; this can take up to 30 seconds...\n'
   timeout --kill-after=2s 30s fprintd-list "$target_user"
@@ -234,21 +271,22 @@ command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
 command -v timeout >/dev/null || die 'timeout is unavailable'
 command -v od >/dev/null || die 'od is unavailable'
 [[ -x /usr/bin/synatudor-reset ]] || die 'synatudor-reset is unavailable'
-[[ -x /usr/bin/synatudor-reset-ownership ]] || \
-  die 'synatudor-reset-ownership is unavailable'
+
+sudo -v
+
+pending_validation=$(ownership_reset_pending_validation)
+if [[ $pending_validation == 1 ]]; then
+  die 'a previous ownership reset has not passed normal-startup validation; no additional reset was issued. Run synatudor-reset-ownership to retry its non-destructive validation step'
+fi
 
 printf '%s\n' \
   'The first initialization calibrates this individual reader.' \
   'Keep the fingerprint sensor completely uncovered until enrollment starts.' \
-  'Continuing authorizes one ownership reset if the reader rejects its saved identity.' \
-  'That reset permanently erases every fingerprint on the reader, including Windows Hello fingerprints.' \
-  "It also removes this driver's saved fingerprint references for every local user." \
-  'Older installs did not tie legacy pairing files to a reader, so it backs up and removes those records for every reader managed by this driver.' \
-  'It also backs up old unscoped calibration and reuses it only when it identifies this physical reader.'
-read -r -p 'Remove your finger, then type YES to continue and allow that reset if required: ' consent
+  'Setup may retry ordinary initialization up to three times while pairing survives a USB re-enumeration.' \
+  'It will not issue the separate vendor-unpair maintenance operation.'
+read -r -p 'Remove your finger, then type YES to continue: ' consent
 [[ $consent == YES ]] || die 'setup canceled'
 unset consent
-sudo -v
 
 calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
 case $calibration in
@@ -281,34 +319,33 @@ fi
 
 sudo /usr/bin/synatudor-reset
 
-probe_status=0
-probe_reader_once || probe_status=$?
-failure_detected=$(ownership_failure_detected)
-if (( probe_status != 0 )) && [[ $failure_detected == 1 ]]; then
-  failure_count=$(ownership_failure_count)
-  printf '%s\n' \
-    "The reader rejected its saved ownership identity (saved failure count: $failure_count)." \
-    'Running the one ownership reset approved above before any enrollment attempt.'
-  sudo /usr/bin/synatudor-reset-ownership --yes
-
-  # The reset re-enumerates USB and removes the incompatible reader-scoped
-  # identity. Refresh the sysfs path before making exactly one clean attempt.
-  sensor_path=$(find_sensor)
-  sensor_identity "$sensor_path"
-  unset sensor_path
-
+for pairing_attempt in 1 2 3; do
   probe_status=0
   probe_reader_once || probe_status=$?
   failure_detected=$(ownership_failure_detected)
-  if [[ $failure_detected == 1 ]]; then
-    failure_count=$(ownership_failure_count)
-    die "the reader still rejected its new identity after ownership reset (saved failure count: $failure_count); refusing to repeat the destructive reset"
+  # The bounded client only triggers startup. The marker is authoritative:
+  # the host writes zero only after the joined pairing worker, nonnull capture
+  # strategy, and complete ready pipeline have all succeeded.
+  if [[ $failure_detected == 0 ]]; then
+    if (( probe_status != 0 )); then
+      printf 'The reader reached the safe capture state even though the triggering client exited with status %s.\n' \
+        "$probe_status" >&2
+    fi
+    break
   fi
+
+  if (( pairing_attempt < 3 )); then
+    printf 'Pairing did not reach the safe capture state on attempt %s; restarting the ordinary USB session.\n' \
+      "$pairing_attempt" >&2
+    sudo /usr/bin/synatudor-reset
+  fi
+done
+
+if [[ $failure_detected != 0 ]]; then
+  failure_count=$(ownership_failure_count)
+  die "reader pairing did not reach the safe capture state after three ordinary starts (vendor attempt counter: $failure_count). No vendor-unpair request was issued; inspect the service log before choosing synatudor-reset-ownership explicitly"
 fi
-[[ $probe_status == 0 ]] || \
-  die 'reader initialization failed; the ownership reset was not repeated'
-[[ $failure_detected == 0 ]] || \
-  die 'reader initialization returned success without a valid current-run ownership status; refusing to continue'
+unset pairing_attempt
 
 calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
 if [[ $calibration == missing || $calibration == incomplete ]]; then
@@ -320,7 +357,7 @@ if [[ $calibration == missing || $calibration == incomplete ]]; then
   done
 fi
 [[ $calibration == valid ]] || \
-  die 'the single initialization attempt did not produce calibration for the attached physical reader'
+  die 'the ordinary initialization attempts did not produce calibration for the attached physical reader'
 printf 'Reader-specific calibration is valid and stored privately under /var/lib/tudor.\n'
 
 if (( calibrate_only )); then

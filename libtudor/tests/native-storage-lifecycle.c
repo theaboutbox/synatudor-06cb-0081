@@ -5,6 +5,8 @@
 
 #include "tudor/internal.h"
 
+extern void tudor_internal_test_set_pairing_strategy_ready(bool ready);
+
 enum lifecycle_event {
     SENSOR_ATTACH,
     ENGINE_ATTACH,
@@ -340,6 +342,7 @@ int main(void) {
     tudor_sensor_adapter = &mock_sensor;
     tudor_engine_adapter = &mock_engine;
     tudor_native_storage_adapter = &mock_storage;
+    tudor_internal_test_set_pairing_strategy_ready(true);
 
     test_success(false);
     test_success(true);
@@ -351,5 +354,6 @@ int main(void) {
     tudor_engine_adapter = saved_engine;
     tudor_sensor_adapter = saved_sensor;
     tudor_adapter_dll = saved_adapter;
+    tudor_internal_test_set_pairing_strategy_ready(false);
     return 0;
 }

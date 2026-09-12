@@ -230,6 +230,8 @@ static void test_state_round_trip(void) {
         device_dir, "WakeFromSleepState.bool", NULL);
     gchar *ownership_failure_path = g_build_filename(
         device_dir, "OwnershipFailureDetected.bool", NULL);
+    gchar *pending_validation_path = g_build_filename(
+        device_dir, "OwnershipResetPendingValidation.bool", NULL);
     gchar *reset_request_path = g_build_filename(
         device_dir, "ResetOwnershipRequest.bool", NULL);
     gchar *reset_result_path = g_build_filename(
@@ -324,6 +326,8 @@ static void test_state_round_trip(void) {
     assert_load_missing(sockets[1], "WakeFromSleepState");
     assert_load_missing(
         sockets[1], TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED);
+    assert_load_missing(
+        sockets[1], TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION);
     assert_load_missing(sockets[1], TUDOR_STATE_RESET_OWNERSHIP_REQUEST);
     assert_load_missing(sockets[1], TUDOR_STATE_RESET_OWNERSHIP_RESULT);
     assert_load_rejected(sockets[1], "UnexpectedProperty");
@@ -393,6 +397,19 @@ static void test_state_round_trip(void) {
                     &false_value, sizeof(false_value));
     g_byte_array_unref(loaded);
     g_assert_cmpint(g_stat(ownership_failure_path, &statbuf), ==, 0);
+    g_assert_cmpuint(statbuf.st_mode & 0777, ==, 0600);
+
+    send_store(sockets[1],
+               TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION,
+               TUDOR_STATE_VALUE_BOOL, &true_value, sizeof(true_value));
+    loaded = send_load(
+        sockets[1], TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION,
+        TUDOR_STATE_VALUE_BOOL);
+    g_assert_cmpuint(loaded->len, ==, sizeof(true_value));
+    g_assert_cmpmem(loaded->data, loaded->len,
+                    &true_value, sizeof(true_value));
+    g_byte_array_unref(loaded);
+    g_assert_cmpint(g_stat(pending_validation_path, &statbuf), ==, 0);
     g_assert_cmpuint(statbuf.st_mode & 0777, ==, 0600);
 
     send_store(sockets[1], TUDOR_STATE_RESET_OWNERSHIP_REQUEST,
@@ -490,6 +507,7 @@ static void test_state_round_trip(void) {
     g_assert_cmpint(g_unlink(unpairing_context_path), ==, 0);
     g_assert_cmpint(g_unlink(wake_from_sleep_path), ==, 0);
     g_assert_cmpint(g_unlink(ownership_failure_path), ==, 0);
+    g_assert_cmpint(g_unlink(pending_validation_path), ==, 0);
     g_assert_cmpint(g_unlink(reset_request_path), ==, 0);
     g_assert_cmpint(g_unlink(reset_result_path), ==, 0);
     g_assert_cmpint(g_unlink(bootstrap), ==, 0);
@@ -501,6 +519,7 @@ static void test_state_round_trip(void) {
     g_free(devices_dir);
     g_free(wake_from_sleep_path);
     g_free(ownership_failure_path);
+    g_free(pending_validation_path);
     g_free(reset_result_path);
     g_free(reset_request_path);
     g_free(unpairing_context_path);

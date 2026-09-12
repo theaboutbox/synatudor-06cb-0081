@@ -65,7 +65,9 @@ static bool cleanup_action(struct handler_state *state) {
     return true;
 }
 
-static void enroll_cb(tudor_async_res_t *res, bool success, struct handler_state *state) {
+static void enroll_cb(tudor_async_res_t res, bool success, void *context) {
+    struct handler_state *state = context;
+    (void)res;
     cant_fail_ret(pthread_mutex_lock(&state->lock));
 
     if(!cleanup_action(state)) {
@@ -166,13 +168,15 @@ static void enroll_cb(tudor_async_res_t *res, bool success, struct handler_state
         }
 
         //Only set the callback now to avoid reentrance issues
-        tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) enroll_cb, state);
+        tudor_set_async_callback(state->async_res, enroll_cb, state);
     }
 
     cant_fail_ret(pthread_mutex_unlock(&state->lock));
 }
 
-static void verify_cb(tudor_async_res_t *res, bool success, struct handler_state *state) {
+static void verify_cb(tudor_async_res_t res, bool success, void *context) {
+    struct handler_state *state = context;
+    (void)res;
     cant_fail_ret(pthread_mutex_lock(&state->lock));
 
     if(!cleanup_action(state)) {
@@ -203,7 +207,9 @@ static void verify_cb(tudor_async_res_t *res, bool success, struct handler_state
     cant_fail_ret(pthread_mutex_unlock(&state->lock));
 }
 
-static void identify_cb(tudor_async_res_t *res, bool success, struct handler_state *state) {
+static void identify_cb(tudor_async_res_t res, bool success, void *context) {
+    struct handler_state *state = context;
+    (void)res;
     cant_fail_ret(pthread_mutex_lock(&state->lock));
 
     if(!cleanup_action(state)) {
@@ -364,7 +370,7 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
                 abort();
             }
             log_debug("Started enroll action");
-            tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) enroll_cb, state);
+            tudor_set_async_callback(state->async_res, enroll_cb, state);
 
             //Send ACK
             send_ack(state->ipc_sock);
@@ -388,7 +394,7 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
                 abort();
             }
             log_debug("Started verify action");
-            tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) verify_cb, state);
+            tudor_set_async_callback(state->async_res, verify_cb, state);
 
             //Send ACK
             send_ack(state->ipc_sock);
@@ -407,7 +413,7 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
                 abort();
             }
             log_debug("Started identify action");
-            tudor_set_async_callback(state->async_res, (tudor_async_cb_fnc*) identify_cb, state);
+            tudor_set_async_callback(state->async_res, identify_cb, state);
 
             //Send ACK
             send_ack(state->ipc_sock);

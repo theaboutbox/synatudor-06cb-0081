@@ -21,7 +21,10 @@ Usage: synatudor-reset
 
 Resets one connected Synaptics 06cb:0081 reader and restarts its fingerprint
 services. No enrollment, pairing, identity, or calibration state is removed;
-only the transient ownership-failure marker is cleared.
+only the previous safe-open status marker is cleared.
+
+If ownership-reset validation is still pending, resume it with
+synatudor-reset-ownership instead. This helper will not bypass that recovery.
 EOF
 }
 
@@ -172,10 +175,74 @@ ownership_transaction_is_absent() {
   done
 }
 
+ownership_validation_allows_reset() {
+  local extension path metadata size value found=0
+  local marker=$sensor_state_dir/OwnershipResetPendingValidation.bool
+  local devices_dir=${sensor_state_dir%/*}
+  local state_root=${devices_dir%/*}
+
+  for extension in blob uint bool; do
+    path=$sensor_state_dir/OwnershipResetPendingValidation.$extension
+    [[ -e $path || -L $path ]] || continue
+    ((++found))
+    if [[ $extension != bool ]]; then
+      printf '%s\n' \
+        'error: the ownership-reset validation marker has an invalid type; run synatudor-reset-ownership instead' >&2
+      return 1
+    fi
+  done
+  if (( found > 1 )); then
+    printf '%s\n' \
+      'error: the ownership-reset validation marker has conflicting types; run synatudor-reset-ownership instead' >&2
+    return 1
+  fi
+  (( found == 1 )) || return 0
+
+  for path in "$state_root" "$devices_dir" "$sensor_state_dir"; do
+    if [[ ! -d $path || -L $path ]]; then
+      printf 'error: %s is not a real state directory\n' "$path" >&2
+      return 1
+    fi
+    metadata=$(stat -Lc '%u:%g:%a' -- "$path") || return 1
+    if [[ $metadata != 0:0:700 ]]; then
+      printf 'error: %s must be root:root with mode 0700\n' "$path" >&2
+      return 1
+    fi
+  done
+
+  if [[ ! -f $marker || -L $marker ]]; then
+    printf '%s\n' \
+      'error: the ownership-reset validation marker is not a regular file' >&2
+    return 1
+  fi
+  metadata=$(stat -Lc '%u:%g:%a' -- "$marker") || return 1
+  size=$(stat -Lc '%s' -- "$marker") || return 1
+  if [[ $metadata != 0:0:600 || $size != 2 ]]; then
+    printf '%s\n' \
+      'error: the ownership-reset validation marker is not a private status file' >&2
+    return 1
+  fi
+  value=$(<"$marker")
+  case $value in
+    0) return 0 ;;
+    1)
+      printf '%s\n' \
+        'error: ownership-reset validation is pending; run synatudor-reset-ownership instead' >&2
+      return 1
+      ;;
+    *)
+      printf '%s\n' \
+        'error: the ownership-reset validation marker is malformed' >&2
+      return 1
+      ;;
+  esac
+}
+
 adopt_or_create_service_masks() {
   local unit
   if (( ${#temporary_runtime_masks[@]} )); then return 0; fi
 
+  ownership_validation_allows_reset || return 1
   ownership_transaction_is_absent || {
     printf '%s\n' \
       'error: an ownership-reset transaction is pending; run synatudor-reset-ownership instead' >&2

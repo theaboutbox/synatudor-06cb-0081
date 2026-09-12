@@ -77,23 +77,31 @@ struct winwdf_driver *tudor_wdf_driver;
  * observer also checks the loaded module and exact CaptureThread address, so
  * an unrelated Windows worker can never enter this path. */
 static constexpr uintptr_t SYNA_CAPTURE_THREAD_RVA = 0x1c40c;
+static constexpr uintptr_t SYNA_PAIRING_THREAD_RVA = 0x21d1c;
+static constexpr size_t SYNA_PAIRING_THREAD_HANDLE_OFFSET = 0x1a8;
+static constexpr size_t SYNA_PROTOCOL_STRATEGY_OFFSET = 0x1c0;
 static constexpr useconds_t SYNA_CAPTURE_RECOVERY_DELAY_US = 250000;
 static constexpr ULONG SYNA_CAPTURE_IOCTL = 0x440014;
 static constexpr ULONG SYNA_RESET_OWNERSHIP_IOCTL = 0x442040;
-static constexpr HRESULT SYNA_OWNERSHIP_FAILURE_CAP_STATUS = 0x800710dfu;
+static constexpr DWORD SYNA_WAIT_TIMEOUT = 0x00000102u;
+static constexpr unsigned int SYNA_PAIRING_WORKER_WAIT_MS = 15000;
 /* Leave enough room for the host to persist a terminal result before the
  * surrounding fprintd/helper process deadline. */
 static constexpr unsigned int SYNA_RESET_OWNERSHIP_WAIT_MS = 15000;
 
-/* A restored counter describes an earlier attempt and must not block this
- * one.  Only an exact VT_UINT write made after OnPrepareHardware starts is
- * evidence that the current ownership handshake failed.  Latch nonzero
- * writes so a later zero cannot hide a failure before the init thread checks
- * it.  uint64_t leaves every possible 32-bit property value available. */
+/* This vendor counter records failed DoPairing invocations, including
+ * recoverable multi-process transitions.  Keep the latest value for a useful
+ * diagnostic, but never use a nonzero value alone as an ownership verdict or
+ * as a reason to expose/block capture. */
 static constexpr uint64_t OWNERSHIP_FAILURE_NOT_WRITTEN = UINT64_MAX;
 static std::atomic<uint64_t> ownership_failure_write{
     OWNERSHIP_FAILURE_NOT_WRITTEN
 };
+static std::atomic<bool> pairing_strategy_ready{false};
+static std::atomic<bool> suppress_pairing_worker{false};
+static std::atomic<bool> pairing_worker_was_suppressed{false};
+static void *vendor_device_base;
+static void *vendor_protocol_strategy(void);
 
 static void ownership_failure_reset(void) {
     ownership_failure_write.store(OWNERSHIP_FAILURE_NOT_WRITTEN,
@@ -106,16 +114,7 @@ static void ownership_failure_observe(const std::string& name,
        value->vt != VT_UINT)
         return;
 
-    const uint64_t count = value->uintVal;
-    if(count != 0) {
-        ownership_failure_write.store(count, std::memory_order_release);
-        return;
-    }
-
-    /* Record an explicit zero only while no failure has been observed. */
-    uint64_t expected = OWNERSHIP_FAILURE_NOT_WRITTEN;
-    ownership_failure_write.compare_exchange_strong(
-        expected, 0, std::memory_order_release, std::memory_order_relaxed);
+    ownership_failure_write.store(value->uintVal, std::memory_order_release);
 }
 
 static uint64_t ownership_failure_observed(void) {
@@ -130,37 +129,76 @@ static void ownership_failure_store_marker(bool detected) {
                         TUDOR_STATE_VALUE_BOOL, &value, sizeof(value));
 }
 
-static void ownership_failure_start_init(bool ownership_reset_mode) {
-    /* Clear a stale result at the earliest normal initialization boundary,
-     * before an unrelated DLL or hardware failure can end this run. */
-    if(!ownership_reset_mode) ownership_failure_store_marker(false);
+static void ownership_failure_arm_validation(bool ownership_reset_mode) {
+    /* Replace a stale success before any fallible normal initialization work.
+     * Missing/true therefore means "not yet proven ready" and only the full
+     * pipeline-open boundary below can publish false. */
+    if(!ownership_reset_mode) ownership_failure_store_marker(true);
 }
 
-static void ownership_failure_record_prepare_status(
-    HRESULT status, bool ownership_reset_mode) {
-    if(!ownership_reset_mode &&
-       status == SYNA_OWNERSHIP_FAILURE_CAP_STATUS)
-        ownership_failure_store_marker(true);
+static void pairing_pending_validation_complete(void) {
+    if(!tudor_get_state_fnc || !tudor_set_state_fnc) return;
+
+    enum tudor_state_value_type type = TUDOR_STATE_VALUE_BLOB;
+    void *data = nullptr;
+    size_t data_size = 0;
+    if(!tudor_get_state_fnc(TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION,
+                            &type, &data, &data_size))
+        return;
+
+    const bool pending = type == TUDOR_STATE_VALUE_BOOL &&
+                         data_size == sizeof(uint8_t) && data &&
+                         *(const uint8_t*)data == 1;
+    const bool completed = type == TUDOR_STATE_VALUE_BOOL &&
+                           data_size == sizeof(uint8_t) && data &&
+                           *(const uint8_t*)data == 0;
+    free(data);
+
+    if(completed) return;
+    if(!pending) {
+        log_error("Ownership-reset pending-validation state is malformed; "
+                  "leaving it unchanged");
+        return;
+    }
+
+    /* A successful ordinary open may complete an explicitly armed recovery,
+     * but it must not create a completion marker on its own.  The durable
+     * zero is retained so a later helper invocation cannot mistake the
+     * completed transaction for authorization to unpair again. */
+    const uint8_t value = 0;
+    tudor_set_state_fnc(TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION,
+                        TUDOR_STATE_VALUE_BOOL, &value, sizeof(value));
 }
 
-static bool ownership_failure_should_reject(bool ownership_reset_mode) {
+static bool pairing_strategy_reject(const char *stage,
+                                    bool ownership_reset_mode) {
     if(ownership_reset_mode) return false;
 
-    const uint64_t count = ownership_failure_observed();
-    return count != OWNERSHIP_FAILURE_NOT_WRITTEN && count != 0;
+    if(pairing_strategy_ready.load(std::memory_order_acquire) &&
+       vendor_protocol_strategy())
+        return false;
+
+    pairing_strategy_ready.store(false, std::memory_order_release);
+    ownership_failure_store_marker(true);
+    log_error("Vendor pairing did not initialize its capture strategy "
+              "during %s; refusing to expose an unsafe adapter", stage);
+    return true;
 }
 
-static bool ownership_failure_reject_init(const char *stage,
-                                          bool ownership_reset_mode) {
-    if(!ownership_failure_should_reject(ownership_reset_mode)) return false;
+static bool pairing_worker_start_filter(struct winmodule *module,
+                                        void *start_proc,
+                                        void *start_param) {
+    if(!suppress_pairing_worker.load(std::memory_order_acquire) ||
+       !tudor_driver_dll || !tudor_driver_dll->image.base_addr ||
+       module != &tudor_driver_dll->module ||
+       start_proc != static_cast<uint8_t*>(
+                         tudor_driver_dll->image.base_addr) +
+                         SYNA_PAIRING_THREAD_RVA ||
+       start_param != vendor_device_base)
+        return true;
 
-    const uint64_t count = ownership_failure_observed();
-    ownership_failure_store_marker(true);
-    log_error("Vendor ownership handshake failed during %s "
-              "(SetOwnershipFailureCount=%llu); refusing to expose an "
-              "unsafe adapter",
-              stage, (unsigned long long) count);
-    return true;
+    pairing_worker_was_suppressed.store(true, std::memory_order_release);
+    return false;
 }
 
 /* MyRequest is defined below.  This helper atomically validates and claims a
@@ -1543,6 +1581,18 @@ static bool capture_request_recover(uint64_t request_generation,
 }
 
 #ifdef TUDOR_RECOVERY_TEST_HOOK
+extern "C" __attribute__((visibility("hidden")))
+void tudor_internal_test_set_pairing_strategy_ready(bool ready) {
+    alignas(void*) static uint8_t fake_device[
+        SYNA_PROTOCOL_STRATEGY_OFFSET + sizeof(void*)] = {};
+    void *strategy = ready ? fake_device : nullptr;
+
+    memcpy(fake_device + SYNA_PROTOCOL_STRATEGY_OFFSET, &strategy,
+           sizeof(strategy));
+    vendor_device_base = ready ? fake_device : nullptr;
+    pairing_strategy_ready.store(ready, std::memory_order_release);
+}
+
 class RecoveryTestCancelCallback final : public IRequestCallbackCancel {
 public:
     std::atomic<unsigned int> calls{0};
@@ -1649,99 +1699,182 @@ int tudor_internal_test_ownership_failure_guard(void) {
 
     value.uintVal = 0;
     ownership_failure_observe("SetOwnershipFailureCount", &value);
-    if(ownership_failure_observed() != 3) return 6;
+    if(ownership_failure_observed() != 0) return 6;
 
-    if(!ownership_failure_should_reject(false)) return 7;
-    if(ownership_failure_should_reject(true)) return 8;
+    alignas(void*) uint8_t fake_device[
+        SYNA_PROTOCOL_STRATEGY_OFFSET + sizeof(void*)] = {};
+    void *saved_device_base = vendor_device_base;
+    bool saved_ready =
+        pairing_strategy_ready.load(std::memory_order_acquire);
+    vendor_device_base = fake_device;
+    pairing_strategy_ready.store(false, std::memory_order_release);
+    int result = 0;
+    if(!pairing_strategy_reject("guard test", false)) result = 7;
+    if(!result && pairing_strategy_reject("guard test", true)) result = 8;
+
+    void *fake_strategy = fake_device;
+    memcpy(fake_device + SYNA_PROTOCOL_STRATEGY_OFFSET, &fake_strategy,
+           sizeof(fake_strategy));
+    pairing_strategy_ready.store(true, std::memory_order_release);
+    if(!result && pairing_strategy_reject("guard test", false)) result = 9;
+
+    fake_strategy = nullptr;
+    memcpy(fake_device + SYNA_PROTOCOL_STRATEGY_OFFSET, &fake_strategy,
+           sizeof(fake_strategy));
+    if(!result && !pairing_strategy_reject("guard test", false)) result = 10;
+
+    vendor_device_base = saved_device_base;
+    pairing_strategy_ready.store(saved_ready, std::memory_order_release);
 
     ownership_failure_reset();
-    if(ownership_failure_observed() != OWNERSHIP_FAILURE_NOT_WRITTEN)
-        return 9;
-    return 0;
+    if(!result && ownership_failure_observed() !=
+                  OWNERSHIP_FAILURE_NOT_WRITTEN)
+        result = 11;
+    return result;
 }
 
-static unsigned int ownership_marker_test_writes;
+static unsigned int ownership_marker_test_failure_writes;
+static unsigned int ownership_marker_test_pending_writes;
+static unsigned int ownership_marker_test_pending_reads;
 static bool ownership_marker_test_valid;
-static uint8_t ownership_marker_test_values[4];
-static uint64_t ownership_marker_test_observations[4];
+static uint8_t ownership_marker_test_failure_value;
+static uint8_t ownership_marker_test_pending_value;
+static int ownership_marker_test_pending_load;
+
+static bool ownership_marker_test_load(
+    const char *name, enum tudor_state_value_type *type,
+    void **data, size_t *data_size) {
+    if(strcmp(name,
+              TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION) != 0) {
+        ownership_marker_test_valid = false;
+        return false;
+    }
+
+    ownership_marker_test_pending_reads++;
+    *data = nullptr;
+    *data_size = 0;
+    if(ownership_marker_test_pending_load < 0) return false;
+
+    *type = ownership_marker_test_pending_load == 2
+        ? TUDOR_STATE_VALUE_UINT32 : TUDOR_STATE_VALUE_BOOL;
+    *data_size = ownership_marker_test_pending_load == 2
+        ? sizeof(uint32_t) : sizeof(uint8_t);
+    *data = malloc(*data_size);
+    if(!*data) {
+        ownership_marker_test_valid = false;
+        *data_size = 0;
+        return false;
+    }
+    memset(*data, 0, *data_size);
+    if(ownership_marker_test_pending_load == 1)
+        *(uint8_t*)*data = 1;
+    return true;
+}
 
 static void ownership_marker_test_store(
     const char *name, enum tudor_state_value_type type,
     const void *data, size_t data_size) {
-    if(ownership_marker_test_writes >= 4 ||
-       strcmp(name, TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED) != 0 ||
-       type != TUDOR_STATE_VALUE_BOOL || data_size != sizeof(uint8_t) ||
+    if(type != TUDOR_STATE_VALUE_BOOL || data_size != sizeof(uint8_t) ||
        !data || *(const uint8_t*) data > 1) {
         ownership_marker_test_valid = false;
         return;
     }
 
-    const unsigned int index = ownership_marker_test_writes++;
-    ownership_marker_test_values[index] = *(const uint8_t*) data;
-    ownership_marker_test_observations[index] =
-        ownership_failure_observed();
+    if(strcmp(name, TUDOR_STATE_OWNERSHIP_FAILURE_DETECTED) == 0) {
+        ownership_marker_test_failure_writes++;
+        ownership_marker_test_failure_value = *(const uint8_t*)data;
+    } else if(strcmp(name,
+                     TUDOR_STATE_OWNERSHIP_RESET_PENDING_VALIDATION) == 0) {
+        ownership_marker_test_pending_writes++;
+        ownership_marker_test_pending_value = *(const uint8_t*)data;
+    } else {
+        ownership_marker_test_valid = false;
+    }
 }
 
 extern "C" __attribute__((visibility("hidden")))
 int tudor_internal_test_ownership_failure_marker(void) {
-    auto previous_state_callback = tudor_set_state_fnc;
+    auto previous_get_state_callback = tudor_get_state_fnc;
+    auto previous_set_state_callback = tudor_set_state_fnc;
+    tudor_get_state_fnc = ownership_marker_test_load;
     tudor_set_state_fnc = ownership_marker_test_store;
-    ownership_marker_test_writes = 0;
+    ownership_marker_test_failure_writes = 0;
+    ownership_marker_test_pending_writes = 0;
+    ownership_marker_test_pending_reads = 0;
     ownership_marker_test_valid = true;
-
-    PROPVARIANT value = {};
-    value.vt = VT_UINT;
-    value.uintVal = 3;
-    ownership_failure_observe("SetOwnershipFailureCount", &value);
-
     int result = 0;
-    ownership_failure_start_init(false);
-    if(!ownership_marker_test_valid || ownership_marker_test_writes != 1 ||
-       ownership_marker_test_values[0] != 0)
-        result = 1;
-    else if(ownership_marker_test_observations[0] != 3)
-        result = 2;
-    ownership_failure_reset();
-    if(!result && ownership_failure_observed() !=
-                  OWNERSHIP_FAILURE_NOT_WRITTEN)
-        result = 3;
 
-    value.uintVal = 2;
-    ownership_failure_observe("SetOwnershipFailureCount", &value);
-    if(!result && !ownership_failure_reject_init("marker test", false))
+    ownership_failure_arm_validation(false);
+    if(!ownership_marker_test_valid ||
+       ownership_marker_test_failure_writes != 1 ||
+       ownership_marker_test_failure_value != 1)
+        result = 1;
+    ownership_failure_arm_validation(true);
+    if(!result && ownership_marker_test_failure_writes != 1) result = 2;
+
+    alignas(void*) uint8_t fake_device[
+        SYNA_PROTOCOL_STRATEGY_OFFSET + sizeof(void*)] = {};
+    void *saved_device_base = vendor_device_base;
+    bool saved_ready =
+        pairing_strategy_ready.load(std::memory_order_acquire);
+    vendor_device_base = fake_device;
+    pairing_strategy_ready.store(false, std::memory_order_release);
+    if(!result && !pairing_strategy_reject("marker test", false))
+        result = 3;
+    else if(!result && (!ownership_marker_test_valid ||
+            ownership_marker_test_failure_writes != 2 ||
+            ownership_marker_test_failure_value != 1))
         result = 4;
-    else if(!result &&
-            (ownership_marker_test_writes != 2 ||
-             ownership_marker_test_values[1] != 1))
+
+    if(!result && pairing_strategy_reject("marker test", true))
         result = 5;
 
-    unsigned int writes_before_maintenance = ownership_marker_test_writes;
-    if(!result && ownership_failure_reject_init("marker test", true))
+    void *fake_strategy = fake_device;
+    memcpy(fake_device + SYNA_PROTOCOL_STRATEGY_OFFSET, &fake_strategy,
+           sizeof(fake_strategy));
+    pairing_strategy_ready.store(true, std::memory_order_release);
+    if(!result && pairing_strategy_reject("marker test", false))
         result = 6;
-    ownership_failure_start_init(true);
-    if(!result &&
-       ownership_marker_test_writes != writes_before_maintenance)
+    else if(!result && ownership_marker_test_failure_writes != 2)
         result = 7;
 
-    ownership_failure_record_prepare_status((HRESULT) 0x80004005u, false);
+    ownership_failure_store_marker(false);
+    ownership_marker_test_pending_load = -1;
+    pairing_pending_validation_complete();
     if(!result &&
-       ownership_marker_test_writes != writes_before_maintenance)
+       (ownership_marker_test_failure_writes != 3 ||
+        ownership_marker_test_failure_value != 0 ||
+        ownership_marker_test_pending_reads != 1 ||
+        ownership_marker_test_pending_writes != 0))
         result = 8;
 
-    ownership_failure_record_prepare_status(
-        SYNA_OWNERSHIP_FAILURE_CAP_STATUS, true);
+    ownership_marker_test_pending_load = 0;
+    pairing_pending_validation_complete();
     if(!result &&
-       ownership_marker_test_writes != writes_before_maintenance)
+       (ownership_marker_test_pending_reads != 2 ||
+        ownership_marker_test_pending_writes != 0))
         result = 9;
 
-    ownership_failure_record_prepare_status(
-        SYNA_OWNERSHIP_FAILURE_CAP_STATUS, false);
+    ownership_marker_test_pending_load = 2;
+    pairing_pending_validation_complete();
     if(!result &&
-       (ownership_marker_test_writes != writes_before_maintenance + 1 ||
-        ownership_marker_test_values[writes_before_maintenance] != 1))
+       (ownership_marker_test_pending_reads != 3 ||
+        ownership_marker_test_pending_writes != 0))
         result = 10;
 
-    tudor_set_state_fnc = previous_state_callback;
+    ownership_marker_test_pending_load = 1;
+    pairing_pending_validation_complete();
+    if(!result &&
+       (!ownership_marker_test_valid ||
+        ownership_marker_test_pending_reads != 4 ||
+        ownership_marker_test_pending_writes != 1 ||
+        ownership_marker_test_pending_value != 0))
+        result = 11;
+
+    tudor_get_state_fnc = previous_get_state_callback;
+    tudor_set_state_fnc = previous_set_state_callback;
+    vendor_device_base = saved_device_base;
+    pairing_strategy_ready.store(saved_ready, std::memory_order_release);
     ownership_failure_reset();
     return result;
 }
@@ -1950,6 +2083,16 @@ struct MyDevice : public IWDFDevice3 {
             pCallbackInterface->QueryInterface(&IID_IPnpCallbackHardware, (LPVOID*)&pnphwcb);
             pCallbackInterface->QueryInterface(&IID_IPnpCallback, (LPVOID*)&pnpcb);
             printf("pnphwcb=%p pnpcb=%p\r\n", pnphwcb, pnpcb);
+            /* The two offsets used by the guarded pairing lifecycle are
+             * relative to the pinned driver's primary CBiometricDevice
+             * interface.  Refuse the layout if that primary hardware
+             * interface ever stops aliasing the CreateDevice callback. */
+            if((void*)pnphwcb == (void*)pCallbackInterface) {
+                vendor_device_base = pCallbackInterface;
+            } else {
+                vendor_device_base = nullptr;
+                log_error("Pinned Synaptics device interface layout changed");
+            }
         }
 
         IPnpCallbackHardware *pnphwcb;
@@ -2428,6 +2571,78 @@ struct MyDevice : public IWDFDevice3 {
 
 MyDevice* myDevice = NULL;
 
+static HANDLE vendor_pairing_thread_handle(void) {
+    HANDLE handle = nullptr;
+    if(vendor_device_base) {
+        memcpy(&handle,
+               static_cast<uint8_t*>(vendor_device_base) +
+                   SYNA_PAIRING_THREAD_HANDLE_OFFSET,
+               sizeof(handle));
+    }
+    return handle;
+}
+
+static void *vendor_protocol_strategy(void) {
+    void *strategy = nullptr;
+    if(vendor_device_base) {
+        memcpy(&strategy,
+               static_cast<uint8_t*>(vendor_device_base) +
+                   SYNA_PROTOCOL_STRATEGY_OFFSET,
+               sizeof(strategy));
+    }
+    return strategy;
+}
+
+static bool wait_for_vendor_pairing_worker(bool ownership_reset_mode) {
+    if(!vendor_device_base) {
+        log_error("Cannot validate the pinned Synaptics pairing layout");
+        return false;
+    }
+
+    HANDLE worker = vendor_pairing_thread_handle();
+    if(!worker || worker == INVALID_HANDLE_VALUE) {
+        log_error("Vendor OnPrepareHardware did not publish its pairing "
+                  "worker handle");
+        return false;
+    }
+
+    DWORD wait_status = win_wait_sync_obj(worker,
+                                           SYNA_PAIRING_WORKER_WAIT_MS);
+    if(wait_status == SYNA_WAIT_TIMEOUT) {
+        log_error("Vendor pairing worker did not finish within %u ms",
+                  SYNA_PAIRING_WORKER_WAIT_MS);
+        return false;
+    }
+    if(wait_status != 0) {
+        log_error("Could not join vendor pairing worker [status 0x%x]",
+                  wait_status);
+        return false;
+    }
+
+    /* Joining is the synchronization boundary for the vendor's write to the
+     * pinned CBiometricDevice strategy field.  Capture dereferences this
+     * field unconditionally, so READY alone is not a sufficient check. */
+    void *strategy = vendor_protocol_strategy();
+    if(!ownership_reset_mode && !strategy) {
+        uint64_t count = ownership_failure_observed();
+        if(count == OWNERSHIP_FAILURE_NOT_WRITTEN) {
+            log_error("Vendor pairing worker finished without initializing "
+                      "its capture strategy; a safe restart may be required");
+        } else {
+            log_error("Vendor pairing attempt %llu finished without "
+                      "initializing its capture strategy; a safe restart "
+                      "may be required",
+                      (unsigned long long)count);
+        }
+        ownership_failure_store_marker(true);
+        return false;
+    }
+
+    pairing_strategy_ready.store(strategy != nullptr,
+                                 std::memory_order_release);
+    return true;
+}
+
 
 struct MyDriver : public IWDFDriver {
     public:
@@ -2561,27 +2776,29 @@ using DLLGetClassObject_t = HRESULT (__winfnc *)(void*, void*, void**);
 
 
 
-static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, 
-                                   ULONG code, void *in_buf, size_t in_size, 
-                                   void *out_buf, size_t out_size, 
-                                   struct winwdf_request **req) {
+static NTSTATUS tudor_devctrl_wudf1(void *context, OVERLAPPED *ovlp,
+                                   ULONG code, const void *in_buf,
+                                   size_t in_size, void *out_buf,
+                                   size_t out_size, void **op_ctx) {
+    struct tudor_device *device = static_cast<struct tudor_device*>(context);
+    (void)device;
     
     if (LOG_LEVEL <= LOG_VERBOSE) {
         printf("[WUDF1-DEVCTRL] -> code 0x%x (size 0x%lx)\r\n", code, in_size);
     }
 
-    /* A very late asynchronous ownership failure can arrive after initial
-     * adapter publication. Guard again before entering the vendor's capture
-     * path, which is where the mismatched-state crash was observed. */
+    /* Capture unconditionally dereferences the vendor strategy.  Recheck the
+     * joined pairing result immediately before entering that path. */
     if(code == SYNA_CAPTURE_IOCTL &&
-       ownership_failure_reject_init("capture dispatch", false))
+       pairing_strategy_reject("capture dispatch", false))
         return STATUS_INTERNAL_ERROR;
 
     if (myQueue && myQueue->ioctl) {
         MyRequest *wudf_req = new MyRequest(WdfRequestTypeOther, code,
                                              out_buf, out_size,
-                                             in_buf, in_size, ovlp);
-        *req = reinterpret_cast<struct winwdf_request*>(wudf_req);
+                                             const_cast<void*>(in_buf), in_size,
+                                             ovlp);
+        *op_ctx = wudf_req;
 
         if(code == SYNA_CAPTURE_IOCTL)
             capture_request_started(wudf_req);
@@ -2590,10 +2807,10 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
         struct winmodule *caller_module = winmodule_get_cur();
         winmodule_set_cur(&tudor_driver_dll->module);
         if(code == SYNA_CAPTURE_IOCTL &&
-           ownership_failure_reject_init("capture dispatch", false)) {
+           pairing_strategy_reject("capture dispatch", false)) {
             capture_request_finished(wudf_req);
             winmodule_set_cur(caller_module);
-            *req = nullptr;
+            *op_ctx = nullptr;
             wudf_req->release_native();
             return STATUS_INTERNAL_ERROR;
         }
@@ -2607,8 +2824,11 @@ static NTSTATUS tudor_devctrl_wudf1(struct tudor_device *device, OVERLAPPED *ovl
     return STATUS_INTERNAL_ERROR;
 }
 
-static NTSTATUS tudor_cancel_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, struct winwdf_request *req) {
-    MyRequest *wudf_req = reinterpret_cast<MyRequest*>(req);
+static NTSTATUS tudor_cancel_wudf1(void *context, OVERLAPPED *ovlp,
+                                  void *op_ctx) {
+    (void)context;
+    (void)ovlp;
+    MyRequest *wudf_req = static_cast<MyRequest*>(op_ctx);
     wudf_req->retain_native();
     ULONG code = wudf_req->ctl;
     struct winmodule *caller_module = winmodule_get_cur();
@@ -2622,8 +2842,11 @@ static NTSTATUS tudor_cancel_wudf1(struct tudor_device *device, OVERLAPPED *ovlp
     return STATUS_SUCCESS;
 }
 
-static void tudor_cleanup_wudf1(struct tudor_device *device, OVERLAPPED *ovlp, struct winwdf_request *req) {
-    MyRequest *wudf_req = reinterpret_cast<MyRequest*>(req);
+static void tudor_cleanup_wudf1(void *context, OVERLAPPED *ovlp,
+                                void *op_ctx) {
+    (void)context;
+    (void)ovlp;
+    MyRequest *wudf_req = static_cast<MyRequest*>(op_ctx);
     if(wudf_req->ctl == SYNA_CAPTURE_IOCTL)
         capture_request_finished(wudf_req);
     wudf_req->release_native();
@@ -2721,7 +2944,7 @@ static void ownership_reset_vendor_dispatch(MyRequest *request, void *) {
 
 static bool tudor_dispatch_reset_ownership(void) {
     if(!myQueue || !myQueue->ioctl) {
-        log_error("WUDF1 IOCTL queue is not initialized for ownership reset");
+        log_error("WUDF1 IOCTL queue is not initialized for vendor unpairing");
         return false;
     }
 
@@ -2739,7 +2962,7 @@ static bool tudor_dispatch_reset_ownership(void) {
                                       ownership_reset_dispatch_main,
                                       dispatch);
     if(thread_error != 0) {
-        log_error("Could not start vendor ownership-reset dispatch: %s",
+        log_error("Could not start vendor-unpair dispatch: %s",
                   strerror(thread_error));
         delete dispatch;
         req->release_native();
@@ -2758,12 +2981,12 @@ static bool tudor_dispatch_reset_ownership(void) {
          * that process boundary rather than racing a late access. */
         int detach_error = pthread_detach(dispatch_thread);
         if(detach_error != 0)
-            log_warn("Could not detach timed-out ownership-reset dispatch: %s",
+            log_warn("Could not detach timed-out vendor-unpair dispatch: %s",
                      strerror(detach_error));
     }
 
     if(!completed) {
-        log_error("Vendor ownership-reset dispatch and completion did not "
+        log_error("Vendor-unpair dispatch and completion did not "
                   "both finish within %u ms; outcome is indeterminate",
                   SYNA_RESET_OWNERSHIP_WAIT_MS);
         if(call_returned) delete dispatch;
@@ -2776,12 +2999,12 @@ static bool tudor_dispatch_reset_ownership(void) {
     req->release_native();
     delete dispatch;
     if(status != ERROR_SUCCESS) {
-        log_error("Vendor ownership-reset request failed [status 0x%x]",
+        log_error("Vendor-unpair request failed [status 0x%x]",
                   (unsigned int) status);
         return false;
     }
 
-    log_info("Vendor ownership-reset request completed successfully");
+    log_info("Vendor-unpair request completed successfully");
     return true;
 }
 
@@ -2906,7 +3129,13 @@ void print_vtable(void* obj, int N) {
 
 static bool tudor_init_internal(bool ownership_reset_mode) {
 
-    ownership_failure_start_init(ownership_reset_mode);
+    ownership_failure_reset();
+    ownership_failure_arm_validation(ownership_reset_mode);
+    pairing_strategy_ready.store(false, std::memory_order_release);
+    suppress_pairing_worker.store(false, std::memory_order_release);
+    pairing_worker_was_suppressed.store(false, std::memory_order_release);
+    vendor_device_base = nullptr;
+    win_set_thread_start_filter(nullptr);
 
     /* The sandbox has no writable filesystem. Install the per-device state
      * backends before the vendor can create its pairing identity or acquire
@@ -3017,33 +3246,40 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
     printf("about to prepare hw\r\n");
     print_vtable(myDevice->pnphwcb, 5); 
 
-    ownership_failure_reset();
+    if(ownership_reset_mode) {
+        suppress_pairing_worker.store(true, std::memory_order_release);
+        win_set_thread_start_filter(pairing_worker_start_filter);
+    }
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
+    if(ownership_reset_mode) {
+        win_set_thread_start_filter(nullptr);
+        suppress_pairing_worker.store(false, std::memory_order_release);
+    }
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
     if(rc != 0) {
-        ownership_failure_record_prepare_status(rc, ownership_reset_mode);
-        (void) ownership_failure_reject_init(
-            "failing OnPrepareHardware", ownership_reset_mode);
         log_error("Vendor OnPrepareHardware failed: 0x%x",
                   (unsigned int) rc);
         return false;
     }
-    usleep(1000000);
-    if(ownership_failure_reject_init("OnPrepareHardware",
-                                     ownership_reset_mode))
+    if(ownership_reset_mode &&
+       !pairing_worker_was_suppressed.load(std::memory_order_acquire)) {
+        log_error("Refusing ownership maintenance because the exact vendor "
+                  "pairing worker was not suppressed");
         return false;
+    }
+    usleep(1000000);
 
     printf("about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     printf("OnD0Entry rc = %lx\r\n", rc);
     fflush(stdout);
     if(rc != 0) {
-        (void) ownership_failure_reject_init(
-            "failing OnD0Entry", ownership_reset_mode);
         log_error("Vendor OnD0Entry failed: 0x%x", (unsigned int) rc);
         return false;
     }
+
+    if(!wait_for_vendor_pairing_worker(ownership_reset_mode)) return false;
 
     /* Reset before the normal post-D0 delay: a mismatched pairing identity
      * otherwise causes the vendor's automatic recovery loop to start about
@@ -3052,7 +3288,6 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
     if(ownership_reset_mode) return tudor_dispatch_reset_ownership();
 
     usleep(5000000);
-    if(ownership_failure_reject_init("OnD0Entry", false)) return false;
 
 
     //Query WINBIO interfaces
@@ -3139,7 +3374,7 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
              storage_id[8], storage_id[9], storage_id[10], storage_id[11],
              storage_id[12], storage_id[13], storage_id[14], storage_id[15]);
 
-    if(ownership_failure_reject_init("adapter publication", false))
+    if(pairing_strategy_reject("adapter publication", false))
         return false;
     if(!capture_relay_start()) return false;
 
@@ -3316,7 +3551,7 @@ static void tudor_unwind_failed_open(struct tudor_device *device,
 
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state)
 {
-    if(ownership_failure_reject_init("pipeline open", false)) return false;
+    if(pairing_strategy_reject("pipeline open", false)) return false;
 
     tudor_open_progress progress;
     device->state = state ? *state : (struct tudor_device_state) {0};
@@ -3356,9 +3591,9 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
         true, 
         NULL, 
         NULL, 
-        (winio_devctrl_fnc*) tudor_devctrl_wudf1,  // New function needed
-        (winio_cancel_fnc*) tudor_cancel_wudf1,    // New function needed
-        (winio_cleanup_fnc*) tudor_cleanup_wudf1,  // New function needed
+        tudor_devctrl_wudf1,
+        tudor_cancel_wudf1,
+        tudor_cleanup_wudf1,
         NULL
     );
 
@@ -3456,10 +3691,16 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
         return false;
     }
 
-    if(ownership_failure_reject_init("pipeline publication", false)) {
+    if(pairing_strategy_reject("pipeline publication", false)) {
         tudor_unwind_failed_open(device, progress);
         return false;
     }
+
+    /* This is the only successful validation boundary: the exact pairing
+     * worker was joined, its capture strategy exists, and every normal
+     * pipeline stage including QueryStatus completed. */
+    ownership_failure_store_marker(false);
+    pairing_pending_validation_complete();
 
     return true;
 }

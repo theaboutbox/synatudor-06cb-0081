@@ -108,6 +108,18 @@ typedef void win_thread_lifecycle_observer_fnc(
 void win_set_thread_lifecycle_observer(
     win_thread_lifecycle_observer_fnc *observer);
 
+/* A start filter makes an exact emulated Win32 worker return successfully
+ * without entering its Windows routine.  The decision is captured inside
+ * CreateThread before the pthread can run, so clearing the filter after
+ * CreateThread returns cannot race the decision. */
+typedef bool win_thread_start_filter_fnc(
+    struct winmodule *module, void *start_proc, void *start_param);
+void win_set_thread_start_filter(win_thread_start_filter_fnc *filter);
+
+/* Native callers use this narrow entry point instead of calling an ms_abi
+ * WaitForSingleObject declaration from System V code. */
+DWORD win_wait_sync_obj(HANDLE handle, DWORD timeout);
+
 //Log
 
 // typedef __builtin_ms_va_list win_va_list;

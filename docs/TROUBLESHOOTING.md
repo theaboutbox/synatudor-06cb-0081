@@ -23,23 +23,30 @@ $ journalctl -b -u tudor-host-launcher.service -u fprintd.service
 The first initialization can take longer because the vendor driver establishes
 pairing and performs no-touch calibration. Leave the sensor uncovered until
 the operation completes. Run `synatudor-setup` rather than repeatedly invoking
-fprintd commands during first initialization; setup bounds the attempt and
-checks for an ownership mismatch before it retries anything.
+fprintd commands during first initialization; setup makes at most three bounded
+ordinary attempts and safely restarts the USB session between them.
 
-## Device missing after an ownership failure
+## Device missing while pairing is incomplete
 
-The reader can retain ownership that no longer matches the private identity
-under `/var/lib/tudor`. This can happen after switching from Windows Hello,
-using an older experimental build, or deleting only part of the Linux state.
-The vendor records the mismatch by incrementing
-`SetOwnershipFailureCount`; the host separately records that the current run
-detected the mismatch.
+The reader can retain pairing that no longer matches private state under
+`/var/lib/tudor`. This can happen after switching from Windows Hello, using an
+older experimental build, or deleting only part of the Linux state. It can
+also take more than one host process to establish new pairing after the reader
+re-enumerates.
 
-Normal startup deliberately rejects that initialization before exposing the
-biometric adapters. This guard prevents the later capture crash seen when an
-earlier build allowed the mismatched state to reach verification. In this
-case, fprintd may report no device or an initialization timeout while the
-services themselves remain available.
+`SetOwnershipFailureCount` is the pinned DLL's generic `DoPairing` failure
+counter. A nonzero value is not by itself proof that ownership is incompatible.
+Values one through four can describe a recoverable pairing transition; the
+vendor has separate capped-counter behavior after repeated failures. Preserve
+the value as diagnostic context instead of using it as a reset decision.
+
+Normal startup waits for the exact asynchronous pairing worker, requires the
+vendor's capture strategy to exist, and opens the complete biometric pipeline
+through `WINBIO_SENSOR_READY`. It exposes the reader only after that safe
+boundary. This prevents the capture crash seen when an earlier build entered
+verification with a null strategy. When the boundary is not reached, fprintd
+may report no device or an initialization timeout while the services
+themselves remain available.
 
 Run guided setup:
 
@@ -47,32 +54,42 @@ Run guided setup:
 $ synatudor-setup
 ```
 
-It makes one bounded probe and uses the approved ownership reset only when that
-probe fails and the host's reader-scoped marker says the current run rejected
-ownership. The older failure count appears only as a diagnostic. A successful
-probe is never treated as a mismatch because of stale state. The prompt is
-destructive: the reset erases all fingerprints on the reader, including
-Windows Hello enrollments. It backs up private local state before proceeding,
-removes this driver's stale fprintd metadata for every local user, and backs up
-and removes the older unscoped pairing records for every reader managed by the
-driver. Old unscoped calibration is backed up and migrated only when its
-embedded reader identity matches. It never repeats the destructive request
-automatically.
+It makes up to three bounded ordinary starts with a USB/session restart between
+attempts. It never invokes vendor unpairing. Success requires the host's
+reader-scoped safe-open marker, and the failure count appears only as a
+diagnostic. If all three attempts fail, inspect the ordinary service errors
+before choosing any destructive maintenance.
 
-If it does not report success, the physical outcome may be indeterminate.
-Rerunning the command explicitly can reset the reader a second time; first
-keep the private backup and review the ordinary service errors.
-
-To perform only the ownership recovery, run:
+To invoke the vendor's unpair maintenance callback explicitly, run:
 
 ```console
 $ synatudor-reset-ownership
 ```
 
-Then run `synatudor-setup` to initialize and enroll again. If the first clean
-initialization after a successful reset records another ownership failure,
-stop and collect the ordinary service errors described below; do not keep
-resetting the reader.
+This command changes pairing and local enrollment state and may invalidate
+Windows and Linux enrollments. It sends the pinned DLL's private control code
+to `OnResetOwnership`, which calls `DoUnpairing`. It is not the standard
+`IOCTL_BIOMETRIC_RESET`, and a successful return does not prove physical
+erasure of the sensor's template database. Do not use it for secure erase.
+
+After the callback succeeds, the helper backs up private state, removes
+incompatible local pairing data and this driver's fprintd references, and sets
+a durable pending-validation marker. It then makes up to three ordinary normal
+starts. If none reaches the full safe-open boundary, both fingerprint services
+remain stopped behind helper-owned runtime masks. Run
+`synatudor-reset-ownership` again to resume normal validation; it recognizes
+the pending marker and does not issue another vendor-unpair request. A
+successful open changes the marker to a durable completed value. Later helper
+invocations report that completion without issuing another callback; use
+`synatudor-reset-ownership --new` only to authorize a separate vendor-unpair
+operation. Once validation succeeds, run `synatudor-setup` to enroll again.
+
+If the vendor callback itself does not report success, its physical outcome
+may be indeterminate. It is not retried automatically. Review the service
+errors and keep the private backup. If the failed transaction still contains
+an enabled request, rerun the helper once to disable that request. A later
+`synatudor-reset-ownership --new` invocation explicitly authorizes a separate
+maintenance transaction.
 
 ## Reset a wedged USB session
 
@@ -84,13 +101,15 @@ $ ./scripts/reset
 
 Then retry `fprintd-verify`. The helper reloads the services after the USB
 reset. It preserves enrollment, pairing, identity, and calibration state; it
-clears only the transient ownership-failure marker while both services are
-stopped so the next initialization gets a fresh result.
+clears only the previous safe-open failure marker while both services are
+stopped so the next initialization gets a fresh result. It refuses to run
+while ownership-reset validation is pending or its marker is malformed; use
+`synatudor-reset-ownership` to resume that recovery.
 
-Do not delete `SecureChannelIdentity.blob` by itself. The key must remain
-consistent with the sensor's pairing and cryptographic registry state. A local
-`synatudor-uninstall --purge` also cannot clear ownership stored inside the
-sensor. If a complete reset is necessary, run
+Do not delete one pairing or cryptographic state file by itself. The values
+must remain mutually consistent with the reader. A local
+`synatudor-uninstall --purge` does not invoke the vendor's reader-side unpair
+callback. If unpair maintenance is necessary, run
 `synatudor-reset-ownership` while the driver is installed, then use the purge
 option if you also want to remove all remaining local state.
 

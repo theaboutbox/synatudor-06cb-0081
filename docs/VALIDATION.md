@@ -8,33 +8,55 @@ cryptographic, or biometric-derived data.
 ## Current release-candidate status
 
 Reinstall testing on 2026-09-12 exposed a pairing failure that the earlier
-bridge did not handle safely. A fresh host restored its saved software
-identity, but the vendor asynchronously wrote a nonzero
-`SetOwnershipFailureCount`. The host still reported the device ready, and a
-subsequent verification entered `CaptureImage` with incomplete vendor state
-and crashed inside `synaWudfBioUsb.dll`. Restoring an older identity made
-enumeration return but did not stop the ownership-failure write, confirming
-that the identity file alone is not the complete pairing state.
+bridge did not handle safely. A fresh host restored saved software state, but
+the vendor asynchronously wrote a nonzero `SetOwnershipFailureCount`. The host
+still reported the device ready, and a subsequent verification entered
+`CaptureImage` without a vendor capture strategy and crashed inside
+`synaWudfBioUsb.dll`.
 
-The current candidate adds three protections:
+Further analysis of the pinned DLL corrected the original diagnosis. This
+property is a generic `DoPairing` failure counter, not an ownership-mismatch
+verdict. Values one through four can occur while a recoverable pairing
+transition continues in another process after USB re-enumeration. The actual
+safety defect was that `OnPrepareHardware` starts pairing asynchronously,
+`OnD0Entry` does not join it, and the bridge exposed the device without proving
+that the worker had initialized the strategy later dereferenced by capture.
 
-- normal startup latches the vendor's current ownership-failure write and
-  refuses to expose the WinBio adapters when it is nonzero, while recording a
-  separate current-run result for setup
-- an explicitly authorized, reader-scoped request invokes the vendor's real
-  ownership-reset path once, records its result, and clears incompatible local
-  pairing, the older unscoped pairing store, and every local user's stale
-  enrollment references after success
-- the launcher validates both reader-scoped and legacy calibration against the
-  USB serial before the vendor can consume it, then performs a durable one-shot
+The package revision 8 candidate adds these protections:
+
+- normal startup joins the exact pairing worker, requires the pinned
+  capture-strategy pointer to be nonnull, and opens the complete biometric
+  pipeline through `WINBIO_SENSOR_READY` before exposing the device; the
+  failure counter remains diagnostic
+- `synatudor-setup` allows up to three bounded ordinary starts across USB
+  re-enumeration and never invokes vendor unpairing automatically
+- an explicitly authorized, reader-scoped maintenance request suppresses the
+  exact pairing worker and invokes private WUDF control code `0x442040`, which
+  the pinned DLL dispatches through `OnResetOwnership` to `DoUnpairing`; this
+  is not standard `IOCTL_BIOMETRIC_RESET`, and success does not prove physical
+  erasure of the sensor's template database
+- successful callback cleanup durably arms a pending-validation marker before
+  removing its transaction barrier; the helper then makes up to three normal
+  validation cycles, and an interrupted or failed validation can resume
+  without repeating the vendor callback; only an armed marker changes to a
+  durable completed value, which blocks another callback unless `--new` is
+  supplied explicitly
+- request, result, and validation markers are reconciled as one durable state
+  machine; interrupted or failed callbacks cannot replay automatically, stale
+  enabled requests are retired before a later `--new` operation, and ordinary
+  USB reset cannot bypass pending ownership-reset validation
+- the launcher validates reader-scoped and legacy calibration against the USB
+  serial before the vendor can consume it, then performs a durable one-shot
   migration of matching legacy data
 
-These checks cover the reproduced mismatched-state path and are designed to
-stop it before capture. They have dedicated automated test coverage. A
-successful on-hardware ownership reset, new pairing, enrollment, verification,
-restart, and USB-reset sequence has not yet been recorded for this candidate.
-The results below are the earlier bring-up baseline; they do not validate the
-new recovery path.
+A superseded package demonstrated that the custom vendor callback could return
+success and that protected local cleanup could complete on the tested reader.
+Its subsequent clean pairing did not reach the safe capture boundary, so that
+result is not a successful end-to-end recovery validation. The corrected
+package revision 8 candidate still needs a fresh on-hardware normal pairing,
+optional vendor-unpair recovery, enrollment, verification, restart, and USB
+reset sequence. The results below are the earlier bring-up baseline; they do
+not validate the corrected lifecycle.
 
 ## Validated system
 
@@ -55,20 +77,35 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
-For the current recovery candidate, fresh release-mode GCC 16.2.1 and Clang
-builds completed all 202 build steps and passed all 14 Meson tests. The same
-14 tests passed under AddressSanitizer plus UndefinedBehaviorSanitizer and
-under ThreadSanitizer. The separate shell fixture suite passed the privileged
-helper's identity checks, broad backup and cleanup behavior, service-mask
-recovery, durable marker ordering, and injected failure paths. These checks do
-not replace the pending hardware sequence above.
+The corrected package revision 8 candidate is still under validation. Its
+expanded tests cover random-number generation, the classic CryptoAPI operations
+used during clean pairing, exact pairing-worker synchronization, strategy
+gating, and resumable post-unpair validation. Fresh post-fix sanitizer builds
+completed 264 steps with Clang 22.1.8 AddressSanitizer plus
+UndefinedBehaviorSanitizer and with GCC 16.2.1 ThreadSanitizer. All 15 Meson
+tests passed in both builds with leak detection and halt-on-error enabled; the
+complete text, JSON, and JUnit logs contained no sanitizer, undefined-behavior,
+memory-leak, or data-race diagnostic. Fresh release-mode GCC 16.2.1 and Clang
+22.1.8 builds also completed 264 steps and passed all 15 tests, then passed all
+15 again without rebuilding. All four builds used the pinned Lenovo installer
+and enabled TOD plus the restricted host while disabling debug imports and WDF
+logging. The shell fixture also passed its
+protected-state permissions, marker-transition, replay-guard, service-mask,
+ordinary-reset gating, and injected-failure cases. `bash -n` passed for the
+three installed helpers and the fixture, and `git diff --check` was clean.
+Final source-archive and local package results will be recorded after they run.
+No automated result substitutes for the pending hardware sequence above.
 
-The release installer was also run in `--build-only` mode from the committed,
-curated source archive. It verified both source inputs, completed all 202 build
-steps, passed all 14 Meson tests and the shell fixture suite, and produced the
-`0.1.0-7` Arch package without changing installed packages or reader state.
-Repeated archive generations spanning packaging-metadata commits were
-byte-identical and matched the SHA-256 pinned in `PKGBUILD`.
+A superseded recovery candidate completed fresh release-mode GCC 16.2.1 and
+Clang builds and passed all 14 Meson tests. The same tests passed under
+AddressSanitizer plus UndefinedBehaviorSanitizer and under ThreadSanitizer. Its
+shell fixtures passed the privileged helper's identity checks, broad backup
+and cleanup behavior, service-mask recovery, durable marker ordering, and
+injected failure paths. The release installer also passed in `--build-only`
+mode and produced a local package without changing installed packages or
+reader state. Those tests encoded the earlier nonzero-counter guard and did not
+exercise the missing clean-pairing cryptography or joined-worker boundary, so
+they do not validate revision 8.
 
 For the earlier baseline, fresh GCC and Clang builds completed with the TOD
 module and restricted host enabled. The Meson suite passed 13 of 13 tests in
@@ -80,8 +117,8 @@ The covered behavior includes:
 
 - Windows wait, thread, and string compatibility
 - SHA-1 and cryptographic-context behavior
-- random standalone P-256 keys, persistent reader identity, fixed-width key
-  blobs, ECDH agreement, and randomized ECDSA signing
+- random standalone P-256 keys, fixed-width key blobs, ECDH agreement, and
+  randomized ECDSA signing
 - persistent cryptographic registry state
 - stable host replacement across USB re-enumeration and state-ID binding
 - WinUSB ownership and bounded diagnostic playback

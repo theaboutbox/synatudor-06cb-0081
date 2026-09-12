@@ -110,7 +110,8 @@ static struct sync_event {
     bool state;
 } *events_head;
 
-static void evt_destr(struct sync_event *evt) {
+static void evt_destr(void *data) {
+    struct sync_event *evt = (struct sync_event*) data;
     //Unlink the event
     cant_fail_ret(pthread_rwlock_wrlock(&events_lock));
 
@@ -127,7 +128,8 @@ static void evt_destr(struct sync_event *evt) {
     free(evt);
 }
 
-static DWORD evt_wait(struct sync_event *evt, DWORD timeout) {
+static DWORD evt_wait(struct win_sync_object *sync_obj, DWORD timeout) {
+    struct sync_event *evt = (struct sync_event*) sync_obj;
     DWORD res = 0;
     struct timespec deadline = {0};
     if(timeout != INFINITE) deadline = win_wait_deadline(timeout);
@@ -156,8 +158,8 @@ HANDLE win_create_event(const char *name, bool initial_state, bool manual_reset)
     //Allocate the event
     struct sync_event *evt = (struct sync_event*) malloc(sizeof(struct sync_event));
     if(!evt) { winerr_set_errno(); return NULL; }
-    evt->sync_obj.wait_fnc = (win_sync_obj_wait_fnc*) evt_wait;
-    evt->handle = winhandle_create(evt, (winhandle_destr_fnc*) evt_destr);
+    evt->sync_obj.wait_fnc = evt_wait;
+    evt->handle = winhandle_create(evt, evt_destr);
 
     evt->name = name ? strdup(name) : NULL;
     evt->state = initial_state;

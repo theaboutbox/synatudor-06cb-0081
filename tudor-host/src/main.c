@@ -348,7 +348,7 @@ int main() {
     tudor_set_state_fnc = set_state_cb;
     pdata_ipc_sock = sock;
 
-    /* Ownership recovery is an explicit, reader-scoped one-shot operation.
+    /* Vendor unpairing is an explicit, reader-scoped one-shot operation.
      * It runs instead of normal initialization and never exposes a READY
      * host.  The transaction helper consumes the request before calling any
      * vendor recovery code and records a durable outcome. */
@@ -359,16 +359,16 @@ int main() {
         bool success =
             reset_outcome == TUDOR_HOST_RESET_OWNERSHIP_SUCCEEDED;
         if(reset_outcome == TUDOR_HOST_RESET_OWNERSHIP_INVALID_REQUEST) {
-            log_error("Reader ownership-maintenance state is invalid; "
+            log_error("Reader vendor-unpair state is invalid; "
                       "refusing startup");
         } else if(reset_outcome ==
                   TUDOR_HOST_RESET_OWNERSHIP_CLEANUP_PENDING) {
-            log_error("Reader ownership maintenance is awaiting privileged "
+            log_error("Reader vendor-unpair maintenance is awaiting privileged "
                       "local-state cleanup; refusing startup");
         } else if(success) {
-            log_info("Reader ownership reset completed successfully");
+            log_info("Reader vendor-unpair callback completed successfully");
         } else {
-            log_error("Reader ownership reset failed");
+            log_error("Reader vendor-unpair callback failed");
         }
 
         /* Vendor recovery may leave worker state stale or disconnect USB.
