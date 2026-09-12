@@ -44,10 +44,10 @@ The covered behavior includes:
 - persistent launcher state, including interrupted empty calibration
 
 The release installer was also run in `--build-only` mode from its curated
-source archive. It verified Lenovo's download, compiled 193 targets, passed all
-13 tests, produced an Arch package, and made no package or authentication
-changes. Building the archive twice from the same committed input produced
-byte-identical output.
+source archive. It verified both source inputs, completed 198 build steps,
+passed all 13 tests, produced an Arch package, and made no package or
+authentication changes. Building the archive twice from the same committed
+input produced byte-identical output.
 
 ## Hardware checks
 
