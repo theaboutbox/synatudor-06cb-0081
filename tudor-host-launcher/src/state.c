@@ -23,6 +23,7 @@ static const char *const allowed_properties[] = {
     "PairingData",
     "SetOwnershipFailureCount",
     "SystemWakeEnabled",
+    "UnpairingContext",
     "UpdateFirmwareFailureCount",
     "deviceInitializeFailures",
     NULL

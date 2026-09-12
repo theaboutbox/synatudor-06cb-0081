@@ -86,6 +86,24 @@ static void assert_load_missing(int fd, const char *name) {
     g_assert_cmpuint(resp.found, ==, FALSE);
 }
 
+static void assert_load_rejected(int fd, const char *name) {
+    struct tudor_state_load_request req = {
+        .type = TUDOR_STATE_MSG_LOAD,
+        .state_id = {0},
+        .name = {0}
+    };
+    g_strlcpy(req.state_id, state_id, sizeof(req.state_id));
+    g_strlcpy(req.name, name, sizeof(req.name));
+    g_assert_cmpint(write(fd, &req, sizeof(req)), ==, sizeof(req));
+    dispatch_request();
+
+    struct tudor_state_load_response resp;
+    g_assert_cmpint(read(fd, &resp, sizeof(resp)), ==, sizeof(resp));
+    g_assert_cmphex(resp.type, ==, TUDOR_STATE_MSG_LOAD_RESPONSE);
+    g_assert_cmpint(resp.status, ==, -EINVAL);
+    g_assert_cmpuint(resp.found, ==, FALSE);
+}
+
 static void test_state_round_trip(void) {
     GError *error = NULL;
     gchar *root = g_dir_make_tmp("tudor-state-test-XXXXXX", &error);
@@ -153,6 +171,12 @@ static void test_state_round_trip(void) {
     loaded = send_load(sockets[1], "PairingData", TUDOR_STATE_VALUE_BLOB);
     g_assert_cmpuint(loaded->len, ==, 0);
     g_byte_array_unref(loaded);
+
+    /* The vendor checks this optional property while unwinding an interrupted
+     * verify or unpair operation.  A missing value is valid and must not be
+     * mistaken for an invalid property name. */
+    assert_load_missing(sockets[1], "UnpairingContext");
+    assert_load_rejected(sockets[1], "UnexpectedProperty");
 
     /* The legacy bootstrap path follows the same empty-calibration rule and
      * must not copy an empty file into device-specific state. */
