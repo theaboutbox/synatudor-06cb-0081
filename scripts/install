@@ -78,6 +78,11 @@ source_commit=$(git -C "$repo_dir" rev-parse --verify "$source_ref^{commit}" 2>/
 source_archive=$work_dir/synatudor-06cb-0081-0.1.0.tar.gz
 "$repo_dir/scripts/make-source-archive" "$source_archive" "$source_commit" >/dev/null
 source_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
+# makepkg does not replace an existing SRCDEST file solely because a file://
+# source points somewhere newer. Refresh our generated payload so a previous
+# build of the same package version cannot make checksum verification fail.
+install -m 0600 -- "$source_archive" \
+  "$source_cache/synatudor-06cb-0081-0.1.0.tar.gz"
 
 metadata_dir=$work_dir/repository-metadata
 mkdir -p -- "$metadata_dir"
