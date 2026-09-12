@@ -18,6 +18,7 @@
 #include <pthread.h>
 
 #include <cryptbridge/registry.h>
+#include <cryptbridge/identity.h>
 
 #define _Analysis_mode_(...)
 #define _Notliteral_
@@ -359,12 +360,44 @@ static bool store_crypto_registry(void *, const void *data,
     return true;
 }
 
-static void configure_crypto_registry(void) {
+static enum cryptbridge_identity_load_result
+load_secure_channel_identity(void *, void **data, size_t *data_size) {
+    *data = nullptr;
+    *data_size = 0;
+    if(!tudor_get_state_fnc) return CRYPTBRIDGE_IDENTITY_LOAD_ERROR;
+
+    enum tudor_state_value_type type;
+    if(!tudor_get_state_fnc("SecureChannelIdentity", &type, data,
+                            data_size))
+        return CRYPTBRIDGE_IDENTITY_LOAD_NOT_FOUND;
+    if(type != TUDOR_STATE_VALUE_BLOB) {
+        log_error("SecureChannelIdentity device state has an invalid value type");
+        free(*data);
+        *data = nullptr;
+        *data_size = 0;
+        return CRYPTBRIDGE_IDENTITY_LOAD_ERROR;
+    }
+    return CRYPTBRIDGE_IDENTITY_LOAD_FOUND;
+}
+
+static bool store_secure_channel_identity(void *, const void *data,
+                                          size_t data_size) {
+    if(!tudor_set_state_fnc) return false;
+    tudor_set_state_fnc("SecureChannelIdentity", TUDOR_STATE_VALUE_BLOB,
+                        data, data_size);
+    return true;
+}
+
+static void configure_crypto_state(void) {
     if(tudor_get_state_fnc || tudor_set_state_fnc) {
         cryptbridge_registry_set_state_callbacks(
             load_crypto_registry, store_crypto_registry, nullptr);
+        cryptbridge_identity_set_state_callbacks(
+            load_secure_channel_identity, store_secure_channel_identity,
+            nullptr);
     } else {
         cryptbridge_registry_set_state_callbacks(nullptr, nullptr, nullptr);
+        cryptbridge_identity_set_state_callbacks(nullptr, nullptr, nullptr);
     }
 }
 
@@ -2405,9 +2438,10 @@ void print_vtable(void* obj, int N) {
 
 bool tudor_init() {
 
-    /* The sandbox has no writable filesystem.  Install the per-device state
-     * backend before either vendor DLL can acquire its RSA key container. */
-    configure_crypto_registry();
+    /* The sandbox has no writable filesystem. Install the per-device state
+     * backends before the vendor can create its pairing identity or acquire
+     * its RSA key container. */
+    configure_crypto_state();
 
     winmodule_register(&ntdll_module);
     winreg_set_handler(tudor_reg_handler, NULL);
@@ -2516,11 +2550,11 @@ bool tudor_init() {
     rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
     printf("OnPrepareHardware rc = %lx\r\n", rc);
     fflush(stdout);
-    //
     if(rc != 0) {
-        abort();
+        log_error("Vendor OnPrepareHardware failed: 0x%x",
+                  (unsigned int) rc);
+        return false;
     }
-    //
     usleep(1000000);
     printf("about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
@@ -2655,6 +2689,7 @@ bool tudor_shutdown() {
     winmodule_unregister(&ntdll_module);
 
     cryptbridge_registry_set_state_callbacks(nullptr, nullptr, nullptr);
+    cryptbridge_identity_set_state_callbacks(nullptr, nullptr, nullptr);
 
     return true;
 }

@@ -34,6 +34,11 @@ static void *usb_thread_func(void *arg) {
 static char state_id[TUDOR_STATE_ID_SIZE + 1];
 static pthread_mutex_t state_ipc_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static void wipe_bytes(void *data, size_t size) {
+    volatile unsigned char *bytes = data;
+    while(size--) *bytes++ = 0;
+}
+
 static bool valid_state_id(const char *id) {
     size_t len = strnlen(id, TUDOR_STATE_ID_SIZE + 1);
     if(!len || len > TUDOR_STATE_ID_SIZE) return false;
@@ -99,10 +104,12 @@ static bool get_state_cb(const char *name, enum tudor_state_value_type *type,
     if(resp->status != 0) {
         log_error("State launcher failed to load '%s' [status %d]",
                   name, resp->status);
+        wipe_bytes(buf, size);
         free(buf);
         abort();
     }
     if(!resp->found) {
+        wipe_bytes(buf, size);
         free(buf);
         return false;
     }
@@ -116,6 +123,7 @@ static bool get_state_cb(const char *name, enum tudor_state_value_type *type,
        (resp->value_type == TUDOR_STATE_VALUE_BOOL &&
         (value_size != sizeof(uint8_t) || resp->data[0] > 1))) {
         log_error("State launcher returned an invalid value for '%s'", name);
+        wipe_bytes(buf, size);
         free(buf);
         abort();
     }
@@ -127,6 +135,7 @@ static bool get_state_cb(const char *name, enum tudor_state_value_type *type,
     *type = (enum tudor_state_value_type) resp->value_type;
     *data = value;
     *data_size = value_size;
+    wipe_bytes(buf, size);
     free(buf);
     return true;
 }
@@ -154,6 +163,7 @@ static void set_state_cb(const char *name, enum tudor_state_value_type type,
     state_recv_packet(&resp, TUDOR_STATE_MSG_STORE_RESPONSE,
                       sizeof(resp), sizeof(resp));
     cant_fail_ret(pthread_mutex_unlock(&state_ipc_lock));
+    wipe_bytes(req, req_size);
     free(req);
 
     if(resp.status != 0) {
@@ -224,6 +234,7 @@ static const struct tudor_pair_data *get_pdata_cb(const char *name) {
     pdata->data = pdata+1;
     pdata->data_size = pdata_sz;
     memcpy(pdata->data, resp.msg.pdata, pdata->data_size);
+    wipe_bytes(&resp, sizeof(resp));
 
     return pdata;
 }
@@ -243,6 +254,7 @@ static void set_pdata_cb(const char *name, const struct tudor_pair_data *data) {
     strncpy(msg.msg.sensor_name, name, IPC_SENSOR_NAME_SIZE);
     memcpy(msg.msg.pdata, data->data, data->data_size);
     ipc_send_msg(pdata_ipc_sock, &msg, sizeof(msg.msg) + data->data_size);
+    wipe_bytes(&msg, sizeof(msg));
 
     //Wait for ACK
     enum ipc_msg_type resp;

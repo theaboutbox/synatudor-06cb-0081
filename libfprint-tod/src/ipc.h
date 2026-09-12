@@ -50,9 +50,11 @@ static inline bool check_ipc_msg_size(IPCMessageBuf *msg, size_t min_size, GErro
 
 bool open_dbus_con(FpiDeviceTudor *tdev, GError **error);
 
-bool start_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, int *sock_fd, GError **error);
+bool start_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
+                        const gchar *state_id, int *sock_fd, GError **error);
 bool kill_host_process(FpiDeviceTudor *tdev, GError **error);
-bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, int *sock_fd, GError **error);
+bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
+                        const gchar *state_id, int *sock_fd, GError **error);
 bool orphan_host_process(FpiDeviceTudor *tdev, GError **error);
 
 static inline bool check_host_proc_dead(FpiDeviceTudor *tdev, GError **error) {

@@ -14,6 +14,11 @@
 
 static gchar *state_root;
 
+static void wipe_bytes(void *data, size_t size) {
+    volatile unsigned char *bytes = data;
+    while(size--) *bytes++ = 0;
+}
+
 static const char *const allowed_properties[] = {
     "CalibrationData",
     "CryptoRegistry",
@@ -22,6 +27,7 @@ static const char *const allowed_properties[] = {
     "OldCalDataDeleted",
     "PairingContext",
     "PairingData",
+    "SecureChannelIdentity",
     "SetOwnershipFailureCount",
     "SystemWakeEnabled",
     "UnpairingContext",
@@ -31,7 +37,8 @@ static const char *const allowed_properties[] = {
     NULL
 };
 
-static bool valid_state_id(const char *id) {
+gboolean state_id_is_valid(const char *id) {
+    if(!id) return false;
     size_t len = strnlen(id, TUDOR_STATE_ID_SIZE + 1);
     if(!len || len > TUDOR_STATE_ID_SIZE) return false;
     for(size_t i = 0; i < len; i++) {
@@ -229,6 +236,7 @@ static gboolean load_blob_file(const char *path, void **data, gsize *size,
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                     "State file '%s' exceeds %u bytes", path,
                     TUDOR_STATE_MAX_VALUE_SIZE);
+        wipe_bytes(contents, *size);
         g_free(contents);
         return FALSE;
     }
@@ -331,13 +339,16 @@ static gboolean send_packet(int fd, const void *data, size_t size) {
     return FALSE;
 }
 
-static gboolean handle_load(int fd, const void *buf, size_t size) {
+static gboolean handle_load(int fd, const char *state_id,
+                            const void *buf, size_t size) {
     if(size != sizeof(struct tudor_state_load_request)) return FALSE;
     const struct tudor_state_load_request *req = buf;
-    if(!valid_state_id(req->state_id) || !valid_property_name(req->name)) {
+    gboolean valid_id = state_id_is_valid(req->state_id);
+    gboolean matching_id = valid_id && strcmp(req->state_id, state_id) == 0;
+    if(!matching_id || !valid_property_name(req->name)) {
         const struct tudor_state_load_response resp = {
             .type = TUDOR_STATE_MSG_LOAD_RESPONSE,
-            .status = -EINVAL,
+            .status = valid_id && !matching_id ? -EPERM : -EINVAL,
             .found = FALSE,
             .value_type = 0
         };
@@ -367,21 +378,26 @@ static gboolean handle_load(int fd, const void *buf, size_t size) {
                   req->name, error->message);
         g_clear_error(&error);
     }
+    if(value) wipe_bytes(value, value_size);
     g_free(value);
     gboolean sent = send_packet(fd, resp, resp_size);
+    wipe_bytes(resp, resp_size);
     g_free(resp);
     return sent;
 }
 
-static gboolean handle_store(int fd, const void *buf, size_t size) {
+static gboolean handle_store(int fd, const char *state_id,
+                             const void *buf, size_t size) {
     if(size < sizeof(struct tudor_state_store_request)) return FALSE;
     const struct tudor_state_store_request *req = buf;
     size_t value_size = size - sizeof(*req);
-    if(!valid_state_id(req->state_id) || !valid_property_name(req->name) ||
+    gboolean valid_id = state_id_is_valid(req->state_id);
+    gboolean matching_id = valid_id && strcmp(req->state_id, state_id) == 0;
+    if(!matching_id || !valid_property_name(req->name) ||
        value_size > TUDOR_STATE_MAX_VALUE_SIZE) {
         const struct tudor_state_store_response resp = {
             .type = TUDOR_STATE_MSG_STORE_RESPONSE,
-            .status = -EINVAL
+            .status = valid_id && !matching_id ? -EPERM : -EINVAL
         };
         return send_packet(fd, &resp, sizeof(resp));
     }
@@ -405,7 +421,7 @@ static gboolean handle_store(int fd, const void *buf, size_t size) {
 
 static gboolean state_socket_ready(gint fd, GIOCondition condition,
                                    gpointer user_data) {
-    (void) user_data;
+    const char *state_id = user_data;
     if(!(condition & G_IO_IN)) return G_SOURCE_REMOVE;
 
     void *buf = g_malloc(TUDOR_STATE_MAX_MESSAGE_SIZE + 1);
@@ -414,6 +430,7 @@ static gboolean state_socket_ready(gint fd, GIOCondition condition,
         if(size < 0)
             g_warning("Failed to receive Tudor state request: %s",
                       g_strerror(errno));
+        if(size > 0) wipe_bytes(buf, (size_t) size);
         g_free(buf);
         return G_SOURCE_REMOVE;
     }
@@ -426,10 +443,10 @@ static gboolean state_socket_ready(gint fd, GIOCondition condition,
         memcpy(&type, buf, sizeof(type));
         switch(type) {
             case TUDOR_STATE_MSG_LOAD:
-                keep = handle_load(fd, buf, size);
+                keep = handle_load(fd, state_id, buf, size);
                 break;
             case TUDOR_STATE_MSG_STORE:
-                keep = handle_store(fd, buf, size);
+                keep = handle_store(fd, state_id, buf, size);
                 break;
             default:
                 keep = FALSE;
@@ -439,15 +456,17 @@ static gboolean state_socket_ready(gint fd, GIOCondition condition,
         g_warning("Closing invalid Tudor state channel");
         shutdown(fd, SHUT_RDWR);
     }
+    wipe_bytes(buf, (size_t) size);
     g_free(buf);
     return keep ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
 }
 
-guint state_socket_watch(int fd) {
+guint state_socket_watch(int fd, const char *state_id) {
+    g_return_val_if_fail(state_id_is_valid(state_id), 0);
     return g_unix_fd_add_full(
         G_PRIORITY_DEFAULT, fd,
         G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
-        state_socket_ready, NULL, NULL);
+        state_socket_ready, g_strdup(state_id), g_free);
 }
 
 void init_state(void) {

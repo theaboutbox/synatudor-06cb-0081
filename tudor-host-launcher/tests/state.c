@@ -128,7 +128,48 @@ static void assert_load_error(int fd, const char *name) {
     g_assert_cmpuint(resp.found, ==, FALSE);
 }
 
+static void assert_state_id_binding(int fd) {
+    struct tudor_state_load_request load_req = {
+        .type = TUDOR_STATE_MSG_LOAD,
+        .state_id = "06cb-0081-otherdevice",
+        .name = "CalibrationData"
+    };
+    g_assert_cmpint(write(fd, &load_req, sizeof(load_req)), ==,
+                    sizeof(load_req));
+    dispatch_request();
+
+    struct tudor_state_load_response load_resp;
+    g_assert_cmpint(read(fd, &load_resp, sizeof(load_resp)), ==,
+                    sizeof(load_resp));
+    g_assert_cmphex(load_resp.type, ==, TUDOR_STATE_MSG_LOAD_RESPONSE);
+    g_assert_cmpint(load_resp.status, ==, -EPERM);
+
+    const uint32_t counter = 99;
+    size_t store_size = sizeof(struct tudor_state_store_request) +
+                        sizeof(counter);
+    struct tudor_state_store_request *store_req = g_malloc0(store_size);
+    store_req->type = TUDOR_STATE_MSG_STORE;
+    g_strlcpy(store_req->state_id, "06cb-0081-otherdevice",
+              sizeof(store_req->state_id));
+    g_strlcpy(store_req->name, "deviceInitializeFailures",
+              sizeof(store_req->name));
+    store_req->value_type = TUDOR_STATE_VALUE_UINT32;
+    memcpy(store_req->data, &counter, sizeof(counter));
+    g_assert_cmpint(write(fd, store_req, store_size), ==, store_size);
+    g_free(store_req);
+    dispatch_request();
+
+    struct tudor_state_store_response store_resp;
+    g_assert_cmpint(read(fd, &store_resp, sizeof(store_resp)), ==,
+                    sizeof(store_resp));
+    g_assert_cmphex(store_resp.type, ==, TUDOR_STATE_MSG_STORE_RESPONSE);
+    g_assert_cmpint(store_resp.status, ==, -EPERM);
+}
+
 static void test_state_round_trip(void) {
+    g_assert_false(state_id_is_valid(NULL));
+    g_assert_true(state_id_is_valid(state_id));
+
     GError *error = NULL;
     gchar *root = g_dir_make_tmp("tudor-state-test-XXXXXX", &error);
     g_assert_no_error(error);
@@ -144,7 +185,9 @@ static void test_state_round_trip(void) {
     init_state();
     int sockets[2];
     g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets), ==, 0);
-    guint source_id = state_socket_watch(sockets[0]);
+    guint source_id = state_socket_watch(sockets[0], state_id);
+
+    assert_state_id_binding(sockets[1]);
 
     GByteArray *loaded = send_load(
         sockets[1], "CalibrationData", TUDOR_STATE_VALUE_BLOB);
@@ -169,6 +212,8 @@ static void test_state_round_trip(void) {
         device_dir, "deviceInitializeFailures.uint", NULL);
     gchar *pairing_path = g_build_filename(
         device_dir, "PairingData.blob", NULL);
+    gchar *secure_identity_path = g_build_filename(
+        device_dir, "SecureChannelIdentity.blob", NULL);
     gchar *pairing_context_blob_path = g_build_filename(
         device_dir, "PairingContext.blob", NULL);
     gchar *pairing_context_uint_path = g_build_filename(
@@ -205,6 +250,19 @@ static void test_state_round_trip(void) {
     loaded = send_load(sockets[1], "PairingData", TUDOR_STATE_VALUE_BLOB);
     g_assert_cmpuint(loaded->len, ==, 0);
     g_byte_array_unref(loaded);
+
+    const guint8 secure_identity[] = { 0x01, 0x23, 0x45, 0x67 };
+    send_store(sockets[1], "SecureChannelIdentity",
+               TUDOR_STATE_VALUE_BLOB, secure_identity,
+               sizeof(secure_identity));
+    loaded = send_load(sockets[1], "SecureChannelIdentity",
+                       TUDOR_STATE_VALUE_BLOB);
+    g_assert_cmpuint(loaded->len, ==, sizeof(secure_identity));
+    g_assert_cmpmem(loaded->data, loaded->len,
+                    secure_identity, sizeof(secure_identity));
+    g_byte_array_unref(loaded);
+    g_assert_cmpint(g_stat(secure_identity_path, &statbuf), ==, 0);
+    g_assert_cmpuint(statbuf.st_mode & 0777, ==, 0600);
 
     /* These optional vendor properties are valid even before they have a
      * value.  Unknown names remain outside the persistence allowlist. */
@@ -324,6 +382,7 @@ static void test_state_round_trip(void) {
 
     g_assert_cmpint(g_unlink(counter_path), ==, 0);
     g_assert_cmpint(g_unlink(pairing_path), ==, 0);
+    g_assert_cmpint(g_unlink(secure_identity_path), ==, 0);
     g_assert_cmpint(g_unlink(pairing_context_bool_path), ==, 0);
     g_assert_cmpint(g_unlink(unpairing_context_path), ==, 0);
     g_assert_cmpint(g_unlink(wake_from_sleep_path), ==, 0);
@@ -340,6 +399,7 @@ static void test_state_round_trip(void) {
     g_free(pairing_context_uint_path);
     g_free(pairing_context_blob_path);
     g_free(pairing_path);
+    g_free(secure_identity_path);
     g_free(counter_path);
     g_free(calibration_path);
     g_free(device_dir);

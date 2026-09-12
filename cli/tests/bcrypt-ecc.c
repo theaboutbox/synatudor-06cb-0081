@@ -1,6 +1,9 @@
 #include <assert.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include <cryptbridge/identity.h>
 #include "bcrypt_ecc_util.h"
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -40,6 +43,56 @@ struct test_kdf_buffers
 
 #define P256_COMPONENT_SIZE 32
 #define P256_PRIVATE_BLOB_SIZE (sizeof(BCRYPT_ECCKEY_BLOB) + 3 * P256_COMPONENT_SIZE)
+
+static void *saved_identity;
+static size_t saved_identity_size;
+static unsigned int identity_loads;
+static unsigned int identity_stores;
+static bool reject_identity_store;
+
+static enum cryptbridge_identity_load_result load_identity(
+    void *context, void **data, size_t *data_size)
+{
+    assert(context == &identity_loads);
+    identity_loads++;
+    if(!saved_identity) return CRYPTBRIDGE_IDENTITY_LOAD_NOT_FOUND;
+    *data = malloc(saved_identity_size);
+    assert(*data);
+    memcpy(*data, saved_identity, saved_identity_size);
+    *data_size = saved_identity_size;
+    return CRYPTBRIDGE_IDENTITY_LOAD_FOUND;
+}
+
+static bool store_identity(void *context, const void *data, size_t data_size)
+{
+    assert(context == &identity_loads);
+    identity_stores++;
+    if(reject_identity_store) return false;
+    void *copy = malloc(data_size);
+    assert(copy);
+    memcpy(copy, data, data_size);
+    free(saved_identity);
+    saved_identity = copy;
+    saved_identity_size = data_size;
+    return true;
+}
+
+static void reset_identity_cache(void)
+{
+    cryptbridge_identity_set_state_callbacks(
+        load_identity, store_identity, &identity_loads);
+}
+
+static unsigned char *find_bytes(void *haystack, size_t haystack_size,
+                                 const void *needle, size_t needle_size)
+{
+    unsigned char *bytes = haystack;
+    if(!needle_size || needle_size > haystack_size) return NULL;
+    for(size_t i = 0; i <= haystack_size - needle_size; i++) {
+        if(!memcmp(bytes + i, needle, needle_size)) return bytes + i;
+    }
+    return NULL;
+}
 
 static void test_component_padding(void)
 {
@@ -170,6 +223,65 @@ int main(void)
                                      &imported, blob, sizeof(blob), 0 ));
         assert(!BCryptDestroyKey( imported ));
         assert(!BCryptDestroyKey( generated ));
+    }
+
+    {
+        BCRYPT_KEY_HANDLE first, second, corrupted;
+        UCHAR first_blob[P256_PRIVATE_BLOB_SIZE];
+        UCHAR second_blob[P256_PRIVATE_BLOB_SIZE];
+        ULONG blob_size = 0;
+
+        reset_identity_cache();
+        assert(!BCryptGenerateKeyPair( algorithm, &first, 256, 0 ));
+        assert(!BCryptFinalizeKeyPair( first, 0 ));
+        assert(!BCryptExportKey( first, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 first_blob, sizeof(first_blob), &blob_size, 0 ));
+        assert(blob_size == sizeof(first_blob));
+        assert(saved_identity && identity_loads == 1 && identity_stores == 1);
+
+        /* Resetting the callbacks discards the process cache and simulates
+         * the replacement host started after a USB re-enumeration. */
+        reset_identity_cache();
+        assert(!BCryptGenerateKeyPair( algorithm, &second, 256, 0 ));
+        assert(!BCryptFinalizeKeyPair( second, 0 ));
+        assert(!BCryptExportKey( second, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 second_blob, sizeof(second_blob), &blob_size,
+                                 0 ));
+        assert(blob_size == sizeof(second_blob));
+        assert(!memcmp(first_blob, second_blob, sizeof(first_blob)));
+        assert(identity_loads == 2 && identity_stores == 1);
+
+        unsigned char *stored_key = find_bytes(
+            saved_identity, saved_identity_size,
+            first_blob, sizeof(first_blob));
+        assert(stored_key);
+        stored_key[sizeof(BCRYPT_ECCKEY_BLOB)] ^= 1;
+        reset_identity_cache();
+        assert(!BCryptGenerateKeyPair( algorithm, &corrupted, 256, 0 ));
+        assert(BCryptFinalizeKeyPair( corrupted, 0 ) ==
+               STATUS_INVALID_PARAMETER);
+        assert(!BCryptDestroyKey( corrupted ));
+        assert(identity_loads == 3 && identity_stores == 1);
+
+        assert(!BCryptDestroyKey( second ));
+        assert(!BCryptDestroyKey( first ));
+        cryptbridge_identity_set_state_callbacks(NULL, NULL, NULL);
+        free(saved_identity);
+        saved_identity = NULL;
+        saved_identity_size = 0;
+    }
+
+    {
+        BCRYPT_KEY_HANDLE generated;
+
+        reject_identity_store = true;
+        reset_identity_cache();
+        assert(!BCryptGenerateKeyPair( algorithm, &generated, 256, 0 ));
+        assert(BCryptFinalizeKeyPair( generated, 0 ) ==
+               STATUS_INTERNAL_ERROR);
+        assert(!BCryptDestroyKey( generated ));
+        cryptbridge_identity_set_state_callbacks(NULL, NULL, NULL);
+        reject_identity_store = false;
     }
 
     {

@@ -36,6 +36,11 @@ $ ./scripts/reset
 Then retry `fprintd-verify`. The helper reloads the services after the USB
 reset.
 
+Do not delete `SecureChannelIdentity.blob` by itself. The key must remain
+consistent with the sensor's pairing state. If a complete reset is necessary,
+use `synatudor-uninstall --purge` so enrollments and Tudor state are handled
+together, then reinstall.
+
 ## Improve finger contact
 
 This is a small swipe-style pad presented as a touch reader. Place a broad part

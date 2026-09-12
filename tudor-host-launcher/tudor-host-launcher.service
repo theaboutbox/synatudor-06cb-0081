@@ -8,6 +8,7 @@ ExecStart=/usr/bin/tudor/tudor_host_launcher
 WorkingDirectory=/usr/bin/tudor/
 StateDirectory=tudor
 StateDirectoryMode=0700
+LimitCORE=0
 
 ProtectSystem=strict
 ProtectKernelTunables=true

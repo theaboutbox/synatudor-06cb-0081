@@ -5,6 +5,7 @@
 
 void init_state(void);
 void uninit_state(void);
-guint state_socket_watch(int fd);
+gboolean state_id_is_valid(const char *id);
+guint state_socket_watch(int fd, const char *state_id);
 
 #endif

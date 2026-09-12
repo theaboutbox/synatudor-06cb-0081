@@ -72,7 +72,8 @@ The initial hardware port has passed:
 - enrollment and deletion through `fprintd`
 - repeated matching and wrong-finger rejection
 - persistence across service restarts and a USB reset
-- fresh per-handshake P-256 session keys instead of replay-only crypto state
+- a locally generated per-reader P-256 identity kept in root-only state
+- fresh channel secrets and randomized ECDSA signatures
 - sudo, polkit, and the Omarchy lock screen with password fallback
 - the full automated suite under GCC, Clang, ASan/UBSan, and TSan
 
@@ -95,10 +96,11 @@ use different firmware, protocols, and driver ABIs.
 
 ## Privacy and device state
 
-Calibration, pairing, cryptographic registry state, and enrollment metadata
-are stored under root-only `/var/lib/tudor`. Calibration is specific to one
-physical reader. Never copy or publish files from `/var/lib/tudor` or
-`/var/lib/fprint`, fingerprint captures, or unedited verbose logs.
+Calibration, pairing, the secure-channel identity, cryptographic registry
+state, and enrollment metadata are stored under root-only `/var/lib/tudor`.
+Calibration and the secure-channel identity are specific to one physical
+reader. Never copy or publish files from `/var/lib/tudor` or `/var/lib/fprint`,
+fingerprint captures, or unedited verbose logs.
 
 Keep `~/.cache/synatudor-0081` private as well. It contains Lenovo's downloaded
 package and the locally built Arch package, which embeds the vendor DLL data.

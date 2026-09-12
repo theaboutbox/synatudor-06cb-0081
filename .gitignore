@@ -9,10 +9,17 @@
 *.cat
 *.dll
 *.exe
+*.key
 *.log
+*.p12
+*.pcap
+*.pcapng
+*.pem
+*.pfx
 *.pkg.tar*
 *.sys
 *.tar.zst
+*.tupd
 *.uint
 
 compile_commands.json

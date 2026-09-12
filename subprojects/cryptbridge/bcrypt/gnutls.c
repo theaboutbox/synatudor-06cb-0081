@@ -38,6 +38,7 @@
 #include "ntsecapi.h"
 #include "bcrypt.h"
 #include "bcrypt_ecc_util.h"
+#include "identity_state.h"
 
 #include "bcrypt_internal.h"
 #include "secrets.h"
@@ -603,13 +604,78 @@ static NTSTATUS export_gnutls_pubkey_ecc( gnutls_privkey_t gnutls_key, UCHAR **p
     return STATUS_SUCCESS;
 }
 
+#define P256_COMPONENT_SIZE 32
+#define P256_PRIVATE_BLOB_SIZE \
+    (sizeof(BCRYPT_ECCKEY_BLOB) + 3 * P256_COMPONENT_SIZE)
+
+static void wipe_identity_blob( void *data, size_t size )
+{
+    volatile UCHAR *bytes = data;
+    while (size--) *bytes++ = 0;
+}
+
+static BOOL valid_identity_blob( const UCHAR *data, size_t size )
+{
+    const BCRYPT_ECCKEY_BLOB *blob;
+
+    if (!data || size != P256_PRIVATE_BLOB_SIZE) return FALSE;
+    blob = (const BCRYPT_ECCKEY_BLOB *)data;
+    return blob->dwMagic == BCRYPT_ECDH_PRIVATE_P256_MAGIC &&
+           blob->cbKey == P256_COMPONENT_SIZE;
+}
+
+static void clear_asymmetric_key( struct key *key )
+{
+    if (key->u.a.handle) gnutls_privkey_deinit( key->u.a.handle );
+    heap_free( key->u.a.pubkey );
+    key->u.a.handle = NULL;
+    key->u.a.pubkey = NULL;
+    key->u.a.pubkey_len = 0;
+}
+
+static NTSTATUS generate_random_asymmetric_key( struct key *key,
+                                                gnutls_pk_algorithm_t pk_alg,
+                                                gnutls_ecc_curve_t curve )
+{
+    gnutls_privkey_t handle;
+    NTSTATUS status;
+    int ret;
+
+    if ((ret = gnutls_privkey_init( &handle )))
+    {
+        gnutls_perror( ret );
+        return STATUS_INTERNAL_ERROR;
+    }
+
+    if ((ret = gnutls_privkey_generate( handle, pk_alg,
+                                        GNUTLS_CURVE_TO_BITS(curve), 0 )))
+    {
+        gnutls_perror( ret );
+        gnutls_privkey_deinit( handle );
+        return STATUS_INTERNAL_ERROR;
+    }
+
+    if ((status = export_gnutls_pubkey_ecc( handle, &key->u.a.pubkey,
+                                            &key->u.a.pubkey_len )))
+    {
+        gnutls_privkey_deinit( handle );
+        return status;
+    }
+
+    key->u.a.handle = handle;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS key_asymmetric_generate( struct key *key )
 {
     gnutls_pk_algorithm_t pk_alg;
     gnutls_ecc_curve_t curve;
-    gnutls_privkey_t handle;
+    enum cryptbridge_identity_result identity_result;
+    UCHAR generated_blob[P256_PRIVATE_BLOB_SIZE];
+    void *identity = NULL;
+    size_t identity_size = 0;
+    ULONG generated_size = 0;
     NTSTATUS status;
-    int ret;
 
     if (key->u.a.handle || key->u.a.pubkey) return STATUS_INVALID_HANDLE;
 
@@ -625,27 +691,48 @@ NTSTATUS key_asymmetric_generate( struct key *key )
         return STATUS_NOT_SUPPORTED;
     }
 
-    if ((ret = gnutls_privkey_init( &handle )))
+    identity_result = cryptbridge_identity_state_load(
+        &identity, &identity_size);
+    if (identity_result == CRYPTBRIDGE_IDENTITY_FOUND)
     {
-        gnutls_perror( ret );
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    if ((ret = gnutls_privkey_generate( handle, pk_alg, GNUTLS_CURVE_TO_BITS(curve), 0 )))
-    {
-        gnutls_perror( ret );
-        gnutls_privkey_deinit( handle );
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    if ((status = export_gnutls_pubkey_ecc( handle, &key->u.a.pubkey, &key->u.a.pubkey_len )))
-    {
-        gnutls_privkey_deinit( handle );
+        if (!valid_identity_blob( identity, identity_size ))
+            status = STATUS_INVALID_PARAMETER;
+        else
+            status = key_import_ecc( key, identity, identity_size );
+        wipe_identity_blob( identity, identity_size );
+        free( identity );
         return status;
     }
+    if (identity_result == CRYPTBRIDGE_IDENTITY_ERROR)
+        return STATUS_INTERNAL_ERROR;
+    if (identity_result == CRYPTBRIDGE_IDENTITY_INACTIVE)
+        return generate_random_asymmetric_key( key, pk_alg, curve );
 
-    key->u.a.handle = handle;
-    return STATUS_SUCCESS;
+    status = generate_random_asymmetric_key( key, pk_alg, curve );
+    if (status) return status;
+    status = key_export_ecc( key, generated_blob, sizeof(generated_blob),
+                             &generated_size );
+    if (status || generated_size != sizeof(generated_blob))
+    {
+        wipe_identity_blob( generated_blob, sizeof(generated_blob) );
+        clear_asymmetric_key( key );
+        return status ? status : STATUS_INTERNAL_ERROR;
+    }
+
+    identity_result = cryptbridge_identity_state_resolve(
+        generated_blob, sizeof(generated_blob), &identity, &identity_size);
+    wipe_identity_blob( generated_blob, sizeof(generated_blob) );
+    clear_asymmetric_key( key );
+    if (identity_result != CRYPTBRIDGE_IDENTITY_FOUND)
+        return STATUS_INTERNAL_ERROR;
+
+    if (!valid_identity_blob( identity, identity_size ))
+        status = STATUS_INVALID_PARAMETER;
+    else
+        status = key_import_ecc( key, identity, identity_size );
+    wipe_identity_blob( identity, identity_size );
+    free( identity );
+    return status;
 }
 
 NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len )
@@ -672,6 +759,7 @@ NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len 
 
     default:
         FIXME( "curve %u not supported\n", curve );
+        if (d.data) wipe_identity_blob( d.data, d.size );
         gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
         return STATUS_NOT_IMPLEMENTED;
     }
@@ -688,11 +776,13 @@ NTSTATUS key_export_ecc( struct key *key, UCHAR *buf, ULONG len, ULONG *ret_len 
             !cryptbridge_copy_be_component( dst + size, size, &y ) ||
             !cryptbridge_copy_be_component( dst + size * 2, size, &d ))
         {
+            if (d.data) wipe_identity_blob( d.data, d.size );
             gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
             return STATUS_INTERNAL_ERROR;
         }
     }
 
+    if (d.data) wipe_identity_blob( d.data, d.size );
     gnutls_free( x.data ); gnutls_free( y.data ); gnutls_free( d.data );
     return STATUS_SUCCESS;
 }
@@ -703,13 +793,20 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
     gnutls_ecc_curve_t curve;
     gnutls_privkey_t handle;
     gnutls_datum_t x, y, k;
+    UCHAR components[3 * P256_COMPONENT_SIZE];
+    DWORD expected_magic;
     NTSTATUS status;
     int ret;
 
     switch (key->alg_id)
     {
     case ALG_ID_ECDH_P256:
+        expected_magic = BCRYPT_ECDH_PRIVATE_P256_MAGIC;
+        curve = GNUTLS_ECC_CURVE_SECP256R1;
+        break;
+
     case ALG_ID_ECDSA_P256:
+        expected_magic = BCRYPT_ECDSA_PRIVATE_P256_MAGIC;
         curve = GNUTLS_ECC_CURVE_SECP256R1;
         break;
 
@@ -718,19 +815,29 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
         return STATUS_NOT_IMPLEMENTED;
     }
 
+    if (!buf || len < sizeof(*ecc_blob)) return STATUS_INVALID_PARAMETER;
+    ecc_blob = (BCRYPT_ECCKEY_BLOB *)buf;
+    if (ecc_blob->dwMagic != expected_magic ||
+        ecc_blob->cbKey != P256_COMPONENT_SIZE ||
+        len < sizeof(*ecc_blob) + sizeof(components))
+        return STATUS_INVALID_PARAMETER;
+
+    memcpy( components, ecc_blob + 1, sizeof(components) );
+    if (derive_ec_pubkey( components ) ||
+        memcmp( components, ecc_blob + 1, 2 * P256_COMPONENT_SIZE ))
+    {
+        wipe_identity_blob( components, sizeof(components) );
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if ((ret = gnutls_privkey_init( &handle )))
     {
         gnutls_perror( ret );
+        wipe_identity_blob( components, sizeof(components) );
         return STATUS_INTERNAL_ERROR;
     }
 
-    ecc_blob = (BCRYPT_ECCKEY_BLOB *)buf;
-    if (derive_ec_pubkey((unsigned char *)(ecc_blob + 1)))
-    {
-        gnutls_privkey_deinit( handle );
-        return STATUS_INVALID_PARAMETER;
-    }
-    x.data = (unsigned char *)(ecc_blob + 1);
+    x.data = components;
     x.size = ecc_blob->cbKey;
     y.data = x.data + ecc_blob->cbKey;
     y.size = ecc_blob->cbKey;
@@ -741,15 +848,18 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
     {
         gnutls_perror( ret );
         gnutls_privkey_deinit( handle );
+        wipe_identity_blob( components, sizeof(components) );
         return STATUS_INTERNAL_ERROR;
     }
 
     if ((status = export_gnutls_pubkey_ecc( handle, &key->u.a.pubkey, &key->u.a.pubkey_len )))
     {
         gnutls_privkey_deinit( handle );
+        wipe_identity_blob( components, sizeof(components) );
         return status;
     }
 
+    wipe_identity_blob( components, sizeof(components) );
     key->u.a.handle = handle;
     return STATUS_SUCCESS;
 }

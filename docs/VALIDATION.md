@@ -25,7 +25,7 @@ Validation was completed on 2026-09-11 with:
 ## Automated checks
 
 Fresh GCC and Clang builds completed with the TOD module and restricted host
-enabled. The Meson suite passed 12 of 12 tests in each normal build. Separate
+enabled. The Meson suite passed 13 of 13 tests in each normal build. Separate
 sanitizer runs passed the suite with AddressSanitizer plus
 UndefinedBehaviorSanitizer and with ThreadSanitizer.
 
@@ -33,9 +33,10 @@ The covered behavior includes:
 
 - Windows wait, thread, and string compatibility
 - SHA-1 and cryptographic-context behavior
-- fresh P-256 session keys, fixed-width key blobs, ECDH agreement, and ECDSA
-  signing
+- random standalone P-256 keys, persistent reader identity, fixed-width key
+  blobs, ECDH agreement, and randomized ECDSA signing
 - persistent cryptographic registry state
+- stable host replacement across USB re-enumeration and state-ID binding
 - WinUSB ownership and bounded diagnostic playback
 - asynchronous capture recovery
 - native biometric storage calls and lifecycle
@@ -44,7 +45,7 @@ The covered behavior includes:
 
 The release installer was also run in `--build-only` mode from its curated
 source archive. It verified Lenovo's download, compiled 193 targets, passed all
-12 tests, produced an Arch package, and made no package or authentication
+13 tests, produced an Arch package, and made no package or authentication
 changes. Building the archive twice from the same committed input produced
 byte-identical output.
 

@@ -1,5 +1,6 @@
 tudor_host_launcher_src = [
     'src/main.c',
+    'src/host-identity.c',
     'src/launch.c',
     'src/pdata.c',
     'src/state.c'
@@ -38,3 +39,10 @@ state_test = executable('tudor-state-test',
     include_directories: ['src', tudor_host_inc, libtudor_inc],
 )
 test('tudor-state', state_test, env: ['GIO_USE_VFS=local'])
+
+host_identity_test = executable('tudor-host-identity-test',
+    ['tests/host-identity.c', 'src/host-identity.c'],
+    dependencies: [gio_dep],
+    include_directories: ['src'],
+)
+test('tudor-host-identity', host_identity_test)

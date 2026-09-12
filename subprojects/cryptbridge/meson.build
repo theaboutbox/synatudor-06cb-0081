@@ -11,6 +11,7 @@ srcs = [
   'aes.c',
   'des.c',
   'handle.c',
+  'identity_state.c',
   'implglue.c',
   'mpi.c',
   'rc2.c',
@@ -38,6 +39,7 @@ headers = [
 
 openssl_dep = dependency('openssl', required: true)
 gnutls = dependency('gnutls', required: true)
+threads_dep = dependency('threads')
 
 incdir = include_directories('.', 'include')
 
@@ -46,7 +48,7 @@ libcryptbridge = library(
   'cryptbridge',
   srcs,
   include_directories: incdir,
-  dependencies: [openssl_dep, gnutls],
+  dependencies: [openssl_dep, gnutls, threads_dep],
   install: true,
   version: '1.0.0',
   soversion: '1'

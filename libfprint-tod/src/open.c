@@ -14,6 +14,12 @@ static void dispose_dev(FpiDeviceTudor *tdev) {
         g_warning("Error cleaning up Tudor host process: %s (%s code %d)", error->message, g_quark_to_string(error->domain), error->code);
         g_clear_error(&error);
     }
+    /* The launcher may already have retired this ID after a USB
+     * re-enumeration. Local cleanup must still make a later open start from a
+     * complete connection rather than reusing an ID with no IPC socket. */
+    tdev->host_has_id = false;
+    tdev->host_dead = false;
+    tdev->host_id = 0;
 
     //Close the sleep inhibitor (if we got one)
     if(tdev->host_sleep_inhib >= 0) {
@@ -231,40 +237,53 @@ static void init_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data
     g_object_unref(task);
 }
 
-static void init_host_proc(FpiDeviceTudor *tdev, GTask *task, GUsbDevice *usb_dev) {
-    GError *error = NULL;
+static gboolean prepare_host_usb(FpiDeviceTudor *tdev, GUsbDevice *usb_dev,
+                                 GError **error) {
+    if(tdev->usb_fd >= 0) {
+        if(tdev->state_id) return TRUE;
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "Fingerprint sensor descriptor has no state ID");
+        return FALSE;
+    }
 
-    //Open the USB device to get its FD
-    if(tdev->usb_fd < 0) {
-        if(!g_usb_device_open(usb_dev, &error)) {
-            dispose_dev(tdev);
-            g_task_return_error(task, error);
-            g_object_unref(task);
-            return;
-        }
+    //Open the USB device before choosing a launcher host so its stable state
+    //identity can be checked as part of adoption and replacement.
+    if(!g_usb_device_open(usb_dev, error)) return FALSE;
 
-        //Get the USB device's private data 
+    //Get the USB device's private data
 #if G_USB_CHECK_VERSION(0, 4, 0)
-        //0.4+ uses the glib private class data mechanism
-        void **dev_priv = (void**) g_type_instance_get_private(&usb_dev->parent_instance.g_type_instance, G_USB_TYPE_DEVICE);
+    //0.4+ uses the glib private class data mechanism
+    void **dev_priv = (void**) g_type_instance_get_private(&usb_dev->parent_instance.g_type_instance, G_USB_TYPE_DEVICE);
 #else
-        void **dev_priv = usb_dev->priv;
+    void **dev_priv = usb_dev->priv;
 #endif
 
-        //Get the FD using cursed offset magic
-        libusb_device_handle *dev_handle = (libusb_device_handle*) (dev_priv[3]); //(GUsbDevicePrivate*)->handle
-        int dev_fd = ((int*) dev_handle)[10 + 2 + 4 + 2 + 1 + 1]; //(struct linux_device_handle_priv*)->fd
-        g_assert_no_errno(tdev->usb_fd = dup(dev_fd));
-
-        if(!tdev->state_id) tdev->state_id = make_state_id(usb_dev);
-
-        if(!g_usb_device_close(usb_dev, &error)) {
-            dispose_dev(tdev);
-            g_task_return_error(task, error);
-            g_object_unref(task);
-            return;
-        }
+    //Get the FD using cursed offset magic
+    libusb_device_handle *dev_handle = (libusb_device_handle*) (dev_priv[3]); //(GUsbDevicePrivate*)->handle
+    int dev_fd = ((int*) dev_handle)[10 + 2 + 4 + 2 + 1 + 1]; //(struct linux_device_handle_priv*)->fd
+    tdev->usb_fd = dup(dev_fd);
+    if(tdev->usb_fd < 0) {
+        int err = errno;
+        g_usb_device_close(usb_dev, NULL);
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(err),
+                    "Failed to duplicate fingerprint sensor descriptor: %s",
+                    g_strerror(err));
+        return FALSE;
     }
+
+    if(!tdev->state_id) tdev->state_id = make_state_id(usb_dev);
+
+    if(!g_usb_device_close(usb_dev, error)) {
+        g_assert_no_errno(close(tdev->usb_fd));
+        tdev->usb_fd = -1;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static void init_host_proc(FpiDeviceTudor *tdev, GTask *task, GUsbDevice *usb_dev) {
+    GError *error = NULL;
 
     //Send the init message
     enum log_level loglvl;
@@ -306,12 +325,14 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
     //Create task
     GTask *task = g_task_new(tdev, NULL, callback, user_data);
 
-    //Check if the host process is already running
-    if(tdev->host_has_id) {
+    //Reuse only a live, completely connected host. A HostDied signal can
+    //arrive while the device is idle, with no pending receive to dispose it.
+    if(tdev->host_has_id && !tdev->host_dead && tdev->ipc_socket) {
         g_task_return_int(task, 0);
         g_object_unref(task);
         return;
     }
+    if(tdev->host_has_id) dispose_dev(tdev);
 
     //Open a DBus connection
     if(!open_dbus_con(tdev, &error)) {
@@ -332,10 +353,18 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
     GUsbDevice *usb_dev = fpi_device_get_usb_device(FP_DEVICE(tdev));
     int sock_fd;
 
+    if(!prepare_host_usb(tdev, usb_dev, &error)) {
+        dispose_dev(tdev);
+        g_task_return_error(task, error);
+        g_object_unref(task);
+        return;
+    }
+
     //Try to adopt a host process
     guint8 usb_bus = g_usb_device_get_bus(usb_dev), usb_addr = g_usb_device_get_address(usb_dev);
 
-    bool did_adopt = adopt_host_process(tdev, usb_bus, usb_addr, &sock_fd, &error);
+    bool did_adopt = adopt_host_process(
+        tdev, usb_bus, usb_addr, tdev->state_id, &sock_fd, &error);
     if(!did_adopt) {
         if(error) {
             g_warning("Failed to adopt Tudor host process - is tudor-host-launcher.service running? Error: '%s' (%s code %d)", error->message, g_quark_to_string(error->domain), error->code);
@@ -346,7 +375,8 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
         }
 
         //Start a host process
-        if(!start_host_process(tdev, usb_bus, usb_addr, &sock_fd, &error)) {
+        if(!start_host_process(
+               tdev, usb_bus, usb_addr, tdev->state_id, &sock_fd, &error)) {
             g_warning("Failed to start Tudor host process - is tudor-host-launcher.service running? Error: '%s' (%s code %d)", error->message, g_quark_to_string(error->domain), error->code);
             dispose_dev(tdev);
             g_task_return_error(task, error);
@@ -355,6 +385,12 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
         }
         g_info("Started tudor host process ID %u for USB bus 0x%04hx addr 0x%04hx", tdev->host_id, usb_bus, usb_addr);
     } else g_info("Adopted tudor host process ID %u for USB bus 0x%04hx addr 0x%04hx", tdev->host_id, usb_bus, usb_addr);
+
+    //An adopted host already owns the descriptor from its original launch.
+    if(did_adopt) {
+        g_assert_no_errno(close(tdev->usb_fd));
+        tdev->usb_fd = -1;
+    }
 
     //Create the IPC socket
     tdev->ipc_socket = g_socket_new_from_fd(sock_fd, &error);

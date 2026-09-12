@@ -14,10 +14,11 @@ $ meson test -C build --print-errorlogs
 ```
 
 The suite covers Windows wait and string behavior, cryptographic context and
-SHA-1 behavior, fresh P-256 key generation, ECDH agreement, ECDSA signing,
+SHA-1 behavior, random standalone P-256 key generation, persistent per-reader
+identity reload and corruption rejection, ECDH agreement, ECDSA signing,
 persistent crypto-registry state, WinUSB ownership and bounded diagnostic
 playback, capture recovery, native storage calls and lifecycle, native storage
-IPC, and persistent launcher state.
+IPC, stable host identity, and persistent launcher state.
 
 For a Clang sanitizer build:
 
@@ -40,7 +41,8 @@ release candidate should pass this sequence on USB `06cb:0081`:
 3. Match it repeatedly with `fprintd-verify`.
 4. Confirm that a different finger is rejected.
 5. Restart `fprintd` and the launcher, then repeat both checks.
-6. Reset or re-enumerate the USB device, then repeat both checks.
+6. Reset or re-enumerate the USB device, confirm that only one host remains
+   for the reader, then repeat both checks.
 7. Reboot, then repeat both checks.
 8. Delete the enrolled finger, confirm that it no longer matches, and enroll it
    again.

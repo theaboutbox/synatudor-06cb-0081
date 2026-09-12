@@ -41,10 +41,15 @@ PAM / desktop / fprintd clients
   engine, and storage interfaces.
 - `subprojects/cryptbridge` implements additional Windows cryptography and
   registry behavior used while the sensor establishes its secure channel. It
-  generates a fresh P-256 ECDH key for each channel handshake; persistent
-  pairing identity is stored separately in the protected registry state.
+  generates a random P-256 pairing identity once for each reader, commits it
+  to protected device state, and reloads it when the sensor re-enumerates.
+  Channel secrets are derived during each handshake.
 - `cli` is a development interface and has a less restrictive threat model
   than the fprintd path.
+
+The persistent P-256 generation behavior matches the pinned Synaptics DLL's
+ownership flow. A different vendor DLL must be traced and validated before it
+can use this compatibility path.
 
 ## Vendor driver handling
 
@@ -62,11 +67,16 @@ The launcher stores state under a root-only directory:
 /var/lib/tudor/devices/<vid>-<pid>-<usb-serial>/
 ```
 
-The allowlisted values include calibration, pairing state, the emulated
-cryptographic registry, and a small set of device counters. The host asks for
-these values over a dedicated sequenced-packet socket. It never receives a
-path or regular-file descriptor for the state directory. Values are bounded,
-names are checked, and replacements are written privately.
+The allowlisted values include calibration, pairing state, the P-256
+secure-channel identity, the emulated cryptographic registry, and a small set
+of device counters. The host asks for these values over a dedicated
+sequenced-packet socket bound to the reader's stable state ID. It never
+receives a path or regular-file descriptor for the state directory. Values
+are bounded, names are checked, and replacements are written privately.
+
+The launcher also keys live hosts by that stable ID. If ownership work resets
+the USB device and changes its bus address, the launcher closes the previous
+state channel and retires the stale process before starting its replacement.
 
 On a new sensor, the vendor driver performs its own no-touch calibration and
 writes the resulting blob through this channel. Calibration is sensor-specific
@@ -86,8 +96,9 @@ this device needed additional compatibility work:
 - USB discovery and udev matching for `06cb:0081`
 - a WUDF 1 object model and ABI layout matching this driver build
 - Windows string, wait, time, property, process, pipe, WinUSB, and crypto calls
-- fresh session-key generation and fixed-width P-256 key serialization
+- generated per-reader P-256 identity and fixed-width key serialization
 - persistent device and crypto-registry state
+- stable-reader host replacement across USB re-enumeration
 - secure state IPC across the host sandbox boundary
 - capture completion recovery for the driver's asynchronous request pattern
 - the vendor's native biometric storage ABI and lifecycle

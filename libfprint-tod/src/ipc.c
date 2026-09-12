@@ -229,32 +229,50 @@ bool open_dbus_con(FpiDeviceTudor *tdev, GError **error) {
     return true;
 }
 
-bool start_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, int *sock_fd, GError **error) {
+bool start_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
+                        const gchar *state_id, int *sock_fd, GError **error) {
     g_assert_false(tdev->host_has_id);
 
     //Request the host launcher service to launch a host process
-    GUnixFDList *fds;
+    GUnixFDList *fds = NULL;
     GVariant *rets = g_dbus_connection_call_with_unix_fd_list_sync(tdev->dbus_con,
         TUDOR_HOST_LAUNCHER_SERVICE, TUDOR_HOST_LAUNCHER_OBJ, TUDOR_HOST_LAUNCHER_INTERF,
-        TUDOR_HOST_LAUNCHER_LAUNCH_METHOD, g_variant_new("((yy))", usb_bus, usb_addr), G_VARIANT_TYPE("(uh)"), G_DBUS_CALL_FLAGS_NONE,
+        TUDOR_HOST_LAUNCHER_LAUNCH_METHOD,
+        g_variant_new("((yy)s)", usb_bus, usb_addr, state_id),
+        G_VARIANT_TYPE("(uh)"), G_DBUS_CALL_FLAGS_NONE,
         G_MAXINT,
         NULL, &fds,
         NULL, error
     );
-    if(!rets) return false;
+    if(!rets) {
+        g_clear_object(&fds);
+        return false;
+    }
 
     //Get the result host ID and socket FD index
     int fd_idx;
     g_variant_get(rets, "(uh)", &tdev->host_id, &fd_idx);
     g_variant_unref(rets);
 
+    if(tdev->host_id == 0) {
+        g_clear_object(&fds);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Launcher returned an invalid Tudor host ID");
+        return false;
+    }
+    tdev->host_has_id = true;
+    tdev->host_dead = false;
+
+    if(!fds) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Launcher returned no Tudor host descriptor");
+        return false;
+    }
+
     //Get the socket FD from the list
     *sock_fd = g_unix_fd_list_get(fds, fd_idx, error);
     g_object_unref(fds);
     if(*sock_fd < 0) return false;
-
-    tdev->host_has_id = true;
-    tdev->host_dead = false;
     return true;
 }
 
@@ -274,19 +292,25 @@ bool kill_host_process(FpiDeviceTudor *tdev, GError **error) {
     return true;
 }
 
-bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, int *sock_fd, GError **error) {
+bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
+                        const gchar *state_id, int *sock_fd, GError **error) {
     g_assert_false(tdev->host_has_id);
 
     //Request the host launcher service to adopt a host process
-    GUnixFDList *fds;
+    GUnixFDList *fds = NULL;
     GVariant *rets = g_dbus_connection_call_with_unix_fd_list_sync(tdev->dbus_con,
         TUDOR_HOST_LAUNCHER_SERVICE, TUDOR_HOST_LAUNCHER_OBJ, TUDOR_HOST_LAUNCHER_INTERF,
-        TUDOR_HOST_LAUNCHER_ADOPT_METHOD, g_variant_new("((yy))", usb_bus, usb_addr), G_VARIANT_TYPE("(uh)"), G_DBUS_CALL_FLAGS_NONE,
+        TUDOR_HOST_LAUNCHER_ADOPT_METHOD,
+        g_variant_new("((yy)s)", usb_bus, usb_addr, state_id),
+        G_VARIANT_TYPE("(uh)"), G_DBUS_CALL_FLAGS_NONE,
         G_MAXINT,
         NULL, &fds,
         NULL, error
     );
-    if(!rets) return false;
+    if(!rets) {
+        g_clear_object(&fds);
+        return false;
+    }
 
     //Get the result host ID and socket FD index
     int fd_idx;
@@ -294,7 +318,16 @@ bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, i
     g_variant_unref(rets);
 
     if(tdev->host_id == 0) {
+        g_clear_object(&fds);
         *error = NULL;
+        return false;
+    }
+    tdev->host_has_id = true;
+    tdev->host_dead = false;
+
+    if(!fds) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Launcher returned no adopted host descriptor");
         return false;
     }
 
@@ -302,9 +335,6 @@ bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr, i
     *sock_fd = g_unix_fd_list_get(fds, fd_idx, error);
     g_object_unref(fds);
     if(*sock_fd < 0) return false;
-
-    tdev->host_has_id = true;
-    tdev->host_dead = false;
     return true;
 }
 
