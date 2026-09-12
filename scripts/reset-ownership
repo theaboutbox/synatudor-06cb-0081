@@ -145,6 +145,28 @@ assert_secure_dir() {
     die "$path is accessible by group or other"
 }
 
+prepare_private_backup_root() {
+  local path=$1 parent owner
+
+  parent=${path%/*}
+  assert_secure_dir "$parent"
+
+  if [[ -e $path || -L $path ]]; then
+    [[ -d $path && ! -L $path ]] || die "$path is not a real directory"
+    owner=$(stat -Lc '%u' -- "$path") || die "could not inspect $path"
+    [[ $owner == 0 ]] || die "$path is not owned by root"
+
+    # Early development versions created this dedicated directory with the
+    # process default mode. Its verified private root-owned parent prevents an
+    # unprivileged process from swapping the checked path before chmod.
+    chmod 0700 -- "$path" || die "could not protect $path"
+  else
+    install -d -o root -g root -m 0700 -- "$path"
+  fi
+
+  assert_secure_dir "$path"
+}
+
 assert_secure_tree() {
   local path=$1 bad
   assert_secure_dir "$path"
@@ -301,11 +323,7 @@ make_private_backup() {
   local migrations timestamp backup_dir suffix=0
 
   migrations=$TUDOR_STATE_ROOT/migration-backups
-  if [[ -e $migrations ]]; then
-    assert_secure_dir "$migrations"
-  else
-    install -d -o root -g root -m 0700 -- "$migrations"
-  fi
+  prepare_private_backup_root "$migrations"
 
   timestamp=$(date -u +%Y%m%dT%H%M%SZ)
   backup_dir=$migrations/$sensor_state_id-$timestamp

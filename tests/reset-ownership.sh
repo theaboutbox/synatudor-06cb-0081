@@ -24,6 +24,64 @@ grep -Fq 'unscoped calibration' <<<"$help_text" ||
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
+# A development build could leave the dedicated backup root at the process
+# default mode. Tighten a real root-owned directory, but never follow a link
+# or change a directory that is not owned by root.
+legacy_backup_root=$tmp/legacy-backup-root
+mkdir -m 0755 -- "$legacy_backup_root"
+(
+  stat() {
+    if [[ $1 == -Lc && $2 == %u ]]; then
+      printf '0\n'
+    else
+      command stat "$@"
+    fi
+  }
+  prepare_private_backup_root "$legacy_backup_root"
+)
+[[ $(stat -Lc '%a' -- "$legacy_backup_root") == 700 ]] ||
+  fail 'did not protect a legacy root-owned backup directory'
+
+linked_backup_target=$tmp/linked-backup-target
+linked_backup_root=$tmp/linked-backup-root
+mkdir -m 0755 -- "$linked_backup_target"
+ln -s -- "$linked_backup_target" "$linked_backup_root"
+if (
+  stat() {
+    if [[ $1 == -Lc && $2 == %u ]]; then
+      printf '0\n'
+    else
+      command stat "$@"
+    fi
+  }
+  prepare_private_backup_root "$linked_backup_root"
+) >/dev/null 2>&1; then
+  fail 'accepted a linked backup directory'
+fi
+[[ $(stat -Lc '%a' -- "$linked_backup_target") == 755 ]] ||
+  fail 'changed a linked backup-directory target'
+
+foreign_backup_root=$tmp/foreign-backup-root
+mkdir -m 0755 -- "$foreign_backup_root"
+if (
+  stat() {
+    if [[ $1 == -Lc && $2 == %u ]]; then
+      if [[ ${!#} == "$foreign_backup_root" ]]; then
+        printf '1000\n'
+      else
+        printf '0\n'
+      fi
+    else
+      command stat "$@"
+    fi
+  }
+  prepare_private_backup_root "$foreign_backup_root"
+) >/dev/null 2>&1; then
+  fail 'accepted a backup directory not owned by root'
+fi
+[[ $(stat -Lc '%a' -- "$foreign_backup_root") == 755 ]] ||
+  fail 'changed a backup directory not owned by root'
+
 # Exercise the reset helper's marker-path setup under nounset. The marker is
 # deliberately absent, so the function returns before inspecting privileged
 # state while still catching dependent assignments in one `local` command.
