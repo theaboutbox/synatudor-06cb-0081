@@ -98,8 +98,19 @@ Two archives generated independently from committed tree
 316-entry payload included the loader call-site test, contained no forbidden
 private/proprietary extension, and has SHA-256
 `81c1ea9da6f63949065cb435a209556d62d28ef20782fab1bbcf416a5690ad5c`.
-The local package result will be recorded after it runs. No automated result
-substitutes for the pending hardware sequence above.
+The installer then consumed exact final commit
+`802651417c4ad2df5239e592ef5b2ce487d2c31a` in `--build-only` mode, verified
+both source checksums, completed 264 package-build steps, passed all 15 Meson
+tests and the shell fixture, and produced `synatudor-0081-0.1.0-8-x86_64`
+without changing installed packages, authentication, services, or reader
+state. The private package was mode 0600; all 20 declared dependencies were
+satisfied, its 39-entry manifest matched the expected install layout, its five
+installed helper scripts matched the committed sources, and its paths contained
+no `/var/lib` state or standalone vendor/private file. Its x86-64 ELF objects
+had no absolute RPATH or RUNPATH leakage.
+The package remains private because `libtudor.so` embeds the vendor DLL payload
+and `.BUILDINFO` records local build paths and the installed-package inventory.
+No automated result substitutes for the pending hardware sequence above.
 
 A superseded recovery candidate completed fresh release-mode GCC 16.2.1 and
 Clang builds and passed all 14 Meson tests. The same tests passed under
