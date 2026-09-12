@@ -63,6 +63,13 @@ helper's identity checks, broad backup and cleanup behavior, service-mask
 recovery, durable marker ordering, and injected failure paths. These checks do
 not replace the pending hardware sequence above.
 
+The release installer was also run in `--build-only` mode from the committed,
+curated source archive. It verified both source inputs, completed all 202 build
+steps, passed all 14 Meson tests and the shell fixture suite, and produced the
+`0.1.0-4` Arch package without changing installed packages or reader state.
+Three archive generations spanning the packaging-metadata commit were
+byte-identical and matched the SHA-256 pinned in `PKGBUILD`.
+
 For the earlier baseline, fresh GCC and Clang builds completed with the TOD
 module and restricted host enabled. The Meson suite passed 13 of 13 tests in
 each normal build. Separate sanitizer runs passed the suite with
