@@ -1,0 +1,66 @@
+# Validation record
+
+This page records the checks completed for the initial `06cb:0081` port. It is
+a result summary rather than a hardware support guarantee. Logs and reader
+state are intentionally excluded because they can contain device-specific,
+cryptographic, or biometric-derived data.
+
+## Validated system
+
+Validation was completed on 2026-09-11 with:
+
+| Component | Value |
+| --- | --- |
+| Laptop | Lenovo Yoga C930-13IKB, type 81C4 |
+| USB reader | Synaptics `06cb:0081` |
+| Sensor firmware | 6.7 |
+| Operating system | Omarchy 4.0.0, based on Arch Linux |
+| Kernel | 7.1.8-arch1-3 |
+| Architecture | x86-64 |
+| fprintd | 1.94.5-2 |
+| libfprint-tod | 1.95.2+tod1-1 |
+| Lenovo driver | 5.5.2731.1050 |
+| Lenovo package SHA-256 | `2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343` |
+
+## Automated checks
+
+Fresh GCC and Clang builds completed with the TOD module and restricted host
+enabled. The Meson suite passed 11 of 11 tests in each normal build. Separate
+Clang runs also passed the same suite with AddressSanitizer plus
+UndefinedBehaviorSanitizer and with ThreadSanitizer.
+
+The covered behavior includes:
+
+- Windows wait, thread, and string compatibility
+- SHA-1 and cryptographic-context behavior
+- persistent cryptographic registry state
+- WinUSB ownership and bounded diagnostic playback
+- asynchronous capture recovery
+- native biometric storage calls and lifecycle
+- native-storage IPC framing and validation
+- persistent launcher state, including interrupted empty calibration
+
+The release installer was also run in `--build-only` mode from its curated
+source archive. It verified Lenovo's download, compiled 191 targets, passed all
+11 tests, produced an Arch package, and made no package or authentication
+changes. Building the archive twice from the same committed input produced
+byte-identical output.
+
+## Hardware checks
+
+The tested reader completed:
+
+- first initialization and no-touch, reader-specific calibration
+- enrollment through fprintd
+- repeated correct-finger matches
+- rejection of a different finger
+- matching after restarting fprintd and the Tudor launcher
+- matching after resetting and re-enumerating the USB reader
+- deletion followed by a fresh enrollment
+- sudo authentication with password fallback
+- polkit authentication with password fallback
+- Omarchy lock-screen authentication with password fallback
+
+The port has not yet been validated across a full operating-system upgrade,
+on a different laptop, or on a different physical `06cb:0081` reader. A reboot
+check remains part of the release checklist in [Testing](TESTING.md).

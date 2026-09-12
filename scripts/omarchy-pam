@@ -1,0 +1,835 @@
+#!/usr/bin/bash
+set -Eeuo pipefail
+umask 077
+
+readonly PAM_DIR=/etc/pam.d
+readonly STATE_ROOT=/var/lib/tudor/pam-backups
+readonly ACTIVE_FILE="$STATE_ROOT/active"
+
+readonly FPRINT_BEGIN='# BEGIN synatudor-omarchy-fingerprint'
+readonly FPRINT_END='# END synatudor-omarchy-fingerprint'
+readonly POLKIT_FALLBACK_BEGIN='# BEGIN synatudor-omarchy-polkit-password-fallback'
+readonly POLKIT_FALLBACK_END='# END synatudor-omarchy-polkit-password-fallback'
+readonly LOCK_BEGIN='# BEGIN synatudor-omarchy-lock-fingerprint'
+readonly LOCK_END='# END synatudor-omarchy-lock-fingerprint'
+
+readonly GATE_LINE='auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed'
+readonly FPRINT_LINE='auth      sufficient pam_fprintd.so'
+readonly LOCK_AUTH_LINE='auth       required                    pam_fprintd.so'
+readonly LOCK_ACCOUNT_LINE='account    include                     system-local-login'
+
+declare -a TEMP_FILES=()
+declare -a APPLY_WRITTEN=()
+declare -a ROLLBACK_WRITTEN=()
+APPLY_TXN=
+APPLY_COMMITTED=1
+ROLLBACK_ATTEMPT=
+ROLLBACK_COMMITTED=1
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  /usr/lib/synatudor/omarchy-pam apply --verified-user USER
+  /usr/lib/synatudor/omarchy-pam check
+  /usr/lib/synatudor/omarchy-pam rollback
+
+The --verified-user option is an assertion that fprintd-verify already
+succeeded interactively for USER.  This script checks that USER still has an
+enrolled print, but it never starts enrollment or verification itself.
+EOF
+}
+
+target_path() {
+  case "$1" in
+    sudo) printf '%s/sudo\n' "$PAM_DIR" ;;
+    polkit-1) printf '%s/polkit-1\n' "$PAM_DIR" ;;
+    omarchy-lock-fingerprint) printf '%s/omarchy-lock-fingerprint\n' "$PAM_DIR" ;;
+    *) die "unknown PAM target '$1'" ;;
+  esac
+}
+
+emit_fprint_block() {
+  printf '%s\n%s\n%s\n%s\n' \
+    "$FPRINT_BEGIN" "$GATE_LINE" "$FPRINT_LINE" "$FPRINT_END"
+}
+
+emit_polkit_fallback_block() {
+  printf '%s\n' "$POLKIT_FALLBACK_BEGIN"
+  printf '%s\n' 'auth      required pam_unix.so'
+  printf '\n'
+  printf '%s\n' 'account   required pam_unix.so'
+  printf '%s\n' 'password  required pam_unix.so'
+  printf '%s\n' 'session   required pam_unix.so'
+  printf '%s\n' "$POLKIT_FALLBACK_END"
+}
+
+emit_lock_file() {
+  printf '%s\n' '#%PAM-1.0' "$LOCK_BEGIN" "$LOCK_AUTH_LINE" \
+    "$LOCK_ACCOUNT_LINE" "$LOCK_END"
+}
+
+assert_secure_dir() {
+  local path=$1 mode mode_num
+  [[ -d "$path" && ! -L "$path" ]] || die "$path is not a real directory"
+  [[ $(stat -Lc '%u' -- "$path") == 0 ]] || die "$path is not owned by root"
+  mode=$(stat -Lc '%a' -- "$path")
+  mode_num=$((8#$mode))
+  (( (mode_num & 0022) == 0 )) || die "$path is writable by group or other"
+}
+
+assert_secure_file() {
+  local path=$1 mode mode_num
+  [[ -f "$path" && ! -L "$path" ]] || die "$path is not a regular file"
+  [[ $(stat -Lc '%u' -- "$path") == 0 ]] || die "$path is not owned by root"
+  mode=$(stat -Lc '%a' -- "$path")
+  mode_num=$((8#$mode))
+  (( (mode_num & 0022) == 0 )) || die "$path is writable by group or other"
+  LC_ALL=C tr -d '\000' < "$path" | cmp -s - "$path" || \
+    die "$path contains a NUL byte"
+}
+
+active_token_count() {
+  local path=$1
+  awk '
+    /^[[:space:]]*#/ { next }
+    /pam_fprintd[.]so|omarchy-hw-laptop-closed/ { count++ }
+    END { print count + 0 }
+  ' "$path"
+}
+
+declare -A PASSWORD_FLOW_SEEN=()
+
+pam_auth_entries() {
+  local path=$1 after_line=${2-}
+  awk -v after_line="$after_line" '
+    BEGIN { enabled = (after_line == "") }
+    !enabled {
+      if ($0 == after_line) enabled = 1
+      next
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line == "" || line ~ /^#/ || line !~ /^-?auth[[:space:]]+/) next
+      sub(/^-?auth[[:space:]]+/, "", line)
+
+      if (match(line, /^\[[^]]+\][[:space:]]+/)) {
+        control = "bracket"
+        line = substr(line, RLENGTH + 1)
+      } else {
+        separator = match(line, /[[:space:]]+/)
+        if (!separator) next
+        control = substr(line, 1, separator - 1)
+        line = substr(line, separator + RLENGTH)
+      }
+
+      value = line
+      sub(/[[:space:]].*$/, "", value)
+      if (value == "") next
+      if (control == "include" || control == "substack")
+        print "include\t" value
+      else
+        print "module\t" value
+    }
+  ' "$path"
+}
+
+pam_file_has_password_flow() {
+  local path=$1 after_line=${2-} key kind value include_path
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  key=$(readlink -f -- "$path") || return 1
+  [[ -z ${PASSWORD_FLOW_SEEN[$key]+x} ]] || return 1
+  PASSWORD_FLOW_SEEN[$key]=1
+
+  while IFS=$'\t' read -r kind value; do
+    case "$kind" in
+      module)
+        [[ ${value##*/} == pam_unix.so ]] && return 0
+        ;;
+      include)
+        [[ $value =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+        include_path="$PAM_DIR/$value"
+        [[ -f "$include_path" && ! -L "$include_path" ]] || continue
+        assert_secure_file "$include_path"
+        pam_file_has_password_flow "$include_path" && return 0
+        ;;
+    esac
+  done < <(pam_auth_entries "$path" "$after_line")
+  return 1
+}
+
+has_password_auth_flow() {
+  PASSWORD_FLOW_SEEN=()
+  pam_file_has_password_flow "$@"
+}
+
+block_starts_auth_stack() {
+  local path=$1 begin=$2
+  awk -v begin="$begin" '
+    $0 == begin { found = 1; exit }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ /^-?auth[[:space:]]+/) auth_before = 1
+    }
+    END { exit(found && !auth_before ? 0 : 1) }
+  ' "$path"
+}
+
+marker_count() {
+  local path=$1 marker=$2
+  awk -v marker="$marker" '$0 == marker { count++ } END { print count + 0 }' "$path"
+}
+
+extract_block() {
+  local path=$1 begin=$2 end=$3
+  awk -v begin="$begin" -v end="$end" '
+    $0 == begin { inside = 1 }
+    inside { print }
+    inside && $0 == end { exit }
+  ' "$path"
+}
+
+block_is_exact() {
+  local path=$1 begin=$2 end=$3 expected_kind=$4 actual expected
+  [[ $(marker_count "$path" "$begin") == 1 ]] || return 1
+  [[ $(marker_count "$path" "$end") == 1 ]] || return 1
+  actual=$(extract_block "$path" "$begin" "$end")
+  case "$expected_kind" in
+    fprint) expected=$(emit_fprint_block) ;;
+    polkit-fallback) expected=$(emit_polkit_fallback_block) ;;
+    lock)
+      expected=$(printf '%s\n%s\n%s\n%s\n' \
+        "$LOCK_BEGIN" "$LOCK_AUTH_LINE" "$LOCK_ACCOUNT_LINE" "$LOCK_END")
+      ;;
+    *) die "unknown managed block '$expected_kind'" ;;
+  esac
+  [[ "$actual" == "$expected" ]]
+}
+
+has_any_managed_marker() {
+  local path=$1
+  grep -Fq -e "$FPRINT_BEGIN" -e "$FPRINT_END" \
+    -e "$POLKIT_FALLBACK_BEGIN" -e "$POLKIT_FALLBACK_END" \
+    -e "$LOCK_BEGIN" -e "$LOCK_END" -- "$path"
+}
+
+strip_block() {
+  local path=$1 begin=$2 end=$3
+  awk -v begin="$begin" -v end="$end" '
+    $0 == begin { inside = 1; next }
+    inside && $0 == end { inside = 0; next }
+    !inside { print }
+  ' "$path"
+}
+
+validate_sudo_content() {
+  local path=$1
+  block_is_exact "$path" "$FPRINT_BEGIN" "$FPRINT_END" fprint || return 1
+  block_starts_auth_stack "$path" "$FPRINT_BEGIN" || return 1
+  [[ $(active_token_count "$path") == 2 ]] || return 1
+  has_password_auth_flow "$path" "$FPRINT_END"
+}
+
+validate_polkit_content() {
+  local path=$1 original_was_absent=$2
+  block_is_exact "$path" "$FPRINT_BEGIN" "$FPRINT_END" fprint || return 1
+  block_starts_auth_stack "$path" "$FPRINT_BEGIN" || return 1
+  [[ $(active_token_count "$path") == 2 ]] || return 1
+  has_password_auth_flow "$path" "$FPRINT_END" || return 1
+  if [[ $original_was_absent == 1 ]]; then
+    block_is_exact "$path" "$POLKIT_FALLBACK_BEGIN" \
+      "$POLKIT_FALLBACK_END" polkit-fallback || return 1
+  elif grep -Fq -e "$POLKIT_FALLBACK_BEGIN" -e "$POLKIT_FALLBACK_END" -- "$path"; then
+    return 1
+  fi
+}
+
+validate_password_lock() {
+  local path="$PAM_DIR/omarchy-lock-password"
+  assert_secure_file "$path"
+  has_password_auth_flow "$path" || \
+    die "$path does not provide the lock screen's password fallback"
+}
+
+validate_transaction() {
+  local txn=$1 name
+  [[ -d "$txn" && ! -L "$txn" ]] || die "invalid PAM backup transaction $txn"
+  [[ $(stat -Lc '%u' -- "$txn") == 0 ]] || die "$txn is not owned by root"
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    [[ -f "$txn/applied/$name" && ! -L "$txn/applied/$name" ]] || \
+      die "transaction is missing applied/$name"
+    if [[ -e "$txn/original/$name" ]]; then
+      [[ -f "$txn/original/$name" && ! -L "$txn/original/$name" ]] || \
+        die "invalid original backup for $name"
+      [[ ! -e "$txn/original/$name.absent" ]] || \
+        die "transaction has conflicting original state for $name"
+    else
+      [[ -f "$txn/original/$name.absent" && ! -L "$txn/original/$name.absent" ]] || \
+        die "transaction is missing original state for $name"
+    fi
+  done
+  [[ -f "$txn/SHA256SUMS" && ! -L "$txn/SHA256SUMS" ]] || \
+    die "transaction is missing its checksum manifest"
+  (cd "$txn" && sha256sum --check --strict SHA256SUMS >/dev/null) || \
+    die "PAM backup transaction checksum validation failed"
+}
+
+read_active_transaction() {
+  local id
+  [[ -f "$ACTIVE_FILE" && ! -L "$ACTIVE_FILE" ]] || return 1
+  assert_secure_file "$ACTIVE_FILE"
+  [[ $(wc -l < "$ACTIVE_FILE") == 1 ]] || die 'invalid active PAM backup file'
+  IFS= read -r id < "$ACTIVE_FILE"
+  [[ $id =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || \
+    die "invalid active PAM backup identifier"
+  validate_transaction "$STATE_ROOT/$id"
+  printf '%s\n' "$STATE_ROOT/$id"
+}
+
+write_small_file_atomically() {
+  local value=$1 target=$2 tmp
+  tmp=$(mktemp "$STATE_ROOT/.state.XXXXXX")
+  TEMP_FILES+=("$tmp")
+  printf '%s\n' "$value" > "$tmp"
+  chmod 0600 "$tmp"
+  chown 0:0 "$tmp"
+  mv -fT -- "$tmp" "$target"
+}
+
+write_status() {
+  local txn=$1 value=$2
+  write_small_file_atomically "$value" "$txn/status"
+}
+
+remove_active_if_matches() {
+  local txn=$1 active=
+  if active=$(read_active_transaction 2>/dev/null) && [[ $active == "$txn" ]]; then
+    rm -f -- "$ACTIVE_FILE"
+  fi
+}
+
+snapshot_target() {
+  local root=$1 name=$2 target
+  target=$(target_path "$name")
+  if [[ -e "$target" ]]; then
+    assert_secure_file "$target"
+    cp -a -- "$target" "$root/$name"
+  else
+    : > "$root/$name.absent"
+  fi
+}
+
+same_as_snapshot() {
+  local root=$1 name=$2 target
+  target=$(target_path "$name")
+  if [[ -f "$root/$name" ]]; then
+    [[ -f "$target" && ! -L "$target" ]] && cmp -s -- "$target" "$root/$name"
+  else
+    [[ ! -e "$target" ]]
+  fi
+}
+
+atomic_write_like() {
+  local source=$1 target=$2 reference=$3 tmp
+  tmp=$(mktemp "$PAM_DIR/.$(basename "$target").synatudor.XXXXXX")
+  TEMP_FILES+=("$tmp")
+  # Keep ACLs, xattrs, ownership, and mode from the file whose metadata should
+  # survive this edit.  The temporary file is on the same filesystem, so the
+  # final rename is atomic.
+  cp --attributes-only --preserve=all -- "$reference" "$tmp"
+  cat -- "$source" > "$tmp"
+  touch --reference="$reference" "$tmp"
+  mv -fT -- "$tmp" "$target"
+}
+
+atomic_write_new() {
+  local source=$1 target=$2 tmp
+  tmp=$(mktemp "$PAM_DIR/.$(basename "$target").synatudor.XXXXXX")
+  TEMP_FILES+=("$tmp")
+  install -o 0 -g 0 -m 0644 -- "$source" "$tmp"
+  mv -fT -- "$tmp" "$target"
+}
+
+restore_snapshot() {
+  local root=$1 name=$2 target
+  target=$(target_path "$name")
+  if [[ -f "$root/$name" ]]; then
+    atomic_write_like "$root/$name" "$target" "$root/$name"
+  else
+    rm -f -- "$target"
+  fi
+}
+
+current_matches_planned_result() {
+  local plan=$1 name=$2 action target
+  action=$(<"$plan/$name.action")
+  target=$(target_path "$name")
+  case "$action" in
+    write) [[ -f "$target" && ! -L "$target" ]] && cmp -s -- "$target" "$plan/$name.content" ;;
+    remove) [[ ! -e "$target" ]] ;;
+    noop) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+cleanup_on_exit() {
+  local status=$? name
+  set +e
+
+  if (( status != 0 )) && [[ -n $APPLY_TXN ]] && (( ! APPLY_COMMITTED )); then
+    for (( idx=${#APPLY_WRITTEN[@]}-1; idx>=0; idx-- )); do
+      name=${APPLY_WRITTEN[idx]}
+      if cmp -s -- "$(target_path "$name")" "$APPLY_TXN/applied/$name" 2>/dev/null; then
+        restore_snapshot "$APPLY_TXN/original" "$name"
+      else
+        printf 'warning: preserving concurrent edit to %s during failed apply\n' \
+          "$(target_path "$name")" >&2
+      fi
+    done
+    write_status "$APPLY_TXN" failed-restored
+    remove_active_if_matches "$APPLY_TXN"
+  fi
+
+  if (( status != 0 )) && [[ -n $ROLLBACK_ATTEMPT ]] && (( ! ROLLBACK_COMMITTED )); then
+    for (( idx=${#ROLLBACK_WRITTEN[@]}-1; idx>=0; idx-- )); do
+      name=${ROLLBACK_WRITTEN[idx]}
+      if current_matches_planned_result "$ROLLBACK_ATTEMPT/plan" "$name"; then
+        restore_snapshot "$ROLLBACK_ATTEMPT/current" "$name"
+      else
+        printf 'warning: preserving concurrent edit to %s during failed rollback\n' \
+          "$(target_path "$name")" >&2
+      fi
+    done
+  fi
+
+  ((${#TEMP_FILES[@]} == 0)) || rm -f -- "${TEMP_FILES[@]}"
+  exit "$status"
+}
+trap cleanup_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+prepare_state_root() {
+  [[ ! -e /var/lib/tudor || ( -d /var/lib/tudor && ! -L /var/lib/tudor ) ]] || \
+    die '/var/lib/tudor is not a real directory'
+  [[ ! -e "$STATE_ROOT" || ( -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ) ]] || \
+    die "$STATE_ROOT is not a real directory"
+  install -d -o 0 -g 0 -m 0700 /var/lib/tudor "$STATE_ROOT"
+  assert_secure_dir /var/lib/tudor
+  assert_secure_dir "$STATE_ROOT"
+  [[ ! -L "$STATE_ROOT/.lock" ]] || die "$STATE_ROOT/.lock is a symbolic link"
+  exec 9>"$STATE_ROOT/.lock"
+  chmod 0600 "$STATE_ROOT/.lock"
+  chown 0:0 "$STATE_ROOT/.lock"
+  flock -x 9
+}
+
+validate_current_config() {
+  local txn=$1 sudo_path polkit_path lock_path polkit_absent=0
+  sudo_path=$(target_path sudo)
+  polkit_path=$(target_path polkit-1)
+  lock_path=$(target_path omarchy-lock-fingerprint)
+
+  assert_secure_file "$sudo_path"
+  assert_secure_file "$polkit_path"
+  assert_secure_file "$lock_path"
+  validate_sudo_content "$sudo_path" || die 'sudo PAM fingerprint block failed validation'
+  [[ -f "$txn/original/polkit-1.absent" ]] && polkit_absent=1
+  validate_polkit_content "$polkit_path" "$polkit_absent" || \
+    die 'polkit PAM fingerprint or password fallback failed validation'
+  cmp -s -- "$lock_path" "$txn/applied/omarchy-lock-fingerprint" || \
+    die 'lock fingerprint PAM file is not the exact managed configuration'
+  validate_password_lock
+}
+
+check_enrolled_verified_user() {
+  local user=$1 listing
+  [[ $user =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "invalid user name '$user'"
+  getent passwd "$user" >/dev/null || die "unknown user '$user'"
+  command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
+  [[ -r /usr/lib/security/pam_fprintd.so ]] || die 'pam_fprintd.so is unavailable'
+  [[ -r /usr/lib/security/pam_exec.so ]] || die 'pam_exec.so is unavailable'
+  [[ -x /usr/bin/omarchy-hw-laptop-closed ]] || \
+    die 'the Omarchy laptop-closed gate is unavailable'
+
+  if ! listing=$(LC_ALL=C fprintd-list "$user" 2>&1); then
+    printf '%s\n' "$listing" >&2
+    die "could not list enrolled prints for $user"
+  fi
+  grep -Eiq '(left|right)-(thumb|index-finger|middle-finger|ring-finger|little-finger)' \
+    <<<"$listing" || die "$user has no enrolled fingerprint"
+}
+
+apply_config() {
+  local user=$1 active txn id name target polkit_existed=0
+  local -a checksum_paths
+
+  check_enrolled_verified_user "$user"
+  validate_password_lock
+  assert_secure_file "$PAM_DIR/sudo"
+
+  if [[ -e "$ACTIVE_FILE" || -L "$ACTIVE_FILE" ]]; then
+    active=$(read_active_transaction) || die 'could not read the active PAM backup transaction'
+    validate_current_config "$active"
+    printf 'Omarchy fingerprint PAM is already configured for %s.\n' "$user"
+    printf 'Backup transaction: %s\n' "$active"
+    return
+  fi
+
+  [[ $(active_token_count "$PAM_DIR/sudo") == 0 ]] || \
+    die 'sudo already has an unmanaged fingerprint or lid-gate entry'
+
+  if [[ -e "$PAM_DIR/polkit-1" ]]; then
+    assert_secure_file "$PAM_DIR/polkit-1"
+    polkit_existed=1
+  fi
+  if [[ -e "$PAM_DIR/omarchy-lock-fingerprint" ]]; then
+    assert_secure_file "$PAM_DIR/omarchy-lock-fingerprint"
+  fi
+
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    target=$(target_path "$name")
+    if [[ -e "$target" ]] && \
+       { has_any_managed_marker "$target" || [[ $(active_token_count "$target") != 0 ]]; }; then
+      die "$target contains fingerprint PAM changes without a managed backup"
+    fi
+  done
+  [[ ! -e "$PAM_DIR/omarchy-lock-fingerprint" ]] || \
+    die "$PAM_DIR/omarchy-lock-fingerprint already exists; refusing to replace it"
+
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  txn="$STATE_ROOT/$id"
+  mkdir -- "$txn"
+  chmod 0700 "$txn"
+  chown 0:0 "$txn"
+  install -d -o 0 -g 0 -m 0700 "$txn/original" "$txn/applied"
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    snapshot_target "$txn/original" "$name"
+  done
+
+  {
+    emit_fprint_block
+    cat -- "$PAM_DIR/sudo"
+  } > "$txn/applied/sudo"
+
+  if (( polkit_existed )); then
+    {
+      emit_fprint_block
+      cat -- "$PAM_DIR/polkit-1"
+    } > "$txn/applied/polkit-1"
+  else
+    {
+      printf '%s\n' '#%PAM-1.0'
+      emit_fprint_block
+      emit_polkit_fallback_block
+    } > "$txn/applied/polkit-1"
+  fi
+  emit_lock_file > "$txn/applied/omarchy-lock-fingerprint"
+  chmod 0600 "$txn/applied/"*
+  chown 0:0 "$txn/applied/"*
+
+  validate_sudo_content "$txn/applied/sudo" || die 'staged sudo PAM validation failed'
+  validate_polkit_content "$txn/applied/polkit-1" "$((! polkit_existed))" || \
+    die 'staged polkit PAM validation failed'
+  cmp -s -- "$txn/applied/omarchy-lock-fingerprint" <(emit_lock_file) || \
+    die 'staged lock PAM validation failed'
+  checksum_paths=(
+    applied/sudo
+    applied/polkit-1
+    applied/omarchy-lock-fingerprint
+    original/sudo
+    original/omarchy-lock-fingerprint.absent
+  )
+  if [[ -f "$txn/original/polkit-1" ]]; then
+    checksum_paths+=(original/polkit-1)
+  else
+    checksum_paths+=(original/polkit-1.absent)
+  fi
+  (cd "$txn" && sha256sum "${checksum_paths[@]}" > SHA256SUMS)
+  chmod 0600 "$txn/SHA256SUMS"
+  chown 0:0 "$txn/SHA256SUMS"
+
+  write_status "$txn" applying
+  write_small_file_atomically "$id" "$ACTIVE_FILE"
+  APPLY_TXN=$txn
+  APPLY_COMMITTED=0
+
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    target=$(target_path "$name")
+    same_as_snapshot "$txn/original" "$name" || \
+      die "$target changed while the PAM update was being prepared"
+    APPLY_WRITTEN+=("$name")
+    if [[ -f "$txn/original/$name" ]]; then
+      atomic_write_like "$txn/applied/$name" "$target" "$txn/original/$name"
+    else
+      atomic_write_new "$txn/applied/$name" "$target"
+    fi
+  done
+
+  validate_current_config "$txn"
+  write_small_file_atomically "$user" "$txn/verified-user"
+  write_status "$txn" active
+  APPLY_COMMITTED=1
+
+  printf 'Configured Omarchy fingerprint PAM for %s.\n' "$user"
+  printf 'Password authentication remains available for sudo, polkit, and the lock screen.\n'
+  printf 'This script accepted --verified-user; it did not run fingerprint verification.\n'
+  printf 'Timestamped backup transaction: %s\n' "$txn"
+}
+
+set_plan_action() {
+  local plan=$1 name=$2 action=$3
+  printf '%s\n' "$action" > "$plan/$name.action"
+}
+
+prepare_exact_restore_plan() {
+  local txn=$1 plan=$2 name=$3
+  if [[ -f "$txn/original/$name" ]]; then
+    cp -- "$txn/original/$name" "$plan/$name.content"
+    set_plan_action "$plan" "$name" write
+  else
+    set_plan_action "$plan" "$name" remove
+  fi
+}
+
+prepare_sudo_changed_plan() {
+  local snapshot=$1 plan=$2 path="$snapshot/sudo"
+  if block_is_exact "$path" "$FPRINT_BEGIN" "$FPRINT_END" fprint; then
+    strip_block "$path" "$FPRINT_BEGIN" "$FPRINT_END" > "$plan/sudo.content"
+    [[ $(active_token_count "$plan/sudo.content") == 0 ]] || return 1
+    ! has_any_managed_marker "$plan/sudo.content" || return 1
+    has_password_auth_flow "$plan/sudo.content" || return 1
+    set_plan_action "$plan" sudo write
+  elif ! has_any_managed_marker "$path" && [[ $(active_token_count "$path") == 0 ]]; then
+    has_password_auth_flow "$path" || return 1
+    set_plan_action "$plan" sudo noop
+  else
+    return 1
+  fi
+}
+
+prepare_polkit_changed_plan() {
+  local txn=$1 snapshot=$2 plan=$3 path="$snapshot/polkit-1" work
+  if [[ ! -f "$path" ]]; then
+    set_plan_action "$plan" polkit-1 noop
+    return
+  fi
+
+  cp -- "$path" "$plan/polkit-1.content"
+  if grep -Fq -e "$FPRINT_BEGIN" -e "$FPRINT_END" -- "$plan/polkit-1.content"; then
+    block_is_exact "$plan/polkit-1.content" "$FPRINT_BEGIN" "$FPRINT_END" fprint || return 1
+    work="$plan/polkit-1.work"
+    strip_block "$plan/polkit-1.content" "$FPRINT_BEGIN" "$FPRINT_END" > "$work"
+    mv -f -- "$work" "$plan/polkit-1.content"
+  fi
+
+  if [[ -f "$txn/original/polkit-1.absent" ]] && \
+     grep -Fq -e "$POLKIT_FALLBACK_BEGIN" -e "$POLKIT_FALLBACK_END" \
+       -- "$plan/polkit-1.content"; then
+    block_is_exact "$plan/polkit-1.content" "$POLKIT_FALLBACK_BEGIN" \
+      "$POLKIT_FALLBACK_END" polkit-fallback || return 1
+    work="$plan/polkit-1.work"
+    strip_block "$plan/polkit-1.content" "$POLKIT_FALLBACK_BEGIN" \
+      "$POLKIT_FALLBACK_END" > "$work"
+    mv -f -- "$work" "$plan/polkit-1.content"
+  fi
+
+  [[ $(active_token_count "$plan/polkit-1.content") == 0 ]] || return 1
+  ! has_any_managed_marker "$plan/polkit-1.content" || return 1
+
+  if [[ -f "$txn/original/polkit-1.absent" ]] && \
+     cmp -s -- "$plan/polkit-1.content" <(printf '%s\n' '#%PAM-1.0'); then
+    set_plan_action "$plan" polkit-1 remove
+  elif cmp -s -- "$path" "$plan/polkit-1.content"; then
+    set_plan_action "$plan" polkit-1 noop
+  else
+    has_password_auth_flow "$plan/polkit-1.content" || return 1
+    set_plan_action "$plan" polkit-1 write
+  fi
+}
+
+prepare_rollback_plan() {
+  local txn=$1 attempt=$2 plan="$attempt/plan" snapshot="$attempt/current"
+  local name target conflict=0
+  install -d -o 0 -g 0 -m 0700 "$plan" "$snapshot"
+
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    snapshot_target "$snapshot" "$name"
+  done
+
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    target=$(target_path "$name")
+    if [[ -f "$snapshot/$name" ]] && cmp -s -- "$snapshot/$name" "$txn/applied/$name"; then
+      prepare_exact_restore_plan "$txn" "$plan" "$name"
+      continue
+    fi
+    if [[ ! -f "$snapshot/$name" ]]; then
+      set_plan_action "$plan" "$name" noop
+      continue
+    fi
+
+    case "$name" in
+      sudo)
+        if ! prepare_sudo_changed_plan "$snapshot" "$plan"; then
+          printf 'conflict: %s changed inside a managed PAM block or lost password fallback\n' \
+            "$target" >&2
+          conflict=1
+        fi
+        ;;
+      polkit-1)
+        if ! prepare_polkit_changed_plan "$txn" "$snapshot" "$plan"; then
+          printf 'conflict: cannot remove managed polkit blocks without altering later edits\n' >&2
+          conflict=1
+        fi
+        ;;
+      omarchy-lock-fingerprint)
+        if [[ ! -e "$target" ]]; then
+          set_plan_action "$plan" "$name" noop
+        else
+          printf 'conflict: %s changed after installation; preserving it verbatim\n' \
+            "$target" >&2
+          conflict=1
+        fi
+        ;;
+    esac
+  done
+
+  (( conflict == 0 ))
+}
+
+apply_rollback_plan() {
+  local attempt=$1 plan="$attempt/plan" snapshot="$attempt/current"
+  local name action target reference
+
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    same_as_snapshot "$snapshot" "$name" || \
+      die "$(target_path "$name") changed while rollback was being prepared"
+  done
+
+  ROLLBACK_ATTEMPT=$attempt
+  ROLLBACK_COMMITTED=0
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    action=$(<"$plan/$name.action")
+    target=$(target_path "$name")
+    case "$action" in
+      noop) continue ;;
+      remove)
+        ROLLBACK_WRITTEN+=("$name")
+        rm -f -- "$target"
+        ;;
+      write)
+        if [[ -f "$snapshot/$name" ]]; then
+          reference="$snapshot/$name"
+        else
+          reference="$plan/$name.content"
+        fi
+        ROLLBACK_WRITTEN+=("$name")
+        atomic_write_like "$plan/$name.content" "$target" "$reference"
+        ;;
+      *) die "invalid rollback action for $name" ;;
+    esac
+  done
+}
+
+managed_pam_without_state() {
+  local name target
+  for name in sudo polkit-1 omarchy-lock-fingerprint; do
+    target=$(target_path "$name")
+    [[ -e "$target" ]] || continue
+    if [[ $name == omarchy-lock-fingerprint ]] || \
+       has_any_managed_marker "$target" || [[ $(active_token_count "$target") != 0 ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+rollback_config() {
+  local txn attempt name target
+  if [[ -e "$ACTIVE_FILE" || -L "$ACTIVE_FILE" ]]; then
+    txn=$(read_active_transaction) || die 'could not read the active PAM backup transaction'
+  else
+    managed_pam_without_state && \
+      die 'fingerprint PAM configuration exists without a managed backup; refusing to alter it'
+    printf 'No managed Omarchy fingerprint PAM configuration is active.\n'
+    return
+  fi
+
+  attempt="$txn/rollback-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -- "$attempt"
+  chmod 0700 "$attempt"
+  chown 0:0 "$attempt"
+  if ! prepare_rollback_plan "$txn" "$attempt"; then
+    write_status "$txn" rollback-conflict
+    die "PAM rollback stopped without changing any file; backups remain in $txn"
+  fi
+
+  write_status "$txn" rolling-back
+  apply_rollback_plan "$attempt"
+
+  for name in sudo polkit-1; do
+    target=$(target_path "$name")
+    if [[ -e "$target" ]] && \
+       { [[ $(active_token_count "$target") != 0 ]] || has_any_managed_marker "$target"; }; then
+      die "$target still contains managed fingerprint PAM entries"
+    fi
+  done
+  target=$(target_path omarchy-lock-fingerprint)
+  [[ ! -e "$target" ]] || die "$target still exists after rollback"
+
+  write_status "$txn" rolled-back
+  ROLLBACK_COMMITTED=1
+  remove_active_if_matches "$txn"
+  printf 'Rolled back the managed Omarchy fingerprint PAM configuration.\n'
+  printf 'Timestamped backups remain at %s.\n' "$txn"
+}
+
+check_config() {
+  local txn
+  txn=$(read_active_transaction) || die 'no managed fingerprint PAM transaction is active'
+  validate_current_config "$txn"
+  printf 'Managed Omarchy fingerprint PAM configuration is valid.\n'
+  printf 'Backup transaction: %s\n' "$txn"
+}
+
+if (( $# == 1 )) && [[ $1 == -h || $1 == --help ]]; then
+  usage
+  exit 0
+fi
+(( $# >= 1 )) || { usage; exit 2; }
+action=$1
+shift
+case "$action" in
+  apply)
+    [[ $# == 2 && $1 == --verified-user ]] || { usage; exit 2; }
+    verified_user=$2
+    forwarded=(apply --verified-user "$verified_user")
+    ;;
+  check|rollback)
+    (( $# == 0 )) || { usage; exit 2; }
+    forwarded=("$action")
+    ;;
+  *) usage; exit 2 ;;
+esac
+
+if (( EUID != 0 )); then
+  self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+  exec sudo -- "$self" "${forwarded[@]}"
+fi
+
+assert_secure_dir "$PAM_DIR"
+prepare_state_root
+
+case "$action" in
+  apply) apply_config "$verified_user" ;;
+  check) check_config ;;
+  rollback) rollback_config ;;
+esac

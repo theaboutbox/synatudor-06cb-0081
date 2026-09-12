@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: synatudor-uninstall [--purge]
+
+Removes the driver, rolls back PAM changes made by synatudor-setup, and
+restores stock libfprint when it was replaced during installation.
+
+Without --purge, reader calibration, pairing, and enrollment state is kept.
+
+--purge  Delete every enrolled fingerprint that fprintd exposes for the
+         invoking desktop user, then permanently delete all Tudor state under
+         /var/lib/tudor, including calibration, pairing, and PAM backups.
+EOF
+}
+
+purge=0
+while (( $# )); do
+  case $1 in
+    --purge) purge=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
+
+# pacman removes this file while the command is still running. Continue from a
+# private copy so the rest of the rollback cannot be truncated mid-script.
+if [[ ${SYNATUDOR_UNINSTALL_PRIVATE_COPY:-0} != 1 ]]; then
+  self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+  private_copy=$(mktemp /tmp/synatudor-uninstall.XXXXXX)
+  cp -- "$self" "$private_copy"
+  chmod 0700 "$private_copy"
+  export SYNATUDOR_UNINSTALL_PRIVATE_COPY=1
+  export SYNATUDOR_UNINSTALL_PRIVATE_PATH=$private_copy
+  private_args=()
+  (( ! purge )) || private_args+=(--purge)
+  exec "$private_copy" "${private_args[@]}"
+fi
+trap 'rm -f -- "${SYNATUDOR_UNINSTALL_PRIVATE_PATH:-}"' EXIT
+
+if (( EUID == 0 )); then
+  [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]] || \
+    die 'run synatudor-uninstall as the desktop user, without sudo'
+  target_user=$SUDO_USER
+else
+  target_user=$(id -un)
+fi
+
+sudo -v
+
+saved_value=
+read_saved_state() {
+  local path=$1 mode mode_num
+  sudo test -e "$path" || return 1
+  sudo test -f "$path" || die "$path is not a regular file"
+  sudo test ! -L "$path" || die "$path is a symbolic link"
+  [[ $(sudo stat -Lc '%u' -- "$path") == 0 ]] || die "$path is not owned by root"
+  mode=$(sudo stat -Lc '%a' -- "$path")
+  mode_num=$((8#$mode))
+  (( (mode_num & 0022) == 0 )) || die "$path is writable by group or other"
+  saved_value=$(sudo cat -- "$path")
+}
+
+original_provider=unknown
+if read_saved_state /var/lib/tudor/installer/original-libfprint-provider; then
+  original_provider=$saved_value
+  case $original_provider in
+    libfprint|libfprint-tod|libfprint-git|none) ;;
+    *) die 'invalid saved libfprint provider; refusing to guess during rollback' ;;
+  esac
+fi
+
+fprintd_was_installed=unknown
+if read_saved_state /var/lib/tudor/installer/fprintd-was-installed; then
+  fprintd_was_installed=$saved_value
+  case $fprintd_was_installed in
+    0|1) ;;
+    *) die 'invalid saved fprintd installation state; refusing to guess during rollback' ;;
+  esac
+fi
+
+# Authentication configuration is disabled before any driver or provider is
+# removed. The helper uses its checksummed snapshot and refuses on conflicts.
+if sudo test -f /var/lib/tudor/pam-backups/active; then
+  [[ -x /usr/lib/synatudor/omarchy-pam ]] || die 'managed PAM backup exists but its rollback helper is missing'
+  sudo /usr/lib/synatudor/omarchy-pam rollback
+fi
+
+fingerprint_purge_result=not-requested
+if (( purge )) && pacman -Q synatudor-0081 >/dev/null 2>&1; then
+  if listing=$(fprintd-list "$target_user" 2>&1); then
+    if grep -Eiq '(left|right)-(thumb|index-finger|middle-finger|ring-finger|little-finger)' <<<"$listing"; then
+      fingerprint_purge_result=failed
+      printf 'Deleting all fingerprints exposed by fprintd for %s...\n' "$target_user"
+      if fprintd-delete "$target_user"; then
+        fingerprint_purge_result=deleted
+      else
+        printf 'warning: fprintd could not delete every accessible fingerprint for %s\n' \
+          "$target_user" >&2
+      fi
+    else
+      fingerprint_purge_result=none
+    fi
+  else
+    fingerprint_purge_result=unavailable
+    printf '%s\n' "$listing" >&2
+    printf 'warning: fprintd could not inspect fingerprints for %s; continuing Tudor state purge\n' \
+      "$target_user" >&2
+  fi
+elif (( purge )); then
+  fingerprint_purge_result=unavailable
+  printf '%s\n' \
+    'warning: synatudor-0081 is not installed, so enrolled sensor records cannot be queried before the Tudor state purge' >&2
+fi
+
+if [[ $fingerprint_purge_result == deleted ]]; then
+  printf 'Deleted all fingerprints exposed by fprintd for %s.\n' "$target_user"
+elif [[ $fingerprint_purge_result == none ]]; then
+  printf 'fprintd reports no enrolled fingerprints for %s.\n' "$target_user"
+fi
+
+restart_fprintd_on_exit() {
+  if pacman -Q fprintd >/dev/null 2>&1; then
+    sudo systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+    sudo systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
+  fi
+}
+trap 'restart_fprintd_on_exit; rm -f -- "${SYNATUDOR_UNINSTALL_PRIVATE_PATH:-}"' EXIT
+
+sudo systemctl stop fprintd.service tudor-host-launcher.service 2>/dev/null || true
+if pacman -Q synatudor-0081 >/dev/null 2>&1; then
+  sudo pacman --noconfirm -R synatudor-0081
+fi
+
+case $fprintd_was_installed in
+  0)
+    if pacman -Q fprintd >/dev/null 2>&1; then
+      printf 'Removing fprintd because it was absent before installation...\n'
+      if ! sudo pacman --noconfirm -R fprintd; then
+        printf '%s\n' \
+          'warning: fprintd is now required by another package; it has been retained' >&2
+      fi
+    fi
+    ;;
+  1)
+    printf 'Retained fprintd because it was installed before this driver.\n'
+    ;;
+  unknown)
+    printf '%s\n' \
+      'warning: no saved fprintd installation state was found; fprintd has been retained' >&2
+    ;;
+esac
+
+case $original_provider in
+  libfprint)
+    sudo pacman --noconfirm --ask=4 -S libfprint
+    printf 'Restored stock libfprint, which was present before installation.\n'
+    ;;
+  libfprint-tod)
+    printf 'Retained libfprint-tod, which was present before installation.\n'
+    ;;
+  libfprint-git)
+    printf '%s\n' \
+      'The previous provider was libfprint-git, which is not in the Arch repositories.' \
+      'libfprint-tod has been retained; reinstall libfprint-git manually to restore the exact previous provider.'
+    ;;
+  none)
+    if pacman -Q fprintd >/dev/null 2>&1; then
+      printf '%s\n' \
+        'warning: no libfprint provider was originally installed, but fprintd still needs one; libfprint-tod has been retained' >&2
+    elif pacman -Q libfprint-tod >/dev/null 2>&1; then
+      if sudo pacman --noconfirm -R libfprint-tod; then
+        printf 'Removed libfprint-tod because no provider was installed before this driver.\n'
+      else
+        printf '%s\n' \
+          'warning: libfprint-tod is now required by another package; it has been retained' >&2
+      fi
+    fi
+    ;;
+  unknown)
+    printf '%s\n' \
+      'warning: no saved original libfprint provider was found; the current provider has been retained' >&2
+    ;;
+esac
+
+sudo systemctl daemon-reload
+sudo udevadm control --reload
+sudo udevadm trigger --action=change --subsystem-match=usb \
+  --attr-match=idVendor=06cb --attr-match=idProduct=0081 2>/dev/null || true
+sudo udevadm settle --timeout=10
+
+if (( purge )); then
+  if sudo test -e /var/lib/tudor; then
+    sudo test -d /var/lib/tudor || die '/var/lib/tudor is not a directory'
+    sudo test ! -L /var/lib/tudor || die '/var/lib/tudor is a symbolic link'
+    [[ $(sudo stat -Lc '%u' -- /var/lib/tudor) == 0 ]] || \
+      die '/var/lib/tudor is not owned by root'
+    tudor_mode=$(sudo stat -Lc '%a' -- /var/lib/tudor)
+    tudor_mode_num=$((8#$tudor_mode))
+    (( (tudor_mode_num & 0022) == 0 )) || \
+      die '/var/lib/tudor is writable by group or other'
+    sudo find -P /var/lib/tudor -xdev -depth -delete
+  fi
+  printf 'Permanently removed all Tudor state under /var/lib/tudor.\n'
+else
+  printf 'Preserved Tudor device state under /var/lib/tudor.\n'
+fi
+
+restart_fprintd_on_exit
+trap 'rm -f -- "${SYNATUDOR_UNINSTALL_PRIVATE_PATH:-}"' EXIT
+printf 'Removed synatudor-0081.\n'

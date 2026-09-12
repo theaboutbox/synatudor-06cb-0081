@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+run_setup=1
+build_only=0
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/install [--driver-only] [--build-only]
+
+Builds the exact tested libfprint-tod 1.95.2+tod1-1 package and a
+synatudor-0081 Arch package, installs them through pacman, and starts guided
+calibration/enrollment on Omarchy.
+
+--driver-only  Install and activate the driver without enrollment or PAM.
+--build-only   Build in the private cache with no reader required; change no packages.
+EOF
+}
+
+while (( $# )); do
+  case $1 in
+    --driver-only) run_setup=0 ;;
+    --build-only) build_only=1; run_setup=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
+
+(( EUID != 0 )) || die 'run this installer as your regular user, without sudo'
+[[ $(uname -m) == x86_64 ]] || die 'the pinned Windows driver requires x86-64 Linux'
+[[ -e /etc/arch-release ]] || die 'this installer currently supports Arch Linux and Omarchy'
+
+if (( ! build_only )); then
+  [[ -t 0 && -t 1 ]] || die 'installation needs an interactive terminal'
+fi
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+[[ -f $repo_dir/packaging/arch/PKGBUILD ]] || die 'Arch packaging is missing from this checkout'
+[[ -x $repo_dir/scripts/make-source-archive ]] || die 'source archive helper is unavailable'
+
+if (( ! build_only )); then
+  sensor_count=0
+  shopt -s nullglob
+  for vendor in /sys/bus/usb/devices/*/idVendor; do
+    [[ $(<"$vendor") == 06cb ]] || continue
+    product=${vendor%/idVendor}/idProduct
+    [[ -r $product && $(<"$product") == 0081 ]] || continue
+    ((++sensor_count))
+  done
+  [[ $sensor_count == 1 ]] || \
+    die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+fi
+
+for command in git gzip makepkg pacman sha256sum tar; do
+  command -v "$command" >/dev/null || die "$command is required"
+done
+
+cache_root=${XDG_CACHE_HOME:-$HOME/.cache}/synatudor-0081
+output_dir=$cache_root/packages
+source_cache=$cache_root/sources
+mkdir -p -- "$cache_root" "$output_dir" "$source_cache"
+work_dir=$(mktemp -d "$cache_root/work.XXXXXX")
+chmod 0700 -- "$cache_root" "$work_dir" "$output_dir" "$source_cache"
+trap 'rm -rf -- "$work_dir"' EXIT
+
+# Build only from one resolved Git commit. This deliberately ignores modified
+# and untracked worktree files, including packaging metadata.
+source_ref=${SYNA_TUDOR_SOURCE_REF:-HEAD}
+source_commit=$(git -C "$repo_dir" rev-parse --verify "$source_ref^{commit}" 2>/dev/null) || \
+  die "Git ref does not resolve to a commit: $source_ref"
+source_archive=$work_dir/synatudor-06cb-0081-0.1.0.tar.gz
+"$repo_dir/scripts/make-source-archive" "$source_archive" "$source_commit" >/dev/null
+source_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
+
+metadata_dir=$work_dir/repository-metadata
+mkdir -p -- "$metadata_dir"
+git -C "$repo_dir" archive "$source_commit" -- \
+  packaging/arch/PKGBUILD packaging/libfprint-tod | tar -x -C "$metadata_dir"
+[[ -f $metadata_dir/packaging/arch/PKGBUILD ]] || \
+  die "Arch packaging is missing from $source_ref ($source_commit)"
+[[ -f $metadata_dir/packaging/libfprint-tod/PKGBUILD ]] || \
+  die "libfprint-tod packaging is missing from $source_ref ($source_commit)"
+
+required_tod_version=1.95.2+tod1-1
+installed_tod_version=$(pacman -Q libfprint-tod 2>/dev/null | awk '{print $2}' || true)
+
+if pacman -Q libfprint-tod >/dev/null 2>&1; then
+  original_provider=libfprint-tod
+elif pacman -Q libfprint >/dev/null 2>&1; then
+  original_provider=libfprint
+elif pacman -Q libfprint-git >/dev/null 2>&1; then
+  original_provider=libfprint-git
+else
+  original_provider=none
+fi
+if pacman -Q fprintd >/dev/null 2>&1; then
+  fprintd_was_installed=1
+else
+  fprintd_was_installed=0
+fi
+
+if (( build_only )); then
+  [[ $installed_tod_version == "$required_tod_version" ]] || \
+    die "--build-only requires libfprint-tod $required_tod_version to be installed already"
+else
+  sudo -v
+  sudo install -d -o root -g root -m 0700 /var/lib/tudor /var/lib/tudor/installer
+  if ! sudo test -e /var/lib/tudor/installer/original-libfprint-provider; then
+    printf '%s\n' "$original_provider" | \
+      sudo install -o root -g root -m 0600 /dev/stdin \
+        /var/lib/tudor/installer/original-libfprint-provider
+    printf '%s\n' "$fprintd_was_installed" | \
+      sudo install -o root -g root -m 0600 /dev/stdin \
+        /var/lib/tudor/installer/fprintd-was-installed
+  fi
+  sudo pacman -S --needed --noconfirm \
+    base-devel dbus fprintd git glib2 glib2-devel gnutls innoextract \
+    json-glib libcap libgudev libgusb libseccomp libusb meson ninja \
+    openssl pixman pkgconf python-cairo python-gobject sudo systemd \
+    usbutils util-linux
+fi
+
+restart_fprintd_on_exit() {
+  if pacman -Q fprintd >/dev/null 2>&1; then
+    sudo systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+    sudo systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
+  fi
+}
+
+provider_swapped=0
+restore_provider_after_failed_build() {
+  status=$?
+  trap - EXIT
+  if (( status != 0 && provider_swapped )); then
+    case $original_provider in
+      libfprint|none)
+        printf 'Driver build failed; restoring stock libfprint.\n' >&2
+        sudo pacman --noconfirm --ask=4 -S libfprint >/dev/null || true
+        ;;
+      libfprint-git)
+        printf '%s\n' \
+          'Driver build failed after installing libfprint-tod.' \
+          'The previous AUR libfprint-git provider must be restored manually.' >&2
+        ;;
+    esac
+  fi
+  restart_fprintd_on_exit
+  rm -rf -- "$work_dir"
+  exit "$status"
+}
+
+if [[ $installed_tod_version != "$required_tod_version" ]]; then
+  (( ! build_only )) || \
+    die "libfprint-tod $required_tod_version is required to build the TOD module"
+  command -v gpg >/dev/null || die 'gpg is required to verify libfprint-tod'
+
+  signing_key=D4C501DA48EB797A081750939449C2F50996635F
+  if ! gpg --batch --list-keys "$signing_key" >/dev/null 2>&1; then
+    printf 'Importing the libfprint-tod release signing key...\n'
+    gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$signing_key"
+  fi
+  gpg --batch --with-colons --fingerprint "$signing_key" | \
+    grep -Fq "fpr:::::::::$signing_key:" || die 'the imported signing key has the wrong fingerprint'
+
+  cp -a -- "$metadata_dir/packaging/libfprint-tod" "$work_dir/libfprint-tod"
+  mkdir -p -- "$work_dir/libfprint-packages"
+  (
+    cd -- "$work_dir/libfprint-tod"
+    PKGDEST="$work_dir/libfprint-packages" \
+      SRCDEST="$source_cache" \
+      makepkg --cleanbuild --clean --noconfirm
+  )
+  libfprint_pkg=$(find "$work_dir/libfprint-packages" -maxdepth 1 -type f \
+    -name 'libfprint-tod-[0-9]*-x86_64.pkg.tar.zst' \
+    ! -name '*-debug-*' -print -quit)
+  [[ -n $libfprint_pkg ]] || die 'libfprint-tod package was not produced'
+
+  trap 'restart_fprintd_on_exit; rm -rf -- "$work_dir"' EXIT
+  sudo systemctl stop fprintd.service 2>/dev/null || true
+  sudo pacman --noconfirm --ask=4 -U "$libfprint_pkg"
+  provider_swapped=1
+  trap restore_provider_after_failed_build EXIT
+  installed_tod_version=$(pacman -Q libfprint-tod 2>/dev/null | awk '{print $2}' || true)
+  [[ $installed_tod_version == "$required_tod_version" ]] || \
+    die "installed libfprint-tod version is $installed_tod_version; expected $required_tod_version"
+  restart_fprintd_on_exit
+fi
+
+cp -- "$metadata_dir/packaging/arch/PKGBUILD" "$work_dir/PKGBUILD"
+mkdir -p -- "$work_dir/driver-packages"
+(
+  cd -- "$work_dir"
+  SYNA_TUDOR_SOURCE_URL="file://$source_archive" \
+    SYNA_TUDOR_SOURCE_SHA256="$source_sha256" \
+    PKGDEST="$work_dir/driver-packages" \
+    SRCDEST="$source_cache" \
+    makepkg --cleanbuild --clean --noconfirm
+)
+driver_pkg=$(find "$work_dir/driver-packages" -maxdepth 1 -type f \
+  -name 'synatudor-0081-[0-9]*-x86_64.pkg.tar.zst' \
+  ! -name '*-debug-*' -print -quit)
+[[ -n $driver_pkg ]] || die 'synatudor-0081 package was not produced'
+
+cached_driver=$output_dir/${driver_pkg##*/}
+install -m 0600 -- "$driver_pkg" "$cached_driver"
+printf 'Built %s\n' "$cached_driver"
+
+if (( build_only )); then
+  printf 'Build-only mode made no package or authentication changes.\n'
+  exit 0
+fi
+
+trap restore_provider_after_failed_build EXIT
+sudo systemctl stop fprintd.service tudor-host-launcher.service 2>/dev/null || true
+sudo pacman --noconfirm -U "$cached_driver"
+provider_swapped=0
+sudo systemctl daemon-reload
+sudo udevadm control --reload
+sudo udevadm trigger --action=change --subsystem-match=usb \
+  --attr-match=idVendor=06cb --attr-match=idProduct=0081 2>/dev/null || true
+sudo udevadm settle --timeout=10
+sudo systemctl start tudor-host-launcher.service
+restart_fprintd_on_exit
+trap 'rm -rf -- "$work_dir"' EXIT
+
+if (( run_setup )); then
+  /usr/bin/synatudor-setup
+else
+  sudo /usr/bin/synatudor-reset
+  printf 'Driver installed. Run synatudor-setup when you are ready to enroll.\n'
+fi

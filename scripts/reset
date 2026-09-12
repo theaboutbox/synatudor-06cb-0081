@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: synatudor-reset
+
+Resets one connected Synaptics 06cb:0081 reader and restarts its fingerprint
+services. No enrollment or saved Tudor state is removed.
+EOF
+}
+
+sensor_count() {
+  local vendor product count=0
+  shopt -s nullglob
+  for vendor in /sys/bus/usb/devices/*/idVendor; do
+    [[ $(<"$vendor") == 06cb ]] || continue
+    product=${vendor%/idVendor}/idProduct
+    [[ -r $product && $(<"$product") == 0081 ]] || continue
+    ((++count))
+  done
+  printf '%d\n' "$count"
+}
+
+if (( $# == 1 )) && [[ $1 == -h || $1 == --help ]]; then
+  usage
+  exit 0
+fi
+if (( $# != 0 )); then
+  usage >&2
+  die 'synatudor-reset takes no arguments'
+fi
+
+if (( EUID != 0 )); then
+  self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+  exec sudo -- "$self"
+fi
+
+[[ $(sensor_count) == 1 ]] || die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+[[ -x /usr/bin/usbreset ]] || die 'usbreset is unavailable; install usbutils'
+
+restart_fprintd_on_exit() {
+  systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+  systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
+}
+trap restart_fprintd_on_exit EXIT
+
+systemctl stop fprintd.service tudor-host-launcher.service 2>/dev/null || true
+/usr/bin/usbreset 06cb:0081
+udevadm settle --timeout=10
+systemctl start tudor-host-launcher.service
+systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
+systemctl start fprintd.service
+
+trap - EXIT
+printf 'Reset 06cb:0081 and restarted the fingerprint services.\n'

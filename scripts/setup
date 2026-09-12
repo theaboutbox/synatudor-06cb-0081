@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+finger=right-index-finger
+configure_pam=1
+calibrate_only=0
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: synatudor-setup [--finger FINGER] [--no-pam] [--calibrate-only]
+
+Initializes a Synaptics 06cb:0081 reader, enrolls and verifies one finger,
+then configures PAM when running on Omarchy. Password fallback is retained.
+
+Options:
+  --finger FINGER    Finger to enroll (default: right-index-finger).
+  --no-pam           Leave PAM configuration unchanged.
+  --calibrate-only   Initialize the reader without enrolling or changing PAM.
+  -h, --help         Show this help text.
+EOF
+}
+
+find_sensor() {
+  local vendor product
+  local -a sensors=()
+
+  shopt -s nullglob
+  for vendor in /sys/bus/usb/devices/*/idVendor; do
+    [[ $(<"$vendor") == 06cb ]] || continue
+    product=${vendor%/idVendor}/idProduct
+    [[ -r $product && $(<"$product") == 0081 ]] || continue
+    sensors+=("${vendor%/idVendor}")
+  done
+
+  (( ${#sensors[@]} == 1 )) || \
+    die 'expected exactly one USB fingerprint sensor with ID 06cb:0081'
+  printf '%s\n' "${sensors[0]}"
+}
+
+sensor_identity() {
+  local sensor_path=$1 serial swapped= i
+
+  [[ -r $sensor_path/serial ]] || \
+    die 'the fingerprint reader has no readable USB serial; refusing to guess its saved-state directory'
+  serial=$(<"$sensor_path/serial")
+  [[ -n $serial ]] || \
+    die 'the fingerprint reader returned an empty USB serial; refusing to guess its saved-state directory'
+
+  # This mirrors make_state_id() in libfprint-tod/src/open.c. The known 0081
+  # calibration format also carries a six-byte reader ID at offset 32, with
+  # the two nibbles in each serial byte exchanged.
+  [[ $serial =~ ^[0-9A-Fa-f]{12}$ ]] || \
+    die 'the fingerprint reader has an unsupported USB serial format; refusing to reuse possibly unrelated calibration'
+  for (( i=0; i<${#serial}; i+=2 )); do
+    swapped+=${serial:i+1:1}${serial:i:1}
+  done
+
+  sensor_state_file=/var/lib/tudor/devices/06cb-0081-$serial/CalibrationData.blob
+  sensor_calibration_id=${swapped,,}
+  unset serial swapped
+}
+
+calibration_status() {
+  local path=$1 expected_id=$2 size stored_id
+
+  if ! sudo test -e "$path" 2>/dev/null; then
+    printf 'missing\n'
+    return
+  fi
+  if ! sudo test -f "$path" 2>/dev/null; then
+    printf 'invalid\n'
+    return
+  fi
+
+  size=$(sudo stat -c %s -- "$path" 2>/dev/null) || {
+    printf 'invalid\n'
+    return
+  }
+  if [[ $size == 0 ]]; then
+    printf 'incomplete\n'
+    return
+  fi
+  if [[ $size != 40780 ]]; then
+    printf 'invalid\n'
+    return
+  fi
+
+  stored_id=$(sudo od -An -v -j 32 -N 6 -t x1 -- "$path" 2>/dev/null | \
+    tr -d '[:space:]') || {
+    printf 'invalid\n'
+    return
+  }
+  if [[ ${stored_id,,} == "$expected_id" ]]; then
+    printf 'valid\n'
+  else
+    printf 'wrong-reader\n'
+  fi
+}
+
+while (( $# )); do
+  case $1 in
+    --finger)
+      (( $# >= 2 )) || die '--finger requires a value'
+      finger=$2
+      shift 2
+      ;;
+    --finger=*)
+      finger=${1#*=}
+      [[ -n $finger ]] || die '--finger requires a value'
+      shift
+      ;;
+    --no-pam)
+      configure_pam=0
+      shift
+      ;;
+    --calibrate-only)
+      calibrate_only=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+case $finger in
+  left-thumb|left-index-finger|left-middle-finger|left-ring-finger|left-little-finger|\
+  right-thumb|right-index-finger|right-middle-finger|right-ring-finger|right-little-finger)
+    ;;
+  *) die "invalid finger name: $finger" ;;
+esac
+
+if (( EUID == 0 )); then
+  [[ ${SUDO_UID:-} =~ ^[0-9]+$ && $SUDO_UID != 0 ]] || \
+    die 'run synatudor-setup as the desktop user, without sudo'
+  invoking_user=$(id -un "$SUDO_UID") || \
+    die 'could not identify the desktop user who invoked sudo'
+  self=$(readlink -f -- "$0") || die 'could not resolve this script path'
+  forwarded=(--finger "$finger")
+  (( configure_pam )) || forwarded+=(--no-pam)
+  (( ! calibrate_only )) || forwarded+=(--calibrate-only)
+  exec sudo -H -u "$invoking_user" -- "$self" "${forwarded[@]}"
+fi
+
+target_user=$(id -un) || die 'could not determine the current user'
+[[ -t 0 && -t 1 ]] || die 'setup needs an interactive terminal'
+[[ $(uname -m) == x86_64 ]] || die 'the pinned Windows driver requires x86-64 Linux'
+[[ -e /etc/arch-release ]] || die 'this setup helper currently supports Arch Linux and Omarchy'
+sensor_path=$(find_sensor)
+sensor_identity "$sensor_path"
+unset sensor_path
+pacman -Q synatudor-0081 libfprint-tod fprintd >/dev/null || \
+  die 'install synatudor-0081, libfprint-tod, and fprintd first'
+command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
+command -v fprintd-enroll >/dev/null || die 'fprintd-enroll is unavailable'
+command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
+command -v od >/dev/null || die 'od is unavailable'
+[[ -x /usr/bin/synatudor-reset ]] || die 'synatudor-reset is unavailable'
+
+printf '%s\n' \
+  'The first initialization calibrates this individual reader.' \
+  'Keep the fingerprint sensor completely uncovered until enrollment starts.' \
+  'Initialization may replace fingerprints previously enrolled with Windows Hello.'
+sudo -v
+read -r -p 'Remove your finger from the sensor, then press Enter to continue. ' _
+
+calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+case $calibration in
+  valid|missing|incomplete) ;;
+  wrong-reader)
+    die 'saved calibration belongs to a different physical reader; refusing to use it'
+    ;;
+  *)
+    die 'saved calibration is malformed; refusing to use it'
+    ;;
+esac
+
+if [[ $calibration == missing ]]; then
+  # The launcher consults this bootstrap location only when the current
+  # reader has no device-specific value. A stale legacy blob is irrelevant
+  # once an exact per-reader calibration exists or an interrupted empty value
+  # forces recalibration.
+  legacy_calibration=/var/lib/tudor/CalibrationData.blob
+  legacy_status=$(calibration_status "$legacy_calibration" "$sensor_calibration_id")
+  case $legacy_status in
+    valid|missing|incomplete) ;;
+    wrong-reader)
+      die 'legacy calibration belongs to a different physical reader; move it out of /var/lib/tudor before setup'
+      ;;
+    *)
+      die 'legacy calibration is malformed; move it out of /var/lib/tudor before setup'
+      ;;
+  esac
+fi
+
+sudo /usr/bin/synatudor-reset
+
+calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+if [[ $calibration != valid ]]; then
+  printf 'Generating reader-specific calibration; keep the sensor uncovered...\n'
+  list_log=$(mktemp)
+  trap 'rm -f -- "$list_log"' EXIT
+
+  for _ in {1..6}; do
+    timeout 15s fprintd-list "$target_user" >"$list_log" 2>&1 || true
+    calibration=$(calibration_status "$sensor_state_file" "$sensor_calibration_id")
+    [[ $calibration == valid ]] && break
+    sleep 1
+  done
+
+  [[ $calibration == valid ]] || \
+    die 'the reader did not produce calibration for the attached physical reader'
+  rm -f -- "$list_log"
+  trap - EXIT
+  printf 'Calibration completed and was stored privately under /var/lib/tudor.\n'
+else
+  printf 'Existing reader calibration is valid.\n'
+fi
+
+if (( calibrate_only )); then
+  printf 'Calibration-only setup completed. PAM was not changed.\n'
+  exit 0
+fi
+
+listing=$(fprintd-list "$target_user" 2>&1 || true)
+if grep -Fq -- "$finger" <<<"$listing"; then
+  printf '%s is already enrolled for %s.\n' "$finger" "$target_user"
+else
+  printf '\nEnroll %s. Follow fprintd prompts and move the finger slightly between scans.\n\n' "$finger"
+  fprintd-enroll -f "$finger" "$target_user"
+fi
+
+printf '\nVerify the enrolled finger once before authentication is enabled.\n\n'
+fprintd-verify -f "$finger" "$target_user"
+
+if (( ! configure_pam )); then
+  printf 'Enrollment and verification succeeded. PAM was not changed.\n'
+  exit 0
+fi
+
+if [[ -x /usr/bin/omarchy-hw-laptop-closed && \
+      -f /etc/pam.d/omarchy-lock-password ]]; then
+  [[ -x /usr/lib/synatudor/omarchy-pam ]] || die 'Omarchy PAM helper is unavailable'
+  sudo /usr/lib/synatudor/omarchy-pam apply --verified-user "$target_user"
+  printf 'Fingerprint authentication is ready for sudo, polkit, and the Omarchy lock screen.\n'
+else
+  printf '%s\n' \
+    'Enrollment and verification succeeded.' \
+    'PAM was not changed because this system is not a supported Omarchy installation.'
+fi

@@ -1,0 +1,86 @@
+# Maintainer: theaboutbox
+
+pkgname=synatudor-0081
+_project=synatudor-06cb-0081
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Synaptics Tudor TOD driver for the 06cb:0081 fingerprint sensor'
+arch=(x86_64)
+url='https://github.com/theaboutbox/synatudor-06cb-0081'
+# The bridge source is LGPL-2.1-only. The locally built package also embeds
+# vendor DLLs whose applicable terms are not reproduced here, so their license
+# is recorded as unknown and the resulting binary package is not distributed.
+license=(LGPL-2.1-only unknown)
+depends=(
+  bash
+  dbus
+  fprintd
+  gcc-libs
+  glib2
+  glibc
+  gnutls
+  json-glib
+  libcap
+  'libfprint-tod=1.95.2+tod1-1'
+  libgusb
+  libseccomp
+  libusb
+  openssl
+  sudo
+  systemd
+  usbutils
+  util-linux
+)
+makedepends=(
+  innoextract
+  meson
+  ninja
+  pkgconf
+)
+provides=(synatudor)
+conflicts=(synatudor)
+options=(!lto)
+
+_release_name="$_project-$pkgver.tar.gz"
+_release_url="${SYNA_TUDOR_SOURCE_URL:-$url/releases/download/v$pkgver/$_release_name}"
+_release_sha256="${SYNA_TUDOR_SOURCE_SHA256:-SOURCE_ARCHIVE_SHA256}"
+
+source=(
+  "$_release_name::$_release_url"
+  'huy103af07m6.exe::https://download.lenovo.com/consumer/mobiles/huy103af07m6.exe'
+)
+sha256sums=(
+  "$_release_sha256"
+  '2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343'
+)
+
+build() {
+  export SYNA_TUDOR_INSTALLER="$srcdir/huy103af07m6.exe"
+  arch-meson "$_project-$pkgver" build \
+    -DDBGIMPORT=false \
+    -DDBGWDF=false \
+    -DTOD=true \
+    -DUNMOUNTFS=true
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+
+  install -Dm755 "$_project-$pkgver/scripts/setup" \
+    "$pkgdir/usr/bin/synatudor-setup"
+  install -Dm755 "$_project-$pkgver/scripts/reset" \
+    "$pkgdir/usr/bin/synatudor-reset"
+  install -Dm755 "$_project-$pkgver/scripts/uninstall" \
+    "$pkgdir/usr/bin/synatudor-uninstall"
+  install -Dm755 "$_project-$pkgver/scripts/omarchy-pam" \
+    "$pkgdir/usr/lib/synatudor/omarchy-pam"
+  install -Dm644 "$_project-$pkgver/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$_project-$pkgver/NOTICE" \
+    "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+}

@@ -1,0 +1,18 @@
+synaTudor support for Synaptics 06cb:0081
+
+This repository is derived from the relink branch of Popax21/synaTudor and
+subsequent work in rstar000/synaTudor. The original Git history is retained so
+individual authorship remains visible.
+
+The cryptbridge subproject contains code derived from Wine and includes work
+copyrighted by Wine and CodeWeavers contributors. Its original copyright and
+license headers are retained in the source files.
+
+The source is distributed under the terms in LICENSE and the notices in each
+file. Some files explicitly permit GNU LGPL version 2.1 or any later version.
+
+Synaptics and Lenovo binaries are not part of this repository. A local build
+downloads Lenovo's driver package from Lenovo and extracts two DLLs without
+executing the installer. Those binaries remain subject to their vendor's
+terms. Synaptics and Lenovo are trademarks of their respective owners; this
+project is not affiliated with or endorsed by either company.

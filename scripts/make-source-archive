@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+export LC_ALL=C
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/make-source-archive [OUTPUT [GIT_REF]]
+
+Create the curated source payload consumed by packaging/arch/PKGBUILD. GIT_REF
+defaults to HEAD and is resolved to one exact commit before any files are read.
+The complete repository snapshot is provided separately by GitHub's tag archive.
+EOF
+}
+
+(( $# <= 2 )) || { usage >&2; exit 2; }
+[[ ${1:-} != -h && ${1:-} != --help ]] || { usage; exit 0; }
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+pkgver=0.1.0
+prefix="synatudor-06cb-0081-$pkgver"
+output=${1:-"$repo_dir/dist/$prefix.tar.gz"}
+archive_ref=${2:-HEAD}
+output=$(readlink -m -- "$output")
+
+command -v git >/dev/null || die 'git is required'
+command -v tar >/dev/null || die 'GNU tar is required'
+command -v gzip >/dev/null || die 'gzip is required'
+[[ -d $repo_dir/.git ]] || die 'run this from a Git checkout'
+
+commit=$(git -C "$repo_dir" rev-parse --verify "$archive_ref^{commit}" 2>/dev/null) || \
+  die "Git ref does not resolve to a commit: $archive_ref"
+tree=$(git -C "$repo_dir" rev-parse --verify "$commit^{tree}" 2>/dev/null) || \
+  die "cannot resolve the source tree for $archive_ref ($commit)"
+
+# Archive the tree object with a fixed timestamp so Git does not add a commit-ID
+# header and an excluded-only follow-up commit cannot change the payload bytes.
+# Keep this list limited to the files makepkg actually consumes. In particular,
+# packaging/arch/PKGBUILD is not included: it contains this archive's checksum,
+# so putting it in the payload would create a circular hash. GitHub's automatic
+# tag archive remains the complete, browsable source snapshot.
+archive_paths=(
+  LICENSE
+  NOTICE
+  meson.build
+  meson_options.txt
+  cli
+  libfprint-tod
+  libtudor
+  subprojects/cryptbridge
+  tudor-host
+  tudor-host-launcher
+  scripts/setup
+  scripts/reset
+  scripts/uninstall
+  scripts/omarchy-pam
+)
+
+for required in LICENSE NOTICE meson.build meson_options.txt; do
+  git -C "$repo_dir" cat-file -e "$tree:$required" 2>/dev/null || \
+    die "$required is missing from $archive_ref ($commit)"
+done
+
+file_count=0
+while IFS= read -r -d '' path; do
+  ((++file_count))
+  case ${path,,} in
+    *.a|*.blob|*.cab|*.cat|*.dll|*.exe|*.gzf|*.key|*.log|*.o|*.p12|\
+    *.pcap|*.pcapng|*.pem|*.pfx|*.pkg.tar*|*.so|*.sys|*.tupd|*.uint)
+      die "refusing to archive private or proprietary file: $path"
+      ;;
+  esac
+done < <(git -C "$repo_dir" ls-tree -r -z --name-only "$tree" -- "${archive_paths[@]}")
+(( file_count > 0 )) || die "source file list is empty at $archive_ref ($commit)"
+
+mkdir -p -- "$(dirname -- "$output")"
+archive_tmp=$(mktemp "$(dirname -- "$output")/.source.XXXXXX")
+stage_dir=$(mktemp -d)
+trap 'rm -f -- "$archive_tmp"; rm -rf -- "$stage_dir"' EXIT
+
+# Read only the resolved Git tree, then let GNU tar normalize metadata for all
+# entries. Git's synthetic prefix-directory headers otherwise receive the
+# wall-clock time even when git archive is given --mtime.
+git -C "$repo_dir" archive \
+  --format=tar \
+  "$tree" -- "${archive_paths[@]}" | \
+  tar -x --same-permissions -C "$stage_dir"
+
+tar -C "$stage_dir" \
+  --sort=name \
+  --format=posix \
+  --mtime=@1 \
+  --owner=0 --group=0 --numeric-owner \
+  --pax-option=delete=atime,delete=ctime \
+  --transform="s,^,$prefix/," \
+  -cf - "${archive_paths[@]}" | gzip -n -9 >"$archive_tmp"
+
+if tar -tzf "$archive_tmp" | grep -Eiq '\.(a|blob|cab|cat|dll|exe|gzf|key|log|o|p12|pcap|pcapng|pem|pfx|pkg\.tar[^/]*|so|sys|tupd|uint)$'; then
+  die 'archive audit found a private or proprietary file'
+fi
+
+mv -f -- "$archive_tmp" "$output"
+printf 'Archived Git commit %s (tree %s)\n' "$commit" "$tree"
+sha256sum -- "$output"
