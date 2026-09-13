@@ -92,6 +92,27 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
+Revision 9 passed all 16 Meson tests in the fresh GCC package build and a fresh
+Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. The final changes
+also passed all 16 tests in the updated GCC ThreadSanitizer build. Complete text,
+JSON, and JUnit test logs contained no sanitizer diagnostic. The new
+`pairing-layout` regression uses the real pinned DLL's COM thunks and pairing
+thread with its hardware operation replaced before execution; it verifies the
+correct base, bounded join, and strategy read, and rejects the revision 8 base
+and mismatched layouts. Its assertions remain enabled in the Arch package build.
+The shell recovery fixture, helper syntax checks, and `git diff --check` passed.
+
+The revision 9 build-only installer used committed tree
+`58796f974469b4158aa6917cbaa876ba829eb74a` through metadata commit
+`3863379` and changed no installed package, authentication, service, or reader
+state. Two independently generated source archives were byte-identical, with
+SHA-256 `8d21d0d855d51fe0b7e7d779d81126d6c7044f638b4c0fd14aaa383654d0f34e`.
+The private revision 9 package has SHA-256
+`930d7d07d53646d841ba28ee64b052a234cab36f8a715617ea82166aa1c3f556`.
+It retained the expected 39-entry layout, matched its committed helper sources,
+and satisfied all 20 declared dependencies. Its file was mode 0600 in a mode
+0700 cache. These automated results do not validate normal pairing on hardware.
+
 Package revision 8 passed automated checks but failed the hardware setup
 described above. Its expanded tests covered random-number generation, the classic CryptoAPI operations
 used during clean pairing, exact pairing-worker synchronization, strategy
