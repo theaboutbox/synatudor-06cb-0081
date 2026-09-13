@@ -4,8 +4,11 @@ extern "C" int tudor_internal_test_capture_recovery(void);
 extern "C" int tudor_internal_test_ownership_failure_guard(void);
 extern "C" int tudor_internal_test_ownership_failure_marker(void);
 extern "C" int tudor_internal_test_ownership_reset_dispatch(void);
+int pairing_layout_test(const char *driver_path);
 
-int main(void) {
+int main(int argc, char **argv) {
+    if(argc == 2) return pairing_layout_test(argv[1]);
+    if(argc != 1) return 1;
     int result = tudor_internal_test_capture_recovery();
     if(result != 0) {
         std::fprintf(stderr, "capture recovery test failed at check %d\n",

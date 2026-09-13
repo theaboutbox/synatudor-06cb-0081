@@ -10,6 +10,8 @@
 #define SYNA_KEYPAIR_GENERATE_RVA 0x0e6480u
 #define SYNA_PAIRING_KEYGEN_CALL_RVA 0x06d00bu
 #define SYNA_TLS_KEYGEN_CALL_RVA 0x07e9d2u
+#define SYNA_PROCESS_PAIRING_CALL_RVA 0x021d34u
+#define SYNA_PROCESS_PAIRING_RVA 0x023738u
 #define SYNA_TEXT_RVA 0x1000u
 #define SYNA_TEXT_FILE_OFFSET 0x400u
 
@@ -114,6 +116,15 @@ int main(int argc, char **argv)
     assert_executable_not_writable(
         (uint8_t *)image.base_addr + SYNA_PAIRING_KEYGEN_CALL_RVA);
     assert_executable_not_writable(pairing_target);
+    uint8_t *worker_target = rel32_call_target(
+        &image, SYNA_PROCESS_PAIRING_CALL_RVA);
+    assert(worker_target !=
+           (uint8_t *)image.base_addr + SYNA_PROCESS_PAIRING_RVA);
+    assert(worker_target >= (uint8_t *)image.base_addr + image.image_size);
+    assert(worker_target + 14 <=
+           (uint8_t *)image.base_addr + image.mapping_size);
+    assert(worker_target[0] == 0xff && worker_target[1] == 0x25);
+    assert_executable_not_writable(worker_target);
     destroy_dll(&image);
     assert_empty_image(&image);
 
@@ -139,6 +150,17 @@ int main(int argc, char **argv)
                      (uint32_t)driver_size));
     assert_empty_image(&rejected);
 
+    /* The worker observer must also reject an unsupported call site before
+     * any pairing identity hook can run. */
+    memcpy(changed_driver, driver_data, driver_size);
+    size_t worker_file_offset = SYNA_TEXT_FILE_OFFSET +
+                                SYNA_PROCESS_PAIRING_CALL_RVA - SYNA_TEXT_RVA;
+    assert(worker_file_offset + 5 <= driver_size);
+    changed_driver[worker_file_offset + 1] ^= 1;
+    assert(!load_dll(&rejected, "synaWudfBioUsb.dll", changed_driver,
+                     (uint32_t)driver_size));
+    assert_empty_image(&rejected);
+
     /* A failed load must not poison a later load of the supported image. */
     assert(load_dll(&image, "synaWudfBioUsb.dll", driver_data,
                     (uint32_t)driver_size));
@@ -151,7 +173,7 @@ int main(int argc, char **argv)
      * process-lifetime test descriptor. */
     dll_register_callsite_hook(&lifecycle_hook);
     lifecycle_original_target = (void *)1;
-    changed_driver[tls_file_offset + 1] ^= 1;
+    memcpy(changed_driver, driver_data, driver_size);
     size_t pairing_file_offset = SYNA_TEXT_FILE_OFFSET +
                                  SYNA_PAIRING_KEYGEN_CALL_RVA - SYNA_TEXT_RVA;
     assert(pairing_file_offset + 5 <= driver_size);

@@ -13,6 +13,8 @@
 #define SYNA_KEYPAIR_GENERATE_RVA 0x0e6480u
 #define SYNA_PAIRING_KEYGEN_CALL_RVA 0x06d00bu
 #define SYNA_TLS_KEYGEN_CALL_RVA 0x07e9d2u
+#define SYNA_PROCESS_PAIRING_CALL_RVA 0x021d34u
+#define SYNA_PROCESS_PAIRING_RVA 0x023738u
 
 typedef DWORD (__winfnc *syna_keypair_generate_fnc)(
     void *curve, void *seed, void **public_key, void **private_key);
@@ -24,12 +26,17 @@ static __winfnc DWORD syna_pairing_keypair_generate(
 {
     syna_keypair_generate_fnc generate =
         (syna_keypair_generate_fnc)syna_keypair_generate_target;
-    if(!generate) return (DWORD)STATUS_INTERNAL_ERROR;
+    if(!generate) {
+        log_error("Pinned pairing key generation target is unavailable");
+        return (DWORD)STATUS_INTERNAL_ERROR;
+    }
 
+    log_info("Pinned pairing key generation started");
     enum cryptbridge_identity_key_role previous =
         cryptbridge_identity_begin_key_role(CRYPTBRIDGE_IDENTITY_KEY_PAIRING);
     DWORD result = generate(curve, seed, public_key, private_key);
     cryptbridge_identity_end_key_role(previous);
+    log_info("Pinned pairing key generation returned status 0x%x", result);
     return result;
 }
 
@@ -51,10 +58,41 @@ static struct dll_callsite_hook syna_tls_keygen_validation = {
     .expected_instruction = {0xe8, 0xa9, 0x7a, 0x06, 0x00},
 };
 
+typedef DWORD (__winfnc *syna_process_pairing_fnc)(void *device);
+static void *syna_process_pairing_target;
+
+static __winfnc DWORD syna_process_pairing_observe(void *device)
+{
+    syna_process_pairing_fnc process =
+        (syna_process_pairing_fnc)syna_process_pairing_target;
+    if(!process) {
+        log_error("Pinned pairing worker target is unavailable");
+        return (DWORD)STATUS_INTERNAL_ERROR;
+    }
+
+    log_info("Pinned pairing worker started");
+    DWORD result = process(device);
+    log_info("Pinned pairing worker returned status 0x%x", result);
+    return result;
+}
+
+/* ProcessPairing preserves a failed DoPairing result and can also fail at
+ * later initialization stages. Observe the pinned worker's terminal status
+ * without changing its behavior or logging device/context/key data. */
+static struct dll_callsite_hook syna_process_pairing_observer = {
+    .image_name = "synaWudfBioUsb.dll",
+    .call_rva = SYNA_PROCESS_PAIRING_CALL_RVA,
+    .expected_target_rva = SYNA_PROCESS_PAIRING_RVA,
+    .expected_instruction = {0xe8, 0xff, 0x19, 0x00, 0x00},
+    .replacement = &syna_process_pairing_observe,
+    .original_target = &syna_process_pairing_target,
+};
+
 __constr static void register_syna_keygen_callsite_hooks(void)
 {
     dll_register_callsite_hook(&syna_pairing_keygen_hook);
     dll_register_callsite_hook(&syna_tls_keygen_validation);
+    dll_register_callsite_hook(&syna_process_pairing_observer);
 }
 
 

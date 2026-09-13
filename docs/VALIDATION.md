@@ -22,7 +22,22 @@ safety defect was that `OnPrepareHardware` starts pairing asynchronously,
 `OnD0Entry` does not join it, and the bridge exposed the device without proving
 that the worker had initialized the strategy later dereferenced by capture.
 
-The package revision 8 candidate adds these protections:
+On-hardware setup with package revision 8 on 2026-09-12 failed on all three
+ordinary starts before enrollment. Each restricted host reported successful
+`OnPrepareHardware` and `OnD0Entry` callbacks, then exited because its pairing
+worker handle appeared absent. Static analysis identified a bridge layout
+error: `IPnpCallbackHardware` is a subobject at `CBiometricDevice + 0x258`, not
+the complete device object. Revision 8 incorrectly read the worker handle and
+capture strategy relative to that subobject. Its tests used a synthetic base
+and did not verify the actual vendor interface layout.
+
+The revision 9 candidate derives the complete object only after checking the
+pinned hardware and power callback layouts, and tests that derivation against
+the actual pinned DLL without using the reader. Status-only pairing diagnostics
+are being added to distinguish any remaining protocol or cryptographic failure
+after the corrected worker check. A missing strategy continues to block capture.
+
+The package candidate adds these protections:
 
 - normal startup joins the exact pairing worker, requires the pinned
   capture-strategy pointer to be nonnull, and opens the complete biometric
@@ -53,7 +68,7 @@ A superseded package demonstrated that the custom vendor callback could return
 success and that protected local cleanup could complete on the tested reader.
 Its subsequent clean pairing did not reach the safe capture boundary, so that
 result is not a successful end-to-end recovery validation. The corrected
-package revision 8 candidate still needs a fresh on-hardware normal pairing,
+package revision 9 candidate still needs a fresh on-hardware normal pairing,
 optional vendor-unpair recovery, enrollment, verification, restart, and USB
 reset sequence. The results below are the earlier bring-up baseline; they do
 not validate the corrected lifecycle.
@@ -77,8 +92,8 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
-The corrected package revision 8 candidate is still under validation. Its
-expanded tests cover random-number generation, the classic CryptoAPI operations
+Package revision 8 passed automated checks but failed the hardware setup
+described above. Its expanded tests covered random-number generation, the classic CryptoAPI operations
 used during clean pairing, exact pairing-worker synchronization, strategy
 gating, and resumable post-unpair validation. Fresh post-fix sanitizer builds
 completed 264 steps with Clang 22.1.8 AddressSanitizer plus
@@ -121,7 +136,7 @@ injected failure paths. The release installer also passed in `--build-only`
 mode and produced a local package without changing installed packages or
 reader state. Those tests encoded the earlier nonzero-counter guard and did not
 exercise the missing clean-pairing cryptography or joined-worker boundary, so
-they do not validate revision 8.
+they do not validate revisions 8 or 9.
 
 For the earlier baseline, fresh GCC and Clang builds completed with the TOD
 module and restricted host enabled. The Meson suite passed 13 of 13 tests in

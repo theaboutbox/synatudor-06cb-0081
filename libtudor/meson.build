@@ -144,11 +144,14 @@ test('native-storage-lifecycle', native_storage_lifecycle_test, timeout: 5)
 # Build the WUDF request recovery test as a self-contained executable so its
 # hook remains hidden and is never present in the installed shared library.
 capture_recovery_test = executable('capture-recovery-test',
-    [libtudor_src, driver_dll_blobs, 'tests/capture-recovery.cpp'],
+    [libtudor_src, driver_dll_blobs,
+     'tests/capture-recovery.cpp', 'tests/pairing-layout.cpp'],
     dependencies: [thread_dep, libcrypto_dep, libusb_dep, cryptbridge_dep],
     c_args: ['-D_GNU_SOURCE'] + libtudor_flags,
-    cpp_args: ['-D_GNU_SOURCE', '-DTUDOR_RECOVERY_TEST_HOOK'] + libtudor_flags,
+    cpp_args: ['-D_GNU_SOURCE', '-DTUDOR_RECOVERY_TEST_HOOK', '-UNDEBUG'] + libtudor_flags,
     link_args: ['-Wl,-z,noexecstack', '-Wl,--copy-dt-needed-entries'],
     include_directories: ['src', libtudor_inc],
     install: false)
 test('capture-recovery', capture_recovery_test, timeout: 5)
+test('pairing-layout', capture_recovery_test,
+    args: [driver_dlls[1]], timeout: 5)

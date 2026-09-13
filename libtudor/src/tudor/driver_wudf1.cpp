@@ -78,6 +78,11 @@ struct winwdf_driver *tudor_wdf_driver;
  * an unrelated Windows worker can never enter this path. */
 static constexpr uintptr_t SYNA_CAPTURE_THREAD_RVA = 0x1c40c;
 static constexpr uintptr_t SYNA_PAIRING_THREAD_RVA = 0x21d1c;
+static constexpr size_t SYNA_HARDWARE_INTERFACE_OFFSET = 0x258;
+static constexpr size_t SYNA_PNP_INTERFACE_OFFSET = 0x8;
+static constexpr uintptr_t SYNA_DEVICE_VTABLE_RVA = 0x119e08;
+static constexpr uintptr_t SYNA_PNP_VTABLE_RVA = 0x119ea0;
+static constexpr uintptr_t SYNA_HARDWARE_VTABLE_RVA = 0x119f70;
 static constexpr size_t SYNA_PAIRING_THREAD_HANDLE_OFFSET = 0x1a8;
 static constexpr size_t SYNA_PROTOCOL_STRATEGY_OFFSET = 0x1c0;
 static constexpr useconds_t SYNA_CAPTURE_RECOVERY_DELAY_US = 250000;
@@ -102,6 +107,75 @@ static std::atomic<bool> suppress_pairing_worker{false};
 static std::atomic<bool> pairing_worker_was_suppressed{false};
 static void *vendor_device_base;
 static void *vendor_protocol_strategy(void);
+
+static bool vendor_vtable_matches(const struct dll_image *image,
+                                  const void *interface,
+                                  uintptr_t table_rva,
+                                  const uintptr_t *method_rvas,
+                                  size_t method_count) {
+    if(!image || !image->base_addr || !interface || image->image_size <= 0 ||
+       table_rva > (size_t)image->image_size ||
+       method_count > ((size_t)image->image_size - table_rva) / sizeof(void*))
+        return false;
+
+    const uint8_t *image_base = static_cast<const uint8_t*>(image->base_addr);
+    const void *table = nullptr;
+    memcpy(&table, interface, sizeof(table));
+    if(table != image_base + table_rva) return false;
+
+    for(size_t i = 0; i < method_count; ++i) {
+        const void *method = nullptr;
+        if(method_rvas[i] >= (size_t)image->image_size) return false;
+        memcpy(&method, image_base + table_rva + i * sizeof(void*),
+               sizeof(method));
+        if(method != image_base + method_rvas[i]) return false;
+    }
+    return true;
+}
+
+static void *vendor_device_from_interfaces(const struct dll_image *image,
+                                           const void *callback_interface,
+                                           const void *hardware_interface,
+                                           const void *pnp_interface) {
+    static constexpr uintptr_t hardware_methods[] = {
+        0x19110, 0x18300, 0x1921c, 0x39840, 0x398b8
+    };
+    static constexpr uintptr_t pnp_methods[] = {
+        0x190ec, 0x182dc, 0x191f8, 0x20378, 0x205f4,
+        0x21aac, 0x21604, 0x21644
+    };
+    static constexpr uintptr_t device_methods[] = {
+        0x190c0, 0x182bc, 0x19174, 0x1f154, 0x181dc,
+        0x39338, 0x21d40, 0x23b80
+    };
+
+    if(callback_interface != hardware_interface ||
+       !vendor_vtable_matches(image, hardware_interface,
+                              SYNA_HARDWARE_VTABLE_RVA,
+                              hardware_methods,
+                              sizeof(hardware_methods) / sizeof(*hardware_methods)))
+        return nullptr;
+
+    /* The vendor passes its IPnpCallbackHardware subobject to CreateDevice.
+     * Its pinned OnPrepareHardware thunk subtracts 0x258 before dispatching
+     * the primary CBiometricDevice method.  Thread state and strategy fields
+     * belong to that primary object, rather than to the COM subobject. */
+    uintptr_t hardware_address = (uintptr_t)hardware_interface;
+    if(hardware_address < SYNA_HARDWARE_INTERFACE_OFFSET) return nullptr;
+    uintptr_t device_address = hardware_address - SYNA_HARDWARE_INTERFACE_OFFSET;
+    if((uintptr_t)pnp_interface != device_address + SYNA_PNP_INTERFACE_OFFSET ||
+       !vendor_vtable_matches(image, pnp_interface, SYNA_PNP_VTABLE_RVA,
+                              pnp_methods,
+                              sizeof(pnp_methods) / sizeof(*pnp_methods)))
+        return nullptr;
+
+    void *device = (void*)device_address;
+    if(!vendor_vtable_matches(image, device, SYNA_DEVICE_VTABLE_RVA,
+                              device_methods,
+                              sizeof(device_methods) / sizeof(*device_methods)))
+        return nullptr;
+    return device;
+}
 
 static void ownership_failure_reset(void) {
     ownership_failure_write.store(OWNERSHIP_FAILURE_NOT_WRITTEN,
@@ -2083,20 +2157,16 @@ struct MyDevice : public IWDFDevice3 {
             pCallbackInterface->QueryInterface(&IID_IPnpCallbackHardware, (LPVOID*)&pnphwcb);
             pCallbackInterface->QueryInterface(&IID_IPnpCallback, (LPVOID*)&pnpcb);
             printf("pnphwcb=%p pnpcb=%p\r\n", pnphwcb, pnpcb);
-            /* The two offsets used by the guarded pairing lifecycle are
-             * relative to the pinned driver's primary CBiometricDevice
-             * interface.  Refuse the layout if that primary hardware
-             * interface ever stops aliasing the CreateDevice callback. */
-            if((void*)pnphwcb == (void*)pCallbackInterface) {
-                vendor_device_base = pCallbackInterface;
-            } else {
-                vendor_device_base = nullptr;
+            vendor_device_base = vendor_device_from_interfaces(
+                tudor_driver_dll ? &tudor_driver_dll->image : nullptr,
+                pCallbackInterface, pnphwcb, pnpcb);
+            if(!vendor_device_base) {
                 log_error("Pinned Synaptics device interface layout changed");
             }
         }
 
-        IPnpCallbackHardware *pnphwcb;
-        IPnpCallback *pnpcb;
+        IPnpCallbackHardware *pnphwcb = nullptr;
+        IPnpCallback *pnpcb = nullptr;
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
             LPOLESTR str;
@@ -2593,6 +2663,26 @@ static void *vendor_protocol_strategy(void) {
     return strategy;
 }
 
+#ifdef TUDOR_RECOVERY_TEST_HOOK
+extern "C" __attribute__((visibility("hidden")))
+void *tudor_internal_test_vendor_device_layout(const struct dll_image *image,
+                                               const void *callback,
+                                               const void *hardware,
+                                               const void *pnp) {
+    return vendor_device_from_interfaces(image, callback, hardware, pnp);
+}
+
+extern "C" __attribute__((visibility("hidden")))
+void tudor_internal_test_vendor_pairing_fields(void *device, HANDLE *worker,
+                                              void **strategy) {
+    void *saved_device = vendor_device_base;
+    vendor_device_base = device;
+    *worker = vendor_pairing_thread_handle();
+    *strategy = vendor_protocol_strategy();
+    vendor_device_base = saved_device;
+}
+#endif
+
 static bool wait_for_vendor_pairing_worker(bool ownership_reset_mode) {
     if(!vendor_device_base) {
         log_error("Cannot validate the pinned Synaptics pairing layout");
@@ -2642,6 +2732,19 @@ static bool wait_for_vendor_pairing_worker(bool ownership_reset_mode) {
                                  std::memory_order_release);
     return true;
 }
+
+#ifdef TUDOR_RECOVERY_TEST_HOOK
+extern "C" __attribute__((visibility("hidden")))
+bool tudor_internal_test_vendor_pairing_join(void *device) {
+    void *saved_device = vendor_device_base;
+    bool saved_ready = pairing_strategy_ready.load(std::memory_order_acquire);
+    vendor_device_base = device;
+    bool result = wait_for_vendor_pairing_worker(false);
+    vendor_device_base = saved_device;
+    pairing_strategy_ready.store(saved_ready, std::memory_order_release);
+    return result;
+}
+#endif
 
 
 struct MyDriver : public IWDFDriver {
@@ -3242,6 +3345,13 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
     printf("OnDeviceAdd finished, rc = %d\n", rc);
     fflush(stdout);
 
+    if(rc != 0 || !myDevice || !vendor_device_base ||
+       !myDevice->pnphwcb || !myDevice->pnpcb) {
+        log_error("Cannot prepare hardware without a validated pinned "
+                  "Synaptics device layout [OnDeviceAdd status 0x%x]",
+                  (unsigned int)rc);
+        return false;
+    }
 
     printf("about to prepare hw\r\n");
     print_vtable(myDevice->pnphwcb, 5); 

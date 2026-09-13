@@ -22,6 +22,7 @@
 #include "wine/port.h"
 
 #include <stdarg.h>
+#include <stdio.h>
 #ifdef HAVE_GNUTLS_CIPHER_INIT
 #include <gnutls/x509.h>
 #include <gnutls/gnutls.h>
@@ -698,12 +699,19 @@ NTSTATUS key_asymmetric_generate( struct key *key )
 
     identity_result = cryptbridge_identity_state_load(
         &identity, &identity_size);
+    fprintf( stderr, "[Pairing crypto] identity load: %s\n",
+             identity_result == CRYPTBRIDGE_IDENTITY_FOUND ? "found" :
+             identity_result == CRYPTBRIDGE_IDENTITY_NOT_FOUND ? "missing" :
+             identity_result == CRYPTBRIDGE_IDENTITY_INACTIVE ? "inactive" :
+             "error" );
     if (identity_result == CRYPTBRIDGE_IDENTITY_FOUND)
     {
         if (!valid_identity_blob( identity, identity_size ))
             status = STATUS_INVALID_PARAMETER;
         else
             status = key_import_ecc( key, identity, identity_size );
+        fprintf( stderr, "[Pairing crypto] existing identity import: status 0x%x\n",
+                 (unsigned int)status );
         wipe_private_bytes( identity, identity_size );
         free( identity );
         return status;
@@ -714,9 +722,14 @@ NTSTATUS key_asymmetric_generate( struct key *key )
         return generate_random_asymmetric_key( key, pk_alg, curve );
 
     status = generate_random_asymmetric_key( key, pk_alg, curve );
+    fprintf( stderr, "[Pairing crypto] identity generation: status 0x%x\n",
+             (unsigned int)status );
     if (status) return status;
     status = key_export_ecc( key, generated_blob, sizeof(generated_blob),
                              &generated_size );
+    fprintf( stderr, "[Pairing crypto] identity export: status 0x%x, size valid %u\n",
+             (unsigned int)status,
+             (unsigned int)(generated_size == sizeof(generated_blob)) );
     if (status || generated_size != sizeof(generated_blob))
     {
         wipe_private_bytes( generated_blob, sizeof(generated_blob) );
@@ -726,6 +739,8 @@ NTSTATUS key_asymmetric_generate( struct key *key )
 
     identity_result = cryptbridge_identity_state_resolve(
         generated_blob, sizeof(generated_blob), &identity, &identity_size);
+    fprintf( stderr, "[Pairing crypto] identity resolve: %s\n",
+             identity_result == CRYPTBRIDGE_IDENTITY_FOUND ? "found" : "error" );
     wipe_private_bytes( generated_blob, sizeof(generated_blob) );
     clear_asymmetric_key( key );
     if (identity_result != CRYPTBRIDGE_IDENTITY_FOUND)
@@ -735,6 +750,8 @@ NTSTATUS key_asymmetric_generate( struct key *key )
         status = STATUS_INVALID_PARAMETER;
     else
         status = key_import_ecc( key, identity, identity_size );
+    fprintf( stderr, "[Pairing crypto] resolved identity import: status 0x%x\n",
+             (unsigned int)status );
     wipe_private_bytes( identity, identity_size );
     free( identity );
     return status;
