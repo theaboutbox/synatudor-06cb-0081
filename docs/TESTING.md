@@ -103,6 +103,9 @@ sudo, polkit, and the Omarchy lock screen on a Lenovo Yoga C930-13IKB running
 Arch Linux with Omarchy. Reinstall testing later exposed the incomplete-pairing
 capture failure described in
 [Validation](VALIDATION.md). The joined-worker guard, corrected cryptographic
-pairing support, and vendor-unpair validation lifecycle intended for package
-revision 11 still require the complete hardware sequence above; the earlier
-results do not validate that path. Other laptop models remain unverified.
+pairing support, and vendor-unpair validation lifecycle in package revision 12
+have now passed normal startup, enrollment, and a fingerprint match. Frequent
+capture retries remain. Wrong-finger rejection, persistence across restart,
+USB reset and reboot, explicit recovery, and each PAM consumer still require
+revalidation; the earlier results do not validate those paths. Other laptop
+models remain unverified.

@@ -107,7 +107,8 @@ enrollment, and a successful fingerprint match have now passed hardware
 revalidation. Capture still produces frequent retries before completing.
 Restart, USB reset, reboot, and explicit recovery validation remain pending.
 See [Validation](docs/VALIDATION.md) for the recorded results; this tree remains
-a prerelease.
+a prerelease. The [next steps](docs/ROADMAP.md) prioritize capture reliability,
+persistence, and installation on another supported machine.
 
 Only the following combination has received hardware validation:
 
