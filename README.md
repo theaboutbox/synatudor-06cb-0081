@@ -6,9 +6,9 @@ Windows biometric driver in a restricted compatibility host and connects it
 to libfprint through the TOD ABI.
 
 The current release targets Arch Linux and [Omarchy](https://omarchy.org/).
-Earlier bring-up was tested on a Lenovo Yoga C930-13IKB; the corrected pairing
-and recovery lifecycle intended for package revision 12 still needs the
-hardware revalidation described below. Other laptops with the same USB ID are
+Earlier bring-up was tested on a Lenovo Yoga C930-13IKB. Package revision 12
+has now passed pairing, enrollment, and verification on that system; restart
+and recovery revalidation remain pending. Other laptops with the same USB ID are
 especially useful test cases.
 
 > [!WARNING]
@@ -102,10 +102,12 @@ coordinates for the vendor's scalar-only certificate-signing keys, while
 validating the scalar and any supplied coordinates, and accepts the vendor's
 bounded TLS labels without requiring a trailing NUL. Revision 12 completes
 enrollment authorization before scan instructions and logs the vendor's
-calibration result and capture prerequisites. Normal pairing and device listing
-have now succeeded; the subsequent enroll/verify and recovery sequence
-has not yet completed hardware revalidation. Treat this tree as a prerelease until that
-result is recorded in [Validation](docs/VALIDATION.md).
+calibration result and capture prerequisites. Normal pairing, device listing,
+enrollment, and a successful fingerprint match have now passed hardware
+revalidation. Capture still produces frequent retries before completing.
+Restart, USB reset, reboot, and explicit recovery validation remain pending.
+See [Validation](docs/VALIDATION.md) for the recorded results; this tree remains
+a prerelease.
 
 Only the following combination has received hardware validation:
 

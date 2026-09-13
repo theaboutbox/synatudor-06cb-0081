@@ -130,8 +130,8 @@ traced. The following ordinary session created the strategy, opened the full bio
 pipeline and native database, and sent READY. The initial device-list query
 appears to have returned before that later session was ready. No further code change was
 needed for this transition. A subsequent device-list check found the reader and
-reported no enrolled fingers. Enrollment, verification, restart, USB reset, and
-reboot validation remain pending.
+reported no enrolled fingers. At that point enrollment, verification, restart,
+USB reset, and reboot validation remained pending.
 
 The subsequent enrollment attempt displayed a graphical authorization dialog
 and repeatedly reported `enroll-retry-scan`. The captured service-log window
@@ -149,7 +149,26 @@ explicitly. Status-only diagnostics also observe the pinned calibration call
 and the vendor's capture prerequisites. Static analysis shows that ProcessPairing
 can overwrite a calibration error with capture-strategy initialization success;
 saved calibration passing the helper's format and reader-ID checks does not
-prove that the vendor accepted it. These changes still require hardware testing.
+prove that the vendor accepted it.
+
+On 2026-09-12, the user installed revision 12 and completed guided enrollment:
+the client advanced through enrollment stages and reported `enroll-completed`,
+then listed the enrolled right index finger and reported `verify-match (done)`.
+The setup helper confirmed that the existing Omarchy PAM configuration was
+already present. This validates enrollment and a matching fingerprint through
+the corrected normal startup path; it does not revalidate every PAM consumer.
+
+The corresponding status-only service log showed calibration status zero and
+ready/calibrated flags set at pairing join and pipeline publication, with no
+blocked capture or pending request at either boundary. Capture still repeatedly
+exited with a pending request while those prerequisite flags stayed ready and
+calibrated. Thus a masked calibration failure is not supported in this run.
+One enrollment update also returned `WINBIO_E_BAD_CAPTURE`; most retries followed
+abandoned requests and cancellation rather than reported image-quality failures. Enrollment
+and matching eventually succeeded without another reset or driver change.
+Frequent retries remain a usability limitation. Restart, USB-reset, reboot,
+wrong-finger rejection, and explicit vendor-unpair recovery revalidation remain
+pending for revision 12.
 
 The package candidate adds these protections:
 
@@ -182,11 +201,11 @@ A superseded package demonstrated that the custom vendor callback could return
 success and that protected local cleanup could complete on the tested reader.
 Its subsequent clean pairing did not reach the safe capture boundary, so that
 result is not a successful end-to-end recovery validation. The corrected
-package revision 11 candidate has now reached normal pairing and safe open;
-it still needs the subsequent device-list check,
-optional vendor-unpair recovery, enrollment, verification, restart, and USB
-reset sequence. The results below are the earlier bring-up baseline; they do
-not validate the corrected lifecycle.
+package revision 12 has now reached normal pairing, safe open, device listing,
+enrollment, and a successful match. Optional vendor-unpair recovery, wrong-finger
+rejection, restart, USB reset, and reboot checks remain pending. The historical
+results below are the earlier bring-up baseline and do not validate those
+remaining parts of the corrected lifecycle.
 
 ## Validated system
 
@@ -232,7 +251,8 @@ exports a test hook or changes dependency/search paths. The source payload has
 289 regular files, matches committed bytes, and passes the private-identity,
 binary-payload, link, and archive-metadata checks. This build changed no
 installed packages, services, authentication settings, or reader state. These
-results do not establish successful enrollment on hardware.
+automated results do not establish successful enrollment on hardware; the
+separate user-run hardware success is recorded above.
 
 Revision 11 passed all 18 Meson tests in the fresh GCC package build and the
 updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. Leak
