@@ -186,10 +186,17 @@ static void test_tls_prf_known_answer(void)
     assert(derived_size == sizeof(derived));
     assert(!memcmp(derived, expected, sizeof(expected)));
 
-    kdf_buffer[0].size = sizeof(label) - 1;
-    assert(BCryptDeriveKey(&secret, tls_prf, &kdf, derived,
-                           sizeof(derived), &derived_size, 0) ==
-           STATUS_INVALID_PARAMETER);
+    /* The pinned TLS caller bounds the label without including its NUL. */
+    char bounded_label[sizeof(label) - 1];
+    memcpy(bounded_label, label, sizeof(bounded_label));
+    kdf_buffer[0].data = bounded_label;
+    kdf_buffer[0].size = sizeof(bounded_label);
+    memset(derived, 0xff, sizeof(derived));
+    derived_size = 0;
+    assert(!BCryptDeriveKey(&secret, tls_prf, &kdf, derived,
+                            sizeof(derived), &derived_size, 0));
+    assert(derived_size == sizeof(derived));
+    assert(!memcmp(derived, expected, sizeof(expected)));
 }
 
 int main(void)

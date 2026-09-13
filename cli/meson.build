@@ -51,7 +51,7 @@ test('bcrypt-ecc', bcrypt_ecc_test, timeout: 10)
 
 palcrypto_ecc_test = executable('palcrypto-ecc-test',
     'tests/palcrypto-ecc.cpp',
-    dependencies: [libtudor_dep, cryptbridge_dep],
+    dependencies: [libtudor_dep, cryptbridge_dep, libcrypto_dep],
     include_directories: ['../libtudor/src'],
     cpp_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
     install: false)

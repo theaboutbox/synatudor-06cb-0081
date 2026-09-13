@@ -389,8 +389,9 @@ NTSTATUS WINAPI BCryptDeriveKey(
                     if(!bcb->cbBuffer || !bcb->pvBuffer)
                         return STATUS_INVALID_PARAMETER;
                     label = bcb->pvBuffer;
+                    /* The pinned TLS caller excludes the trailing NUL. */
                     label_size = strnlen(label, bcb->cbBuffer);
-                    if(label_size == bcb->cbBuffer || label_size > INT_MAX)
+                    if(label_size > INT_MAX)
                         return STATUS_INVALID_PARAMETER;
                     have_label = TRUE;
                     break;

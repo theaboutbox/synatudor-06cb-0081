@@ -167,7 +167,27 @@ __winfnc NTSTATUS  BCryptDeriveKey(
   ULONG                *pcbResult,
   ULONG                dwFlags
 );
-WINAPI(BCryptDeriveKey)
+/* Observe only the result of TLS derivation; labels, secrets, and output bytes
+ * must never enter the service log. Preserve the CNG return value unchanged. */
+static __winfnc NTSTATUS tudor_bcrypt_derive_key(
+    BCRYPT_SECRET_HANDLE secret, LPCWSTR kdf, BCryptBufferDesc *parameters,
+    PUCHAR output, ULONG output_size, ULONG *result_size, ULONG flags)
+{
+    NTSTATUS result = BCryptDeriveKey(secret, kdf, parameters, output,
+                                     output_size, result_size, flags);
+    log_info("TLS key derivation returned status 0x%x", (unsigned int)result);
+    return result;
+}
+
+static struct __winapi_descr tudor_bcrypt_derive_key_descr = {
+    .name = "BCryptDeriveKey",
+    .func = &tudor_bcrypt_derive_key,
+};
+
+__constr static void register_tudor_bcrypt_derive_key(void)
+{
+    __register_windows_api(&tudor_bcrypt_derive_key_descr);
+}
 
 __winfnc NTSTATUS  BCryptDestroySecret(
   BCRYPT_SECRET_HANDLE hSecret);
