@@ -177,6 +177,36 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
+Revision 11 passed all 18 Meson tests in the fresh GCC package build and the
+updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. Leak
+detection and halt-on-error were enabled. The updated GCC ThreadSanitizer
+build passed all 17 tests outside `tudor-host-cleanup`, which retains the GLib
+connection-setup limitation recorded below. The complete text, JSON, and
+JUnit logs from both sanitizer runs contained no diagnostic. No suppression
+was added. The actual PAL regression covers bounded TLS labels and an
+independent ECDH/TLS PRF reference; the six-case private-bus fixture covers
+host-death cancellation, ordinary cancellation, disposal, delayed cleanup,
+the bounded timeout, and signal subscription lifetime. Native CNG test
+function types were corrected to match the signed status and 16-bit string
+types of the implementation, rather than suppressing UBSan's mismatch report.
+
+The revision 11 build-only installer used source commit
+`dc18f59fb5c64ba10a224952b304ae4b7b4a478f` through metadata commit
+`a515f7649411b6d123b87e11161fb82c22812377`. It verified both pinned inputs,
+completed 276 build steps, passed all 18 Meson tests and the shell recovery
+fixture, and changed no installed package, authentication, service, or reader
+state. Two independently generated archives were byte-identical, with SHA-256
+`70871a2281a7568c3918508645cdeaaf73b257cb0b0154c8b039b7dff64242e4`.
+All 288 regular files and 32 directory headers match committed bytes, types,
+modes, and canonical metadata; the new blobs and archive passed the private-data
+and binary-content audit. The private package has SHA-256
+`d13bb94b1b5c1648126624e0643594e882eb5e3dc338fc9c081e334ba8c6bfce`.
+Its exact 39-entry manifest matches revision 10, its five helpers and license
+files match committed source, all six x86-64 ELF objects retain their expected
+dependencies and search paths, and no test hooks are exported. All 20 runtime
+dependencies are satisfied. The package is mode 0600 in a mode 0700 cache;
+`git diff --check` passed. Hardware pairing remains unvalidated.
+
 Revision 10 passed all 18 Meson tests in its fresh GCC package build and the
 updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build, with leak
 detection and halt-on-error enabled. The complete text, JSON, and JUnit logs contained no sanitizer
