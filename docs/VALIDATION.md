@@ -122,6 +122,16 @@ finalization releases that connection, preserving subscriptions across an
 ordinary close/reopen of the same object. The private-bus fixture checks the
 actual HostDied subscription through object destruction and replacement.
 
+The next revision 11 hardware run completed TLS derivation and pairing with
+status zero. Its first worker returned success before creating the capture
+strategy. Static analysis identifies a pinned `UpdateFirmwareExtension`
+transition that permits this staged startup; the exact runtime branch was not
+traced. The following ordinary session created the strategy, opened the full biometric
+pipeline and native database, and sent READY. The initial device-list query
+appears to have returned before that later session was ready. No further code change was
+needed for this transition. A subsequent fprintd device-list check, enrollment,
+verification, restart, USB reset, and reboot validation remain pending.
+
 The package candidate adds these protections:
 
 - normal startup joins the exact pairing worker, requires the pinned
@@ -153,7 +163,8 @@ A superseded package demonstrated that the custom vendor callback could return
 success and that protected local cleanup could complete on the tested reader.
 Its subsequent clean pairing did not reach the safe capture boundary, so that
 result is not a successful end-to-end recovery validation. The corrected
-package revision 11 candidate still needs a fresh on-hardware normal pairing,
+package revision 11 candidate has now reached normal pairing and safe open;
+it still needs the subsequent device-list check,
 optional vendor-unpair recovery, enrollment, verification, restart, and USB
 reset sequence. The results below are the earlier bring-up baseline; they do
 not validate the corrected lifecycle.
@@ -205,7 +216,8 @@ Its exact 39-entry manifest matches revision 10, its five helpers and license
 files match committed source, all six x86-64 ELF objects retain their expected
 dependencies and search paths, and no test hooks are exported. All 20 runtime
 dependencies are satisfied. The package is mode 0600 in a mode 0700 cache;
-`git diff --check` passed. Hardware pairing remains unvalidated.
+`git diff --check` passed. The later hardware transition is recorded above;
+enrollment and the remaining lifecycle checks are pending.
 
 Revision 10 passed all 18 Meson tests in its fresh GCC package build and the
 updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build, with leak
