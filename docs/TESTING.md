@@ -25,7 +25,9 @@ pending-validation marker, its conditional one-to-zero completion, and its
 durable replay guard; and the privileged helper's refusal, cleanup, and
 service-mask paths. A private mock launcher verifies that failed initialization
 completes without waiting for cleanup, that delayed cleanup cannot change a new
-host, and that its timeout leaves the main loop responsive. Calibration fixtures
+host, and that its timeout leaves the main loop responsive. It also tests real
+HostDied cancellation during initialization and signal subscriptions through
+device destruction and replacement. Calibration fixtures
 verify that reader-scoped and legacy blobs are bound to the exact `06cb:0081`
 USB serial.
 
@@ -42,7 +44,7 @@ $ meson test -C build-asan --print-errorlogs
 ## Hardware validation
 
 Automated tests do not prove that a vendor-driver ABI works on hardware. The
-package revision 10 candidate should pass this sequence on USB `06cb:0081`.
+package revision 11 candidate should pass this sequence on USB `06cb:0081`.
 Keep password login available. The optional vendor-unpair step changes pairing
 and local enrollment state and may invalidate existing Windows and Linux
 enrollments; it is not a proven secure erase of the sensor database.
@@ -100,5 +102,5 @@ Arch Linux with Omarchy. Reinstall testing later exposed the incomplete-pairing
 capture failure described in
 [Validation](VALIDATION.md). The joined-worker guard, corrected cryptographic
 pairing support, and vendor-unpair validation lifecycle intended for package
-revision 10 still require the complete hardware sequence above; the earlier
+revision 11 still require the complete hardware sequence above; the earlier
 results do not validate that path. Other laptop models remain unverified.

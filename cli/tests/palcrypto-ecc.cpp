@@ -62,13 +62,17 @@ using Sign = DWORD __winfnc(void *, void *, const void *, uint32_t,
 using Verify = DWORD __winfnc(void *, void *, const void *, uint32_t,
                              const void *, uint32_t);
 using Free = DWORD __winfnc(void **);
-using OpenAlgorithm = NTSTATUS __winfnc(void **, const char16_t *,
-                                        const char16_t *, ULONG);
-using ImportKey = NTSTATUS __winfnc(void *, void *, const char16_t *,
-                                   void **, UCHAR *, ULONG, ULONG);
-using Agreement = NTSTATUS __winfnc(void *, void *, void **, ULONG);
-using DestroyKey = NTSTATUS __winfnc(void *);
-using CloseAlgorithm = NTSTATUS __winfnc(void *, ULONG);
+/* These APIs resolve directly to cryptbridge's C definitions: its NTSTATUS
+ * is signed and its WCHAR is unsigned short, unlike the loader's aliases. */
+using NativeStatus = int32_t;
+using NativeWide = uint16_t;
+using OpenAlgorithm = NativeStatus __winfnc(void **, const NativeWide *,
+                                            const NativeWide *, ULONG);
+using ImportKey = NativeStatus __winfnc(void *, void *, const NativeWide *,
+                                       void **, UCHAR *, ULONG, ULONG);
+using Agreement = NativeStatus __winfnc(void *, void *, void **, ULONG);
+using DestroyKey = NativeStatus __winfnc(void *);
+using CloseAlgorithm = NativeStatus __winfnc(void *, ULONG);
 using PalDerive = DWORD __winfnc(void *, const void *, uint32_t, void *,
                                  uint32_t, void *, uint32_t);
 
@@ -129,17 +133,18 @@ static void test_tls_master_secret(const dll_image& image) {
 
     void *algorithm = nullptr, *private_key = nullptr, *public_key = nullptr;
     assert(windows_function<OpenAlgorithm>("BCryptOpenAlgorithmProvider")(
-        &algorithm, u"ECDH_P256", nullptr, 0) == 0);
+        &algorithm, reinterpret_cast<const NativeWide*>(u"ECDH_P256"),
+        nullptr, 0) == 0);
     const auto original_identity = saved_identity;
     assert(windows_function<ImportKey>("BCryptImportKeyPair")(
-        algorithm, nullptr, u"ECCPRIVATEBLOB", &private_key,
+        algorithm, nullptr, reinterpret_cast<const NativeWide*>(u"ECCPRIVATEBLOB"), &private_key,
         saved_identity.data(), saved_identity.size(), 0) == 0);
     std::vector<uint8_t> public_blob(saved_identity.begin(),
                                      saved_identity.begin() + 72);
     const uint32_t public_magic = 0x314b4345;
     std::memcpy(public_blob.data(), &public_magic, sizeof(public_magic));
     assert(windows_function<ImportKey>("BCryptImportKeyPair")(
-        algorithm, nullptr, u"ECCPUBLICBLOB", &public_key,
+        algorithm, nullptr, reinterpret_cast<const NativeWide*>(u"ECCPUBLICBLOB"), &public_key,
         public_blob.data(), public_blob.size(), 0) == 0);
 
     const char label[] = "master secret";

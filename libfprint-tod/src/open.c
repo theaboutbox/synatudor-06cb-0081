@@ -124,8 +124,9 @@ static gchar *make_state_id(GUsbDevice *usb_dev) {
 }
 
 void register_host_process_monitor(FpiDeviceTudor *tdev) {
+    if(tdev->host_died_subscription_id) return;
     //Register a signal listener
-    g_dbus_connection_signal_subscribe(tdev->dbus_con,
+    tdev->host_died_subscription_id = g_dbus_connection_signal_subscribe(tdev->dbus_con,
         TUDOR_HOST_LAUNCHER_SERVICE, TUDOR_HOST_LAUNCHER_INTERF, TUDOR_HOST_LAUNCHER_HOST_DIED_SIGNAL, TUDOR_HOST_LAUNCHER_OBJ,
         NULL, G_DBUS_SIGNAL_FLAGS_NONE,
         host_died_signal_cb, tdev, NULL
@@ -140,7 +141,19 @@ static void init_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data
     //Get the message buffer
     GError *error = NULL;
     IPCMessageBuf *msg = (IPCMessageBuf*) g_task_propagate_pointer(mtask, &error);
-    if(!msg) goto error;
+    if(!msg) {
+        /* HostDied cancels the receive task to wake its socket source. GTask
+         * then overrides the protocol error with G_IO_ERROR_CANCELLED. During
+         * probe this is an initialization failure, not caller cancellation:
+         * libfprint skips its pending-device decrement for cancelled probes. */
+        if(tdev->host_dead &&
+           g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_clear_error(&error);
+            error = fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,
+                "Tudor host process died during initialization");
+        }
+        goto error;
+    }
 
     //Handle message
     switch(msg->type) {

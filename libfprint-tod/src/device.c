@@ -49,6 +49,8 @@ static GList *dev_list = 0;
 
 static void fpi_device_tudor_init(FpiDeviceTudor *tdev) {
     tdev->usb_fd = -1;
+    tdev->host_died_subscription_id = 0;
+    tdev->suspend_subscription_id = 0;
     tdev->host_has_id = false;
     tdev->host_sleep_inhib = -1;
     tdev->ipc_socket = NULL;
@@ -83,6 +85,18 @@ static void fpi_device_tudor_dispose(GObject *obj) {
 
 static void fpi_device_tudor_finalize(GObject *obj) {
     FpiDeviceTudor *tdev = FPI_DEVICE_TUDOR(obj);
+
+    /* The connection can be shared by other devices. Remove raw-userdata
+     * monitors on libfprint's owning thread before freeing the device; GLib
+     * then suppresses even deliveries already queued for that thread. */
+    if(tdev->dbus_con) {
+        if(tdev->host_died_subscription_id)
+            g_dbus_connection_signal_unsubscribe(
+                tdev->dbus_con, tdev->host_died_subscription_id);
+        if(tdev->suspend_subscription_id)
+            g_dbus_connection_signal_unsubscribe(
+                tdev->dbus_con, tdev->suspend_subscription_id);
+    }
 
     //Close DBus connection
     g_clear_object(&tdev->dbus_con);

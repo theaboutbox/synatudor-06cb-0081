@@ -84,6 +84,44 @@ The software DLL regression exposed unowned dynamic `GetProcAddress` stub
 names under LeakSanitizer. The API library now owns their names and executable
 pages in a mutex-protected pool and releases both at library teardown.
 
+On hardware, revision 10 imported the persisted identity, completed signing
+and certificate verification, and reached ECDH/TLS preparation. Its subsequent
+pairing workers returned `0x800700cc` without a capture strategy. Several
+separate initialization objects ran during the same fprintd startup, followed
+by the counter-limit cooldown and a service timeout. The repeated objects are
+consistent with USB hotplug during initialization; that trigger has not been
+proved from the service log alone.
+
+A second compatibility regression was reproduced at the pinned DLL's real
+TLS derivation boundary. Its TLS caller passes the 13 bytes of `master secret`
+without including the NUL in the length. The public bridge had added a NUL
+requirement and a test expecting rejection; the development bridge accepted
+the bounded label. The actual vendor PAL call returned `0x259` with length 13
+and succeeded with length 14. Revision 11 accepts both bounded forms and checks
+their outputs against an independent ECDH and HMAC-based TLS PRF calculation.
+This failure matches the hardware timeline, but the final worker status alone
+does not identify every possible TLS failure. Static analysis confirms a
+client TLS path that propagates this `0x259` and maps it to `0xcc`; the exact
+runtime branch was not traced. Status-only derivation logging
+is included to verify the boundary on the next hardware run.
+
+The startup timeout also has a concrete initialization error path. Host death
+cancels the internal receive task. GTask substitutes `G_IO_ERROR_CANCELLED`
+for its error, and the pinned libfprint `v1.95.2+tod1` initialization callback
+returns on that error before decrementing `pending_devices`. Enumeration then
+waits on that counter. Revision 11 translates cancellation caused by host death
+to an initialization protocol error before disposal, while retaining ordinary
+cancellation when the host has not died. The fixture uses the real receive and
+HostDied callbacks and models the installed pending-count gate; it does not
+perform real USB enumeration.
+
+Failed device objects also discarded their HostDied and suspend signal
+subscription IDs while retaining raw device pointers as callback data on a
+shared D-Bus connection. Revision 11 owns both IDs and unsubscribes before
+finalization releases that connection, preserving subscriptions across an
+ordinary close/reopen of the same object. The private-bus fixture checks the
+actual HostDied subscription through object destruction and replacement.
+
 The package candidate adds these protections:
 
 - normal startup joins the exact pairing worker, requires the pinned
@@ -115,7 +153,7 @@ A superseded package demonstrated that the custom vendor callback could return
 success and that protected local cleanup could complete on the tested reader.
 Its subsequent clean pairing did not reach the safe capture boundary, so that
 result is not a successful end-to-end recovery validation. The corrected
-package revision 10 candidate still needs a fresh on-hardware normal pairing,
+package revision 11 candidate still needs a fresh on-hardware normal pairing,
 optional vendor-unpair recovery, enrollment, verification, restart, and USB
 reset sequence. The results below are the earlier bring-up baseline; they do
 not validate the corrected lifecycle.
