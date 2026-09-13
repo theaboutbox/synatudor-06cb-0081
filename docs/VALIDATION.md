@@ -207,6 +207,33 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
+Revision 12 passed all 18 Meson tests and both shell fixtures in its fresh GCC
+build-only package build. The setup fixture verifies that sudo authentication
+finishes before scan instructions, preserves the explicit desktop username in
+the noninteractive enrollment command, and stops before enrollment when
+authentication fails. The changed capture-recovery and pairing-layout tests
+passed 2/2 under Clang ASan/UBSan with leak detection and halt-on-error enabled,
+and 2/2 under GCC TSan with halt-on-error enabled. These focused runs contained
+no sanitizer diagnostic; the native shims and fixture are instrumented, while
+the pinned vendor DLL's machine code is not. The fixture executes real vendor
+calibration success, failure, and retry paths with both hardware SDK callsites
+replaced, and checks a blocked capture worker leaving its request pending.
+
+The revision 12 installer built source commit
+`3c51fe9a458b7170457c1491b1c85f96facc34c9` through metadata commit
+`0fe9d9b8e78f84a39d29371d555c4e9c6703d4e3`. Two independently generated source
+archives were byte-identical, with SHA-256
+`fa416774e6d8d2226bb1cef0cce8c90a9f6aad4dc776e83b4916f20dfe7e808b`.
+The private package SHA-256 is
+`47df2a0a9812b3f98cc9136c26089754e9a2741a51e1aed424cfdd616b7351f7`.
+Its manifest matches revision 11, its five helpers and notices match committed
+source, all 20 dependencies are satisfied, and none of its six ELF binaries
+exports a test hook or changes dependency/search paths. The source payload has
+289 regular files, matches committed bytes, and passes the private-identity,
+binary-payload, link, and archive-metadata checks. This build changed no
+installed packages, services, authentication settings, or reader state. These
+results do not establish successful enrollment on hardware.
+
 Revision 11 passed all 18 Meson tests in the fresh GCC package build and the
 updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. Leak
 detection and halt-on-error were enabled. The updated GCC ThreadSanitizer
