@@ -469,7 +469,9 @@ static gboolean load_state_value(const char *state_id, const char *name,
 }
 
 static gboolean send_packet(int fd, const void *data, size_t size) {
-    ssize_t sent = write(fd, data, size);
+    /* The host is the untrusted side of this channel: never block the
+     * launcher's main loop on it, and never let a dead peer raise SIGPIPE. */
+    ssize_t sent = send(fd, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
     if(sent == (ssize_t) size) return TRUE;
     if(sent < 0)
         g_warning("Failed to send Tudor state response: %s", g_strerror(errno));
@@ -569,8 +571,12 @@ static gboolean state_socket_ready(gint fd, GIOCondition condition,
         if(size < 0)
             g_warning("Failed to receive Tudor state request: %s",
                       g_strerror(errno));
+        else if(size > 0)
+            g_warning("Closing oversized Tudor state channel request");
         if(size > 0) wipe_bytes(buf, (size_t) size);
         g_free(buf);
+        //Wake the host so it does not wait forever for a reply
+        shutdown(fd, SHUT_RDWR);
         return G_SOURCE_REMOVE;
     }
 

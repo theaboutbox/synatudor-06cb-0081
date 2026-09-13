@@ -431,7 +431,7 @@ __winfnc BOOL WinUsb_GetDescriptor(
 {
     TRACE();
 
-    struct driver_info *info = InterfaceHandle;
+    struct driver_info *info = (struct driver_info *) InterfaceHandle;
     int rc;
     uint16_t dti = (uint16_t)((DescriptorType << 8) | Index);
 
@@ -457,11 +457,13 @@ __winfnc BOOL WinUsb_GetDescriptor(
         // }
 
 	    TRACE_PRINTF("rc = %d\n", rc);
-    *LengthTransferred = rc;
-
-    if(rc < 0)
+    if(rc < 0) {
+        if(LengthTransferred) *LengthTransferred = 0;
+        winerr_set_code(ERROR_GEN_FAILURE);
         return FALSE;
+    }
 
+    if(LengthTransferred) *LengthTransferred = (ULONG) rc;
     return TRUE;
 }
 WINAPI(WinUsb_GetDescriptor)
@@ -484,9 +486,9 @@ __winfnc BOOL WinUsb_ControlTransfer(
             PULONG LengthTransferred, 
             LPOVERLAPPED Overlapped)
 {
-    struct driver_info *info = InterfaceHandle;
+    struct driver_info *info = (struct driver_info *) InterfaceHandle;
     TRACE();
-    int rc, i;
+    int rc;
 
 	    TRACE_PRINTF("%x %x %x %x %x\n",
                 SetupPacket.RequestType, 
@@ -494,18 +496,13 @@ __winfnc BOOL WinUsb_ControlTransfer(
                 SetupPacket.Value, 
                 SetupPacket.Index,
                 SetupPacket.Length);
-#if 0
-    printf("Before: ");
-    for(i=0;i<BufferLength;i++) {
-        if(i > 80000) {
-            printf("...");
-            break;
-        } else {
-            printf("%02x", Buffer[i]);
-        }
+    /* The setup packet's wLength drives the transfer; an IN transfer
+     * longer than the caller's buffer would overrun it. */
+    if(SetupPacket.Length > BufferLength) {
+        winerr_set_code(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
-    printf("\r\n");
-#endif
+
     if (info->playback) {
         rc = SetupPacket.Length;
         *LengthTransferred = rc;
@@ -543,7 +540,7 @@ WinUsb_ReadPipe(
             LPOVERLAPPED Overlapped)
 {
     TRACE();
-    struct driver_info *dev = InterfaceHandle;
+    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
     WINUSB_PIPE_INFORMATION *wpi = NULL;
     int i, rc;
     bool was_aborted = false;
@@ -653,7 +650,7 @@ WinUsb_WritePipe(
             LPOVERLAPPED Overlapped)
 {
     int rc;
-    struct driver_info *dev = InterfaceHandle;
+    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
     int send;
 
     TRACE();
@@ -698,6 +695,11 @@ WinUsb_QueryPipe(
     TRACE();
 	    TRACE_PRINTF("alt-if=%d pipe=%d\n", AlternateInterfaceNumber, PipeIndex);
 
+    if(PipeIndex >= sizeof(pipe_types) / sizeof(*pipe_types)) {
+        winerr_set_code(ERROR_NO_MORE_ITEMS);
+        return FALSE;
+    }
+
     *PipeInformation = pipe_types[PipeIndex];
 
     return TRUE;
@@ -724,7 +726,7 @@ WinUsb_SetPipePolicy(
             ULONG ValueLength,
             PVOID Value)
 {
-    struct driver_info *info = InterfaceHandle;
+    struct driver_info *info = (struct driver_info *) InterfaceHandle;
 
     TRACE();
 	    TRACE_PRINTF("pipe=%d, policy type=%d, val length=%d, val=%x\n", PipeID, PolicyType, ValueLength, *(DWORD*)Value);
@@ -747,7 +749,7 @@ WINAPI(WinUsb_FlushPipe)
 __winfnc BOOL
 WinUsb_AbortPipe (HANDLE InterfaceHandle, UCHAR PipeID)
 {
-    struct driver_info *dev = InterfaceHandle;
+    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
     TRACE();
 	    TRACE_PRINTF("%x\n", PipeID);
     if(dev->abort[PipeID] == 1) {
@@ -791,7 +793,7 @@ WinUsb_GetPipePolicy(
             PULONG ValueLength,
             PVOID Value)
 {
-    struct driver_info *info = InterfaceHandle;
+    struct driver_info *info = (struct driver_info *) InterfaceHandle;
 
 	    TRACE_PRINTF("PipeID=%d PolicyType=%d ValueLength=%d\n",
                 PipeID, 

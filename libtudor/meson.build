@@ -72,9 +72,6 @@ driver_dll_names = [
     'synaWudfBioUsb.dll'
 ]
 
-add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
-
-
 bridge_proj = subproject('cryptbridge')
 cryptbridge_dep = bridge_proj.get_variable('cryptbridge_dep')
 

@@ -17,7 +17,7 @@ json_glib_dep = dependency('json-glib-1.0')
 
 tudor_tod = shared_module('tudor_tod',
     sources: tudor_tod_src,
-    c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
+    c_args: ['-D_GNU_SOURCE'],
     dependencies: [libfprint_tod_dep, libusb_dep, gusb_dep, json_glib_dep],
     include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],
     install: true,
@@ -38,7 +38,7 @@ foreach source : tudor_tod_src
 endforeach
 cleanup_test = executable('tudor-host-cleanup-test',
     sources: cleanup_test_src,
-    c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
+    c_args: ['-D_GNU_SOURCE'],
     dependencies: [libfprint_tod_dep, dependency('libfprint-2'),
                    libusb_dep, gusb_dep, json_glib_dep],
     include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],
@@ -55,7 +55,7 @@ foreach source : tudor_tod_src
 endforeach
 capture_prompts_test = executable('tudor-capture-prompts-test',
     sources: capture_prompts_src,
-    c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
+    c_args: ['-D_GNU_SOURCE'],
     dependencies: [libfprint_tod_dep, dependency('libfprint-2'),
                    libusb_dep, gusb_dep, json_glib_dep],
     include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],

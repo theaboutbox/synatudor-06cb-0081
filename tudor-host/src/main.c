@@ -220,9 +220,9 @@ static const struct tudor_pair_data *get_pdata_cb(const char *name) {
     }
 
     //Receive the response
-    struct {
+    union {
         struct ipc_msg_resp_load_pdata msg;
-        char buf[IPC_MAX_PDATA_SIZE];
+        char buf[sizeof(struct ipc_msg_resp_load_pdata) + IPC_MAX_PDATA_SIZE];
     } resp;
     size_t pdata_sz = ipc_recv_msg(pdata_ipc_sock, &resp, IPC_MSG_RESP_LOAD_PDATA, sizeof(resp.msg), sizeof(resp), NULL) - sizeof(resp.msg);
 
@@ -248,10 +248,10 @@ static void set_pdata_cb(const char *name, const struct tudor_pair_data *data) {
     log_info("Setting pairing data for sensor '%s'...", name);
 
     //Send an IPC message to the module
-    struct {
+    union {
         struct ipc_msg_store_pdata msg;
-        char buf[IPC_MAX_PDATA_SIZE];
-    } msg = { .msg.type = IPC_MSG_STORE_PDATA, .msg.sensor_name = {0} };
+        char buf[sizeof(struct ipc_msg_store_pdata) + IPC_MAX_PDATA_SIZE];
+    } msg = { .msg = { .type = IPC_MSG_STORE_PDATA, .sensor_name = {0} } };
     strncpy(msg.msg.sensor_name, name, IPC_SENSOR_NAME_SIZE);
     memcpy(msg.msg.pdata, data->data, data->data_size);
     ipc_send_msg(pdata_ipc_sock, &msg, sizeof(msg.msg) + data->data_size);

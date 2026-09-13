@@ -32,7 +32,7 @@ static void pipe_destroy(struct winpipe *pipe) {
     pipe->dying = true;
 
     //Remove from pipes list
-    cant_fail_ret(pthread_mutex_unlock(&pipes_lock));
+    cant_fail_ret(pthread_mutex_lock(&pipes_lock));
     if(pipe->prev) pipe->prev->next = pipe->next;
     else pipes_head = pipe->next;
     if(pipe->next) pipe->next->prev = pipe->prev;
@@ -129,7 +129,6 @@ __winfnc BOOL PathAppendA(
     printf("PathAppendA more: %s\n", more);
 
     size_t path_len = strlen(path);
-    size_t more_len = strlen(more);
 
     if (path_len == 0) {
         // If path is empty, just copy more
@@ -148,7 +147,7 @@ __winfnc BOOL PathAppendA(
 
     strcat(path, more);
     printf("PathAppendA result: %s\n", path);
-    return 0;
+    return TRUE;
 }
 WINAPI(PathAppendA)
 
@@ -216,7 +215,7 @@ __winfnc HANDLE CreateFileA(
     printf("flags: %d\n", flags);
     printf("handle: %p\n", handle);
     static const char* dummy = "ABC";
-    HANDLE h = winhandle_create(dummy, NULL);
+    HANDLE h = winhandle_create((void*) dummy, NULL);
     return h;
 }
 WINAPI(CreateFileA)

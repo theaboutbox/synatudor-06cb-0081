@@ -23,33 +23,40 @@ void pe_destroy(struct pe_file *pe) {
     //Free allocated memory
     pe->data = NULL;
 
-    for(int i = 0; i < pe->num_data_dirs; i++) free(pe->data_dirs[i].data);
+    /* Every array below is allocated with calloc() and its element count is
+     * only set once the array exists, so this is safe to run after a parse
+     * that failed part way through. */
+    if(pe->data_dirs) for(int i = 0; i < pe->num_data_dirs; i++) free(pe->data_dirs[i].data);
     free(pe->data_dirs);
     pe->data_dirs = NULL;
+    pe->num_data_dirs = 0;
 
     free(pe->sections);
     pe->sections = NULL;
+    pe->num_sects = 0;
 
-    for(int i = 0; i < pe->num_import_libs; i++) {
+    if(pe->import_libs) for(int i = 0; i < pe->num_import_libs; i++) {
         struct pe_import_lib *lib = &pe->import_libs[i];
         free(lib->name);
 
-        for(int i = 0; i < lib->num_imports; i++) free(lib->imports[i].name);
+        if(lib->imports) for(int j = 0; j < lib->num_imports; j++) free(lib->imports[j].name);
         free(lib->imports);
     }
     free(pe->import_libs);
     pe->import_libs = NULL;
+    pe->num_import_libs = 0;
 
     free(pe->export_lib_name);
     pe->export_lib_name = NULL;
 
-    for(int i = 0; i < pe->num_exports; i++) {
+    if(pe->exports) for(int i = 0; i < pe->num_exports; i++) {
         struct pe_export *export = &pe->exports[i];
         free(export->name);
         free(export->forwarder);
     }
     free(pe->exports);
     pe->exports = NULL;
+    pe->num_exports = 0;
 
     free(pe->relocations);
     pe->relocations = NULL;

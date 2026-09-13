@@ -4,21 +4,30 @@
 #include "internal.h"
 
 bool pe_parse_data_dirs(struct pe_file *pe) {
-    if(pe->num_data_dirs * sizeof(struct PEs_data_dir) > pe->opt_header_size - sizeof(struct PEs_opt_header)) {
+    int num_data_dirs = pe->num_data_dirs;
+    pe->num_data_dirs = 0;
+
+    if(num_data_dirs < 0 || (size_t) pe->opt_header_size < sizeof(struct PEs_opt_header) ||
+       (size_t) num_data_dirs * sizeof(struct PEs_data_dir) > pe->opt_header_size - sizeof(struct PEs_opt_header)) {
         log_error("PE file has too many data directory entries!");
         return false;
     }
 
-    pe->data_dirs = (struct pe_data_dir*) malloc(pe->num_data_dirs * sizeof(struct pe_data_dir));
+    pe->data_dirs = (struct pe_data_dir*) calloc(num_data_dirs, sizeof(struct pe_data_dir));
+    if(!pe->data_dirs) {
+        log_error("Couldn't allocate PE data directory table!");
+        return false;
+    }
+    pe->num_data_dirs = num_data_dirs;
 
     //Iterate over data directories
     for(int i = 0; i < pe->num_data_dirs; i++) {
         struct PEs_data_dir *sdir = (struct PEs_data_dir*) (pe->data + pe->data_dirs_off + i*sizeof(struct PEs_data_dir));
 
-        //Check bounds
+        //Check bounds (computed in 64 bits so that the sum can't wrap)
         uint32_t mem_off = le32toh(sdir->VirtualAddress), mem_size = le32toh(sdir->Size);
-        if(mem_off + mem_size > pe->image_size) {
-            log_warn("Data directory %d has invalid bounds! [end 0x%x > image end 0x%x]", i, mem_off + mem_size, pe->image_size);
+        if((uint64_t) mem_off + mem_size > pe->image_size) {
+            log_warn("Data directory %d has invalid bounds! [off 0x%x size 0x%x image end 0x%x]", i, mem_off, mem_size, pe->image_size);
             mem_size = 0;
         }
 
@@ -26,7 +35,11 @@ bool pe_parse_data_dirs(struct pe_file *pe) {
         struct pe_data_dir *dir = &pe->data_dirs[i];
         dir->offset = mem_off;
         dir->size = mem_size;
-        dir->data = (uint8_t*) malloc(mem_size);
+        dir->data = (uint8_t*) calloc(mem_size ? mem_size : 1, 1);
+        if(!dir->data) {
+            log_error("Couldn't allocate PE data directory %d!", i);
+            return false;
+        }
         pe_copy_mem(pe, mem_off, mem_size, dir->data);
 
         //Parse "special" data directories

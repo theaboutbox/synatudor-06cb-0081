@@ -35,7 +35,19 @@ struct win_thread {
     THREAD_START_ROUTINE *start_proc;
     void *start_param;
     bool run_start_proc;
+
+    /* One reference for the Windows HANDLE and one for the running thread,
+     * so closing the handle while the thread still runs (the usual
+     * CreateThread/CloseHandle idiom) cannot free state the thread uses. */
+    int refcnt;
 };
+
+static void thread_release(struct win_thread *thread) {
+    if(__atomic_sub_fetch(&thread->refcnt, 1, __ATOMIC_ACQ_REL) != 0) return;
+    cant_fail_ret(pthread_mutex_destroy(&thread->lock));
+    cant_fail_ret(pthread_cond_destroy(&thread->suspend_cond));
+    free(thread);
+}
 
 static void notify_thread_lifecycle(struct win_thread *thread, bool created) {
     win_thread_lifecycle_observer_fnc *observer =
@@ -48,13 +60,10 @@ static void notify_thread_lifecycle(struct win_thread *thread, bool created) {
 
 static void thread_destr(void *data) {
     struct win_thread *thread = (struct win_thread*) data;
-    //Free memory
+    //Let the pthread reclaim itself if nobody joined it, then drop the
+    //handle's reference; the thread drops its own when it exits
     if(!thread->has_detached) cant_fail_ret(pthread_detach(thread->thread));
-    cant_fail_ret(pthread_mutex_lock(&thread->lock));
-    cant_fail_ret(pthread_mutex_unlock(&thread->lock));
-    cant_fail_ret(pthread_mutex_destroy(&thread->lock));
-    cant_fail_ret(pthread_cond_destroy(&thread->suspend_cond));
-    free(thread);
+    thread_release(thread);
 }
 
 static DWORD thread_wait(struct win_sync_object *sync_obj, DWORD timeout) {
@@ -81,6 +90,15 @@ static void thread_wait_resume(struct win_thread *thread) {
     cant_fail_ret(pthread_mutex_unlock(&thread->lock));
 }
 
+/* Runs when the start routine returns and also when it leaves through
+ * ExitThread(), so the lifecycle observer and the reference drop happen
+ * exactly once either way. */
+static void thread_exit_cleanup(void *arg) {
+    struct win_thread *thread = (struct win_thread*) arg;
+    notify_thread_lifecycle(thread, false);
+    thread_release(thread);
+}
+
 static void *thread_entry(void *arg) {
     struct win_thread *thread = (struct win_thread*) arg;
 
@@ -95,23 +113,15 @@ static void *thread_entry(void *arg) {
     cant_fail_ret(pthread_cond_signal(&thread->start_cond));
     cant_fail_ret(pthread_mutex_unlock(&thread->lock));
 
+    pthread_cleanup_push(thread_exit_cleanup, thread);
+
     //Call the thread start routine
     thread_wait_resume(thread);
-    struct winmodule *start_module = thread->start_module;
-    THREAD_START_ROUTINE *start_proc = thread->start_proc;
-    void *start_param = thread->start_param;
-    DWORD thread_id = thread->thread_id;
-    DWORD result = thread->run_start_proc ? start_proc(start_param) : 0;
+    DWORD result = thread->run_start_proc ? thread->start_proc(thread->start_param) : 0;
     log_debug("Windows thread %u returned from %p with status 0x%x",
-              thread_id, (void*) start_proc, result);
+              thread->thread_id, (void*) thread->start_proc, result);
 
-    win_thread_lifecycle_observer_fnc *observer =
-        __atomic_load_n(&thread_lifecycle_observer, __ATOMIC_ACQUIRE);
-    if(observer) {
-        observer(start_module, (void*) start_proc, start_param, thread,
-                 false);
-    }
-
+    pthread_cleanup_pop(1);
     return (void*) 0;
 }
 
@@ -135,6 +145,7 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
     thread->run_start_proc = !filter ||
         filter(thread->start_module, (void*)start_proc, param);
 
+    thread->refcnt = 2;
     thread->handle = winhandle_create(thread, thread_destr);
 
     /* Notify before pthread_create: a short-lived Windows worker can return

@@ -9,6 +9,7 @@ void register_suspend_monitor(FpiDeviceTudor *tdev);
 bool create_sleep_inhibitor(FpiDeviceTudor *tdev, GError **error);
 
 static inline void close_sleep_inhibitor(gint inhib) {
+    if(inhib < 0) return;
     g_debug("Clearing sleep inhibitor %d for tudor device...", inhib);
     g_assert_no_errno(close(inhib));
 }

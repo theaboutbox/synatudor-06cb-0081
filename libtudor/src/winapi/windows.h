@@ -53,6 +53,8 @@ typedef struct {
 })
 
 #define ERROR_INVALID_PARAMETER                            87
+#define ERROR_GEN_FAILURE                                  31
+#define ERROR_NO_MORE_ITEMS                                259
 #define NTE_BAD_FLAGS                                      0x80090009
 #define ERROR_NOT_ENOUGH_MEMORY                            8
 #define ERROR_INVALID_HANDLE                               6
@@ -64,6 +66,7 @@ enum {
     ERROR_IO_INCOMPLETE = 0x3e4,
     ERROR_IO_PENDING = 0x3e5,
     E_INVALIDARG = 0x80070057,
+    E_OUTOFMEMORY = 0x8007000e,
     E_NOTIMPL = 0x80004001
 };
 

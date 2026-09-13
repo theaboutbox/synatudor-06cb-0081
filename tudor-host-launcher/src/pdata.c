@@ -95,7 +95,8 @@ void load_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
             g_clear_error(&error);
             return;
         }
-        if(!g_input_stream_read_all(G_INPUT_STREAM(stream), pdata_data ? pdata_data : &pdata_data, pdata_len, NULL, NULL, &error)) {
+        gsize bytes_read = 0;
+        if(!g_input_stream_read_all(G_INPUT_STREAM(stream), pdata_data ? pdata_data : &pdata_data, pdata_len, &bytes_read, NULL, &error)) {
             g_object_unref(stream);
             g_object_unref(pdata_file);
             g_dbus_method_invocation_return_gerror(invoc, error);
@@ -103,6 +104,9 @@ void load_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
             return;
         }
         g_object_unref(stream);
+
+        //The file may have been replaced between stat and read
+        pdata_len = bytes_read;
 
         //Create variant
         pdata = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, pdata_data, pdata_len, 1);

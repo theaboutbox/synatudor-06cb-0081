@@ -173,9 +173,9 @@ static void init_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data
             if(!load_pdata(tdev, tdev->pdata_sensor_name, &pdata, &error)) goto error;
 
             if(pdata && pdata->len > IPC_MAX_PDATA_SIZE) {
-                g_error("Stored Tudor pairing data length exceeds maximum! [%d > %d]", pdata->len, IPC_MAX_PDATA_SIZE);
+                error = fpi_device_error_new_msg(FP_DEVICE_ERROR_DATA_INVALID, "Stored Tudor pairing data length exceeds maximum! [%d > %d]", pdata->len, IPC_MAX_PDATA_SIZE);
                 g_byte_array_unref(pdata);
-                pdata = NULL;
+                goto error;
             }
 
             //Send response
@@ -407,6 +407,7 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
     //Create the IPC socket
     tdev->ipc_socket = g_socket_new_from_fd(sock_fd, &error);
     if(!tdev->ipc_socket) {
+        g_assert_no_errno(close(sock_fd));
         dispose_dev(tdev);
         g_task_return_error(task, error);
         g_object_unref(task);
@@ -435,6 +436,9 @@ static void shutdown_timeout_cb(FpDevice *dev, gpointer user_data) {
 }
 
 static void shutdown_host(FpiDeviceTudor *tdev) {
+    //The close may already have completed (host death, timeout)
+    if(!tdev->close_task) return;
+
     //Send shutdown message
     tdev->send_msg->size = sizeof(enum ipc_msg_type);
     tdev->send_msg->type = IPC_MSG_SHUTDOWN;
@@ -458,6 +462,12 @@ static void orphan_clear_acked_cb(GObject *src_obj, GAsyncResult *res, gpointer 
     //Check for errors
     GError *error = NULL;
     IPCMessageBuf *msg = g_task_propagate_pointer(task, &error);
+    if(!tdev->close_task) {
+        //The close already completed through another path
+        g_clear_pointer(&msg, ipc_msg_buf_free);
+        g_clear_error(&error);
+        return;
+    }
     if(!msg) goto error;
     ipc_msg_buf_free(msg);
 

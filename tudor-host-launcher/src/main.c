@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdlib.h>
 #include <tudor/dbus-launcher.h>
 #include "dbus.h"
@@ -55,6 +56,10 @@ static void name_lost(GDBusConnection *con, const gchar *name, gpointer user_dat
 }
 
 int main() {
+    /* A sandboxed host can die between sending a state request and our
+     * reply; the write must fail with EPIPE instead of killing the launcher. */
+    signal(SIGPIPE, SIG_IGN);
+
     //Connect to DBus
     GError *error = NULL;
     dbus_con = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);

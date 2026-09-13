@@ -54,10 +54,10 @@ typedef wchar_t* LPOLESTR;
 
 /* COM HRESULT macros */
 #ifndef SUCCEEDED
-# define SUCCEEDED(hr) (((HRESULT)(hr)) >= 0)
+# define SUCCEEDED(hr) (((int32_t)(hr)) >= 0)
 #endif
 #ifndef FAILED
-# define FAILED(hr) (((HRESULT)(hr)) < 0)
+# define FAILED(hr) (((int32_t)(hr)) < 0)
 #endif
 
 typedef struct _BLOB {

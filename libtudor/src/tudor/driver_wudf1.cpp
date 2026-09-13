@@ -9,9 +9,7 @@
 #include <vector>
 #include <cstdint>
 #include <unistd.h>
-#include <codecvt>
 #include <string>
-#include <locale>
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -70,7 +68,6 @@ WINBIO_SENSOR_INTERFACE *tudor_sensor_adapter;
 WINBIO_ENGINE_INTERFACE *tudor_engine_adapter;
 WINBIO_STORAGE_INTERFACE *tudor_native_storage_adapter;
 
-static DRIVER_OBJECT umdf_driver;
 struct winwdf_driver *tudor_wdf_driver;
 
 /* These RVAs are specific to the pinned synaWudfBioUsb.dll.  The lifecycle
@@ -707,8 +704,8 @@ void print_guid(const GUID_DLL* g) {
         printf("NULL GUID pointer\n");
         return;
     }
-    printf("{%08lX-%04hX-%04hX-", 
-           g->Data1, g->Data2, g->Data3);
+    printf("{%08X-%04hX-%04hX-",
+           (unsigned int) g->Data1, g->Data2, g->Data3);
     // Print first 2 bytes of Data4
     printf("%02hhX%02hhX-", g->Data4[0], g->Data4[1]);
     // Print last 6 bytes of Data4
@@ -765,28 +762,13 @@ bool IsEqualIID(REFIID riid1, REFIID riid2) {
 std::string utf16le_to_utf8(const char16_t* input) {
     if (!input) return {};
 
-    // Wrap raw pointer into std::u16string
-    std::u16string u16str(input);
-
-    // Convert UTF-16 to UTF-8
-    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
-    return convert.to_bytes(u16str);
-}
-
-char16_t* utf8_to_utf16le(const std::string& input) {
-    // Converter from UTF-8 to UTF-16
-    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
-
-    std::u16string u16str = convert.from_bytes(input);
-
-    // Allocate new buffer (+1 for null terminator)
-    char16_t* buffer = new char16_t[u16str.size() + 1];
-
-    // Copy content
-    std::copy(u16str.begin(), u16str.end(), buffer);
-    buffer[u16str.size()] = u'\0'; // null terminator
-
-    return buffer; // caller must delete[]
+    /* Reuse the validating converter from the Win32 emulation layer instead
+     * of std::wstring_convert, which is deprecated since C++17. */
+    char *utf8 = winstr_to_str(input);
+    if (!utf8) return {};
+    std::string result(utf8);
+    free(utf8);
+    return result;
 }
 
 static std::string tudor_state_path(const std::string& name,
@@ -996,9 +978,11 @@ class MyDevInit : public IWDFDeviceInitialize {
 struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            LPOLESTR str;
-            StringFromIID(riid, &str);
-            std::wcout << L"MyMem::QueryInterface " << str << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(riid, &str)) {
+                std::wcout << L"MyMem::QueryInterface " << str << std::endl;
+                free(str);
+            }
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
             return 0; 
@@ -1089,6 +1073,10 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                 if(!data.empty()) {
                     pv->blob.pBlobData =
                         (BYTE*) CoTaskMemAlloc(pv->blob.cbSize);
+                    if(!pv->blob.pBlobData) {
+                        pv->blob.cbSize = 0;
+                        return E_OUTOFMEMORY;
+                    }
                     std::copy(data.begin(), data.end(), pv->blob.pBlobData);
                 }
                 std::cout << "Restored " << data.size() << " bytes of "
@@ -1165,7 +1153,8 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             /* [annotation][string][out] */ 
             _Out_  PWSTR *ppwszName){
             std::wcout << L"GetNameAt " << iProp << std::endl;
-            *ppwszName = L"";
+            static wchar_t empty_name[] = L"";
+            *ppwszName = empty_name;
             return 0;
         }
 
@@ -1188,9 +1177,11 @@ struct MyMem : public IWDFMemory {
 
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            LPOLESTR str;
-            StringFromIID(riid, &str);
-            std::wcout << L"MyMem::QueryInterface " << str << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(riid, &str)) {
+                std::wcout << L"MyMem::QueryInterface " << str << std::endl;
+                free(str);
+            }
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
             return 0; 
@@ -1407,9 +1398,11 @@ struct MyRequest final : public IWDFIoRequest {
         }
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            LPOLESTR str;
-            StringFromIID(riid, &str);
-            std::wcout << L"MyRequest::QueryInterface " << str << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(riid, &str)) {
+                std::wcout << L"MyRequest::QueryInterface " << str << std::endl;
+                free(str);
+            }
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
             return 0; 
@@ -2007,9 +2000,11 @@ int tudor_internal_test_ownership_failure_marker(void) {
 struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
 public:
     virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-        LPOLESTR str;
-        StringFromIID(riid, &str);
-        std::wcout << L"MyPropertyStoreFactory::QueryInterface " << str << std::endl;
+        LPOLESTR str = nullptr;
+        if(StringFromIID(riid, &str)) {
+            std::wcout << L"MyPropertyStoreFactory::QueryInterface " << str << std::endl;
+            free(str);
+        }
         *ppvObject = this;
         printf("ppvObject=%p\r\n", *ppvObject);
         return 0; 
@@ -2058,9 +2053,11 @@ struct MyQueue : public IWDFIoQueue {
 
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            LPOLESTR str;
-            StringFromIID(riid, &str);
-            std::wcout << L"MyQueue::QueryInterface " << str << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(riid, &str)) {
+                std::wcout << L"MyQueue::QueryInterface " << str << std::endl;
+                free(str);
+            }
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
             return 0; 
@@ -2219,9 +2216,11 @@ struct MyDevice : public IWDFDevice3 {
         IPnpCallback *pnpcb = nullptr;
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            LPOLESTR str;
-            StringFromIID(riid, &str);
-            std::wcout << L"MyDevice::QueryInterface " << str << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(riid, &str)) {
+                std::wcout << L"MyDevice::QueryInterface " << str << std::endl;
+                free(str);
+            }
 
             if(IsEqualIID(riid, &IID_IWDFPropertyStoreFactory)) {
                 printf("is IID_IWDFPropertyStoreFactory\r\n");
@@ -2355,11 +2354,13 @@ struct MyDevice : public IWDFDevice3 {
             /* [annotation][unique][string][in] */ 
             _In_opt_  PCWSTR pReferenceString){
             //printf("CreateDeviceInterface\r\n");
-            LPOLESTR str;
-            StringFromIID(pDeviceInterfaceGuid, &str);
-            std::wcout << L"MyDevice::CreateDeviceInterface "
-                        << str
-                        << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(pDeviceInterfaceGuid, &str)) {
+                std::wcout << L"MyDevice::CreateDeviceInterface "
+                            << str
+                            << std::endl;
+                free(str);
+            }
             fflush(stdout);
             return 0;
         }
@@ -3416,9 +3417,10 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
     }
     HRESULT res = fact->CreateInstance(NULL, &IID_IDriverEntry, (void**)&inst);
 
-    if (res != 0) {
-        printf("Failed to create instance: %d\n", res);
-        // return 0;
+    if (res != 0 || !inst) {
+        log_error("Vendor DllGetClassObject factory could not create the driver entry instance [0x%x]",
+                  (unsigned int) res);
+        return false;
     }
 
     printf("Received instance: %p\n", inst);
@@ -3431,8 +3433,8 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
 
     rc = inst->OnInitialize(aDriver);
 
-    printf("OnInitialize rc = %lx\r\n", rc);
-    if(rc < 0) {
+    printf("OnInitialize rc = %x\r\n", (unsigned int) rc);
+    if(FAILED(rc)) {
         printf("Couldn't initialize\n");
         abort();
     }
@@ -3469,7 +3471,7 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
         win_set_thread_start_filter(nullptr);
         suppress_pairing_worker.store(false, std::memory_order_release);
     }
-    printf("OnPrepareHardware rc = %lx\r\n", rc);
+    printf("OnPrepareHardware rc = %x\r\n", (unsigned int) rc);
     fflush(stdout);
     if(rc != 0) {
         log_error("Vendor OnPrepareHardware failed: 0x%x",
@@ -3486,7 +3488,7 @@ static bool tudor_init_internal(bool ownership_reset_mode) {
 
     printf("about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    printf("OnD0Entry rc = %lx\r\n", rc);
+    printf("OnD0Entry rc = %x\r\n", (unsigned int) rc);
     fflush(stdout);
     if(rc != 0) {
         log_error("Vendor OnD0Entry failed: 0x%x", (unsigned int) rc);
@@ -3616,10 +3618,10 @@ bool tudor_reset_ownership(void) {
 bool tudor_shutdown() {
     capture_relay_stop();
 
-    //Unload the driver
-    winmodule_set_cur(&tudor_driver_dll->module);
+    //Unload the driver (tolerate a shutdown after a failed initialization)
+    if(tudor_driver_dll) winmodule_set_cur(&tudor_driver_dll->module);
 
-    inst->OnDeinitialize(aDriver);
+    if(inst && aDriver) inst->OnDeinitialize(aDriver);
     printf("======================================================\r\n");
     printf("Sleeping 10 secons....\r\n");
     printf("======================================================\r\n");

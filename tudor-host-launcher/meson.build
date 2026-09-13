@@ -14,7 +14,7 @@ tudor_host_launcher_inc = include_directories('inc')
 
 executable('tudor_host_launcher', tudor_host_launcher_src,
     dependencies: [gio_dep, gio_unix_dep],
-    c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
+    c_args: ['-D_GNU_SOURCE'],
     include_directories: [tudor_host_launcher_inc, tudor_host_inc,
                           libtudor_inc],
     install: true,

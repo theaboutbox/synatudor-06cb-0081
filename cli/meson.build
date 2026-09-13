@@ -87,7 +87,7 @@ test('winapi-strings', strings_test, timeout: 5)
 registry_state_test = executable('cryptbridge-registry-state-test',
     'tests/registry-state.c',
     dependencies: [cryptbridge_dep],
-    include_directories: ['../subprojects/cryptbridge'],
+    include_directories: [bridge_proj.get_variable('cryptbridge_internal_inc')],
     c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
     install: false)
 test('cryptbridge-registry-state', registry_state_test, timeout: 5)

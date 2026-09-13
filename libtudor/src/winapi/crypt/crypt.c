@@ -169,7 +169,7 @@ __winfnc BOOL CryptAcquireContextA (HCRYPTPROV *phProv, LPCSTR pszContainer,
 	pProv->pVTable->dwProvType = dwProvType;
 
 	//    sleep(1);
-	bool res = (RSAENH_CPAcquireContext(&pProv->hPrivate, pszContainer, dwFlags, pProv->pVTable));
+	bool res = (RSAENH_CPAcquireContext(&pProv->hPrivate, (LPSTR) pszContainer, dwFlags, pProv->pVTable));
     DWORD err = GetErrorFromLib();
 	    TRACE_PRINTF("Error after lib: %x\n", err);
 	    winerr_set_code(err);
@@ -514,7 +514,7 @@ __winfnc BOOL CryptSetHashParam (HCRYPTHASH hHash, DWORD dwParam, const BYTE *pb
 
 	prov = hash->pProvider;
 	return RSAENH_CPSetHashParam(prov->hPrivate, hash->hPrivate,
-			dwParam, pbData, dwFlags);
+			dwParam, (BYTE*) pbData, dwFlags);
 }
 WINAPI(CryptSetHashParam)
 
@@ -651,7 +651,7 @@ __winfnc BOOL CryptSetKeyParam (HCRYPTKEY hKey, DWORD dwParam, const BYTE *pbDat
 
 	prov = key->pProvider;
 	return RSAENH_CPSetKeyParam(prov->hPrivate, key->hPrivate,
-			dwParam, pbData, dwFlags);
+			dwParam, (BYTE*) pbData, dwFlags);
 }
 WINAPI(CryptSetKeyParam)
 

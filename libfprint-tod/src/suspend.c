@@ -9,6 +9,8 @@
 #define LOGIND_PREPARE_SLEEP_SIGNAL "PrepareForSleep"
 #define LOGIND_SLEEP_INHIBIT_METHOD "Inhibit"
 
+#define SUSPEND_MONITOR_INTERVAL_MS 50
+
 static void suspend_close_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data) {
     GTask *task = G_TASK(res);
     gint sleep_inhib = GPOINTER_TO_INT(user_data);
@@ -44,8 +46,10 @@ struct suspend_cancel_params {
 };
 
 static void suspend_params_free(struct suspend_cancel_params *params) {
+    /* timeout_src is owned by the main context (fpi_device_add_timeout
+     * returns a borrowed source); it is destroyed, never unreferenced. */
+    if(params->timeout_src) g_source_destroy(params->timeout_src);
     g_source_unref(params->monitor_src);
-    g_source_unref(params->timeout_src);
     g_object_unref(params->tdev);
     g_slice_free(struct suspend_cancel_params, params);
 }
@@ -58,7 +62,10 @@ static gboolean suspend_monitor_cb(gpointer user_data) {
     g_debug("Suspending tudor device...");
 
     //Destroy timeout source
-    g_source_destroy(params->timeout_src);
+    if(params->timeout_src) {
+        g_source_destroy(params->timeout_src);
+        params->timeout_src = NULL;
+    }
 
     //Suspend the device
     if(params->sleep_inhib >= 0) suspend_dev(params->tdev, params->sleep_inhib);
@@ -69,6 +76,10 @@ static gboolean suspend_monitor_cb(gpointer user_data) {
 
 static void suspend_timeout_cb(FpDevice *dev, gpointer user_data) {
     FpiDeviceTudor *tdev = FPI_DEVICE_TUDOR(dev);
+    struct suspend_cancel_params *params = (struct suspend_cancel_params*) user_data;
+
+    //The one-shot source is freed after this callback returns
+    params->timeout_src = NULL;
 
     g_warning("Tudor device suspend timeout hit! Killing host process...");
 
@@ -112,11 +123,12 @@ static void suspend_signal_cb(GDBusConnection *con, const gchar *sender, const g
         params->tdev = g_object_ref(tdev);
         params->sleep_inhib = sleep_inhib;
         params->timeout_src = fpi_device_add_timeout(FP_DEVICE(tdev), SUSPEND_CANCEL_TIMEOUT_SECS * 1000, suspend_timeout_cb, params, NULL);
-        params->monitor_src = g_idle_source_new();
+        //Poll instead of an idle source so the main loop does not spin
+        params->monitor_src = g_timeout_source_new(SUSPEND_MONITOR_INTERVAL_MS);
         g_source_set_callback(params->monitor_src, suspend_monitor_cb, params, (GDestroyNotify) suspend_params_free);
         g_source_attach(params->monitor_src, NULL);
-    } else {
-        //Immediatly suspend the device
+    } else if(sleep_inhib >= 0) {
+        //Immediately suspend the device
         suspend_dev(tdev, sleep_inhib);
     }
 }

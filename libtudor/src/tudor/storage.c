@@ -143,16 +143,24 @@ bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_fing
     return true;
 }
 
-__winfnc static HRESULT storage_NOTIMPL() {
+/* Generic stubs for adapter entry points that are unused or trivially
+ * succeed.  They take only the pipeline argument that every entry point
+ * shares; slots with a longer parameter list cast the pointer explicitly,
+ * which is safe because the stubs never read past their first parameter. */
+__winfnc static HRESULT storage_NOTIMPL(WINBIO_PIPELINE *pipeline) {
+    (void) pipeline;
     log_error("Not implemented storage adapter function called!");
     abort();
 }
 
-__winfnc static HRESULT storage_NOP() {
+__winfnc static HRESULT storage_NOP(WINBIO_PIPELINE *pipeline) {
+    (void) pipeline;
     return ERROR_SUCCESS;
 }
 
-__winfnc static HRESULT storage_ControlUnit() {
+__winfnc static HRESULT storage_ControlUnit(WINBIO_PIPELINE *pipeline, ULONG code, UCHAR *send_buf, SIZE_T send_size, UCHAR *recv_buf, SIZE_T recv_size, SIZE_T *recv_data_size, ULONG *op_status) {
+    (void) pipeline; (void) code; (void) send_buf; (void) send_size;
+    (void) recv_buf; (void) recv_size; (void) recv_data_size; (void) op_status;
     return E_INVALIDARG;
 }
 
@@ -196,6 +204,7 @@ __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STOR
     rec->identity = (WINBIO_IDENTITY*) malloc(sizeof(WINBIO_IDENTITY));
     if(!rec->identity) {
         HRESULT hr = winerr_from_errno();
+        free(rec);
         cant_fail_ret(pthread_mutex_unlock(&dev->records_lock));
         return hr;
     }
@@ -203,15 +212,16 @@ __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STOR
 
     rec->guid = *(RECGUID*) &srec->Identity->TemplateGuid;
     rec->finger = (enum tudor_finger) srec->SubFactor;
-    rec->data = malloc(srec->TemplateBlobSize);
     rec->data_size = srec->TemplateBlobSize;
-    if(!rec->data) {
+    rec->data = rec->data_size ? malloc(rec->data_size) : NULL;
+    if(rec->data_size && !rec->data) {
         HRESULT hr = winerr_from_errno();
+        free(rec->identity);
         free(rec);
         cant_fail_ret(pthread_mutex_unlock(&dev->records_lock));
         return hr;
     }
-    memcpy(rec->data, srec->TemplateBlob, rec->data_size);
+    if(rec->data_size) memcpy(rec->data, srec->TemplateBlob, rec->data_size);
 
     if(dev->records_head) dev->records_head->prev = rec;
     dev->records_head = rec;
@@ -376,12 +386,12 @@ WINBIO_STORAGE_INTERFACE *tudor_storage_adapter = &(WINBIO_STORAGE_INTERFACE) {
     .Attach = storage_NOP,
     .Detach = storage_NOP,
     .ClearContext = storage_NOP,
-    .CreateDatabase = storage_NOTIMPL,
-    .EraseDatabase = storage_NOTIMPL,
-    .OpenDatabase = storage_NOTIMPL,
+    .CreateDatabase = (IBIO_STORAGE_CREATE_DATABASE_FN*) storage_NOTIMPL,
+    .EraseDatabase = (IBIO_STORAGE_ERASE_DATABASE_FN*) storage_NOTIMPL,
+    .OpenDatabase = (IBIO_STORAGE_OPEN_DATABASE_FN*) storage_NOTIMPL,
     .CloseDatabase = storage_NOTIMPL,
-    .GetDataFormat = storage_NOTIMPL,
-    .GetDatabaseSize = storage_NOTIMPL,
+    .GetDataFormat = (IBIO_STORAGE_GET_DATA_FORMAT_FN*) storage_NOTIMPL,
+    .GetDatabaseSize = (IBIO_STORAGE_GET_DATABASE_SIZE_FN*) storage_NOTIMPL,
     .AddRecord = storage_AddRecord,
     .DeleteRecord = storage_DeleteRecord,
     .QueryBySubject = storage_QueryBySubject,
@@ -392,7 +402,7 @@ WINBIO_STORAGE_INTERFACE *tudor_storage_adapter = &(WINBIO_STORAGE_INTERFACE) {
     .GetCurrentRecord = storage_GetCurrentRecord,
     .ControlUnit = storage_ControlUnit,
     .ControlUnitPrivileged = storage_ControlUnit,
-    .NotifyPowerChange = (IBIO_SENSOR_NOTIFY_POWER_CHANGE_FN*) storage_NOP,
+    .NotifyPowerChange = (IBIO_STORAGE_NOTIFY_POWER_CHANGE_FN*) storage_NOP,
     .PipelineInit = storage_NOP,
     .PipelineCleanup = storage_NOP,
     .Activate = storage_NOP,

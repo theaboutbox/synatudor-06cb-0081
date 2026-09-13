@@ -30,6 +30,11 @@ static void key_destr(void *data) {
     free(key);
 }
 
+static bool is_predefined_key(HANDLE hkey) {
+    uintptr_t val = (uintptr_t) hkey;
+    return val >= HKEY_CLASSES_ROOT && val <= 0x800000ff;
+}
+
 static const char *key_name(HANDLE hkey) {
     switch((uint32_t) (uintptr_t) hkey) {
         case HKEY_CLASSES_ROOT: return "HKEY_CLASSES_ROOT";
@@ -85,7 +90,9 @@ bool winreg_write_val(HANDLE hkey, const char *val_name, const void *buf, size_t
 __winfnc LONG RegOpenKeyExA(HANDLE hkey, const char *subkey, DWORD opts, DWORD sam, HANDLE *out) {
     TRACE();
     if(!subkey) {
-        *out = hkey;
+        /* The caller will RegCloseKey() the result, so hand out a
+         * distinct handle instead of aliasing the parent. */
+        *out = winreg_open_key(NULL, key_name(hkey));
         return ERROR_SUCCESS;
     }
 
@@ -94,6 +101,7 @@ __winfnc LONG RegOpenKeyExA(HANDLE hkey, const char *subkey, DWORD opts, DWORD s
 
     int par_len = strlen(par_name), subkey_len = strlen(subkey);
     char *name = (char*) malloc(par_len + 1 + subkey_len + 1);
+    if(!name) return ERROR_NOT_ENOUGH_MEMORY;
     strcpy(name, par_name);
     name[par_len] = '\\';
     strcpy(name + par_len + 1, subkey);
@@ -107,16 +115,18 @@ WINAPI(RegOpenKeyExA)
 __winfnc LONG RegOpenKeyExW(HANDLE hkey, const char16_t *subkey, DWORD opts, DWORD sam, HANDLE *out) {
     TRACE();
     if(!subkey) {
-        *out = hkey;
+        *out = winreg_open_key(NULL, key_name(hkey));
         return ERROR_SUCCESS;
     }
 
     //Determine key name
     const char *par_name = key_name(hkey);
     char *subkey_name = winstr_to_str(subkey);
+    if(!subkey_name) return ERROR_INVALID_PARAMETER;
 
     int par_len = strlen(par_name), subkey_len = strlen(subkey_name);
     char *name = (char*) malloc(par_len + 1 + subkey_len + 1);
+    if(!name) { free(subkey_name); return ERROR_NOT_ENOUGH_MEMORY; }
     strcpy(name, par_name);
     name[par_len] = '\\';
     strcpy(name + par_len + 1, subkey_name);
@@ -145,7 +155,9 @@ WINAPI(RegCreateKeyExW)
 
 __winfnc LONG RegCloseKey(HANDLE hkey) {
     TRACE();
-    winhandle_destroy(hkey);
+    if(!hkey) return ERROR_INVALID_HANDLE;
+    //Predefined root keys are constants, not allocated handles
+    if(!is_predefined_key(hkey)) winhandle_destroy(hkey);
     return ERROR_SUCCESS;
 }
 WINAPI(RegCloseKey)
@@ -154,14 +166,15 @@ __winfnc LONG RegQueryValueExA(HANDLE hkey, const char *val_name, DWORD *resv, D
     TRACE();
 
     //Forward to registry handler
-    size_t data_sz = (size_t) *data_size;
+    size_t data_sz = data_size ? (size_t) *data_size : 0;
 
-    enum winreg_val_type out_type;
+    enum winreg_val_type out_type = 0;
     bool suc;
     if(data) suc = winreg_query_val(hkey, val_name, data, &data_sz, &out_type);
     else suc = winreg_query_val(hkey, val_name, NULL, &data_sz, &out_type);
 
-    *data_size = (DWORD) data_sz;
+    if(data_size) *data_size = (DWORD) data_sz;
+    if(suc && type) *type = (DWORD) out_type; //Enum values match REG_* constants
 
     printf("Res: %d\n", suc);
     return suc ? ERROR_SUCCESS : WINERR_SET_CODE;
@@ -172,14 +185,16 @@ __winfnc LONG RegQueryValueExW(HANDLE hkey, const char16_t *val_name, DWORD *res
     TRACE();
     //Forward to registry handler
     char *val_cname = winstr_to_str(val_name);
-    size_t data_sz = (size_t) *data_size;
+    if(!val_cname) return ERROR_INVALID_PARAMETER;
+    size_t data_sz = data_size ? (size_t) *data_size : 0;
 
-    enum winreg_val_type out_type;
+    enum winreg_val_type out_type = 0;
     bool suc;
     if(data) suc = winreg_query_val(hkey, val_cname, data, &data_sz, &out_type);
     else suc = winreg_query_val(hkey, val_cname, NULL, &data_sz, &out_type);
 
-    *data_size = (DWORD) data_sz;
+    if(data_size) *data_size = (DWORD) data_sz;
+    if(suc && type) *type = (DWORD) out_type; //Enum values match REG_* constants
     free(val_cname);
 
     return suc ? ERROR_SUCCESS : WINERR_SET_CODE;

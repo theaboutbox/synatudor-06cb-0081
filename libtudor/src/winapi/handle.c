@@ -32,6 +32,10 @@ __winfnc HANDLE GetStdHandle(DWORD type) {
 WINAPI(GetStdHandle)
 
 __winfnc BOOL CloseHandle(HANDLE handle) {
+    if(!handle || handle == INVALID_HANDLE_VALUE) {
+        winerr_set_code(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
     winhandle_destroy(handle);
     return TRUE;
 }

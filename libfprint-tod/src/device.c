@@ -16,7 +16,7 @@ static FpIdEntry tudor_ids[] = {
     { .vid = 0x06cb, .pid = 0x00be },
     { .vid = 0x06cb, .pid = 0x0081 },
 //  { .vid = 0x06cb, .pid = 0x00bd }, //TODO Check if it's also supported
-    { 0 }
+    { .vid = 0, .pid = 0 }
 };
 
 static void close_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data) {

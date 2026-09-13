@@ -39,7 +39,7 @@ void *create_import_stub(const char *lib, const char *name) {
     //Obtain a stub slot
     if(!import_cur_page || import_cur_slot*IMPORT_STUB_SIZE + IMPORT_STUB_SIZE > STUB_PAGE_SIZE) {
         import_cur_page = (uint8_t*) mmap(NULL, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if(!import_cur_page) {
+        if(import_cur_page == MAP_FAILED) {
             perror("Couldn't allocate import stub page");
             abort();
         }
@@ -75,7 +75,7 @@ void *create_wdf_stub(int num) {
     //Obtain a stub slot
     if(!wdf_cur_page || wdf_cur_slot*WDF_STUB_SIZE + WDF_STUB_SIZE > STUB_PAGE_SIZE) {
         wdf_cur_page = (uint8_t*) mmap(NULL, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if(!wdf_cur_page) {
+        if(wdf_cur_page == MAP_FAILED) {
             perror("Couldn't allocate WDF stub page");
             abort();
         }

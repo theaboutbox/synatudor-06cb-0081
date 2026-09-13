@@ -238,9 +238,7 @@ __winfnc DWORD WaitForSingleObject(HANDLE handle, DWORD timeout) {
 WINAPI(WaitForSingleObject)
 
 #define NUM_FLS_IDXS 128
-#define NUM_TLS_IDXS 128
 #define FLS_OUT_OF_INDEXES 0xffffffff
-#define TLS_OUT_OF_INDEXES 0xffffffff
 
 typedef __winfnc void PflsCallbackFunction(void *flsData);
 
@@ -258,14 +256,6 @@ struct fls_value {
     void *data;
 };
 
-static pthread_rwlock_t tls_lock = PTHREAD_RWLOCK_INITIALIZER;
-
-static int tls_next_free;
-static struct {
-    int next_idx;
-    pthread_key_t key;
-} tls_indices[NUM_TLS_IDXS];
-
 __constr static void init_fls() {
     //Initialize indices
     fls_next_free = NUM_FLS_IDXS;
@@ -274,65 +264,6 @@ __constr static void init_fls() {
         fls_next_free = i;
     }
 }
-
-// __winfnc DWORD TlsAlloc() {
-//     TRACE();
-//     cant_fail_ret(pthread_rwlock_wrlock(&tls_lock));
-//     DWORD idx = TLS_OUT_OF_INDEXES;
-//     if (tls_next_free < NUM_TLS_IDXS) {
-//         idx = tls_next_free;
-//         tls_next_free = tls_indices[idx].next_idx;
-//
-//         tls_indices[idx].next_idx = -1;
-//         cant_fail_ret(pthread_key_create(&tls_indices[idx].key, NULL));
-//     }
-//     cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
-//     return idx;
-// }
-// WINAPI(TlsAlloc)
-//
-// __winfnc BOOL TlsFree(DWORD idx) {
-//     TRACE();
-//     cant_fail_ret(pthread_rwlock_wrlock(&tls_lock));
-//     BOOL suc;
-//     if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
-//         cant_fail_ret(pthread_key_delete(tls_indices[idx].key));
-//         tls_indices[idx].next_idx = tls_next_free;
-//         tls_next_free = idx;
-//         suc = TRUE;
-//     } else suc = FALSE;
-//     cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
-//     if (!suc) winerr_set();
-//     return suc;
-// }
-// WINAPI(TlsFree)
-//
-// __winfnc void *TlsGetValue(DWORD idx) {
-//     TRACE();
-//     cant_fail_ret(pthread_rwlock_rdlock(&tls_lock));
-//     void *data = NULL;
-//     if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
-//         data = pthread_getspecific(tls_indices[idx].key);
-//     } else winerr_set();
-//     cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
-//     return data;
-// }
-// WINAPI(TlsGetValue)
-//
-// __winfnc BOOL TlsSetValue(DWORD idx, void *data) {
-//     TRACE();
-//     cant_fail_ret(pthread_rwlock_rdlock(&tls_lock));
-//     BOOL suc;
-//     if (0 <= idx && idx < NUM_TLS_IDXS && tls_indices[idx].next_idx < 0) {
-//         suc = pthread_setspecific(tls_indices[idx].key, data) == 0;
-//     } else {
-//         winerr_set();
-//         suc = FALSE;
-//     }
-//     cant_fail_ret(pthread_rwlock_unlock(&tls_lock));
-//     return suc;
-// }
-// WINAPI(TlsSetValue)
 
 static void fls_destructor(void *ptr) {
     struct fls_value *val = (struct fls_value*) ptr;

@@ -176,11 +176,15 @@ bool parse_print_data(FpiDeviceTudor *tdev, FpPrint *print, RECGUID *guid, enum 
     if(!fp_print_get_device_stored(print)) return false;
 
     //Get the print data
-    GVariant *print_data;
+    GVariant *print_data = NULL;
     g_object_get(print, "fpi-data", &print_data, NULL);
+    if(!print_data) return false;
 
     //Check the data format
-    if(!g_variant_check_format_string(print_data, "(@ayy@ay)", FALSE)) return false;
+    if(!g_variant_check_format_string(print_data, "(@ayy@ay)", FALSE)) {
+        g_variant_unref(print_data);
+        return false;
+    }
 
     //Parse the top level variant
     if(finger) *finger = 0;

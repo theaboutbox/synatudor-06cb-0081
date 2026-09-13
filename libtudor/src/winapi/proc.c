@@ -212,7 +212,7 @@ __winfnc const char16_t *GetEnvironmentStringsW() {
     for(const char **p = winmodule_get_cur()->environ; *p; p++) {
         char16_t *wp = winstr_from_str(*p);
         int l = winstr_len(wp);
-        memcpy(d, *p, (l+1) * sizeof(char16_t));
+        memcpy(d, wp, (l+1) * sizeof(char16_t));
         d += l + 1;
         free(wp);
     }

@@ -276,28 +276,36 @@ __winfnc int GetStringTypeW(DWORD info_type, const char16_t *str, int strlen, WO
 }
 WINAPI(GetStringTypeW)
 
-__winfnc int LCMapStringW(DWORD lcid, DWORD flags, const char16_t *in, int inlen, char16_t *out, int outlen) {
-    TRACE();
-    if(inlen < 0) inlen = winstr_len(in);
-    if(outlen == 0) return (inlen + 1) * sizeof(char16_t);
+/* Identity mapping: the vendor driver only uses this for case-insensitive
+ * comparisons of ASCII identifiers, so no locale transformation is applied.
+ * Sizes follow the Win32 contract (characters, and the terminator is only
+ * included when the input length was determined from the terminator). */
+static int lcmap_copy(const char16_t *in, int inlen, char16_t *out, int outlen) {
+    bool with_term = inlen < 0;
+    if(with_term) inlen = winstr_len(in) + 1;
+    if(outlen == 0) return inlen;
 
-    //TODO
     if(outlen < inlen) {
-        winerr_set();
+        winerr_set_code(ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
 
-    memcpy(out, in, (inlen + 1) * sizeof(char16_t));
-    return outlen;
+    memcpy(out, in, inlen * sizeof(char16_t));
+    return inlen;
+}
+
+__winfnc int LCMapStringW(DWORD lcid, DWORD flags, const char16_t *in, int inlen, char16_t *out, int outlen) {
+    TRACE();
+    return lcmap_copy(in, inlen, out, outlen);
 }
 WINAPI(LCMapStringW)
 
-typedef const wchar_t* PCWSTR;
-typedef const wchar_t* LPCWSTR;
-typedef wchar_t* LPWSTR;
-typedef wchar_t* PWSTR;
+typedef const char16_t* PCWSTR;
+typedef const char16_t* LPCWSTR;
+typedef char16_t* LPWSTR;
+typedef char16_t* PWSTR;
 typedef void* LPVOID;
-typedef wchar_t* LPOLESTR;
+typedef char16_t* LPOLESTR;
 
 __winfnc int LCMapStringEx(
   LPCWSTR          lpLocaleName,
@@ -311,19 +319,7 @@ __winfnc int LCMapStringEx(
   DWORD           sortHandle)
 {
     TRACE();
-
-
-    if(inlen < 0) inlen = winstr_len(in);
-    if(outlen == 0) return (inlen + 1) * sizeof(char16_t);
-
-    //TODO
-    if(outlen < inlen) {
-        winerr_set();
-        return 0;
-    }
-
-    memcpy(out, in, (inlen + 1) * sizeof(char16_t));
-    return outlen;
+    return lcmap_copy(in, inlen, out, outlen);
 }
 WINAPI(LCMapStringEx)
 
@@ -352,17 +348,22 @@ WINAPI(lstrlenA)
 
 __winfnc char16_t *lstrcpynW(char16_t *dst, const char16_t *src, int max_len) {
     TRACE();
-    for(; *src && max_len > 0; src++, dst++, max_len--) *dst = *src;
-    *dst = 0;
+    if(max_len <= 0) return dst;
+
+    /* Win32 copies at most max_len-1 characters and always terminates
+     * inside the destination buffer; the original pointer is returned. */
+    char16_t *d = dst;
+    for(; *src && max_len > 1; src++, d++, max_len--) *d = *src;
+    *d = 0;
     return dst;
 }
 WINAPI(lstrcpynW);
 
 __winfnc int lstrcmpW(const char16_t *a, const char16_t *b) {
     TRACE();
-    int a_len = winstr_len(a), b_len = winstr_len(b);
-    if(a_len < b_len) return -1;
-    if(a_len > b_len) return -1;
-    return memcmp(a, b, a_len * sizeof(char16_t));
+    for(;; a++, b++) {
+        if(*a != *b) return *a < *b ? -1 : 1;
+        if(!*a) return 0;
+    }
 }
 WINAPI(lstrcmpW);

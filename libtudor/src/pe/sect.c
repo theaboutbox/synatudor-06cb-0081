@@ -5,12 +5,26 @@
 #include "internal.h"
 
 bool pe_parse_sections(struct pe_file *pe) {
-    if(pe->size < pe->sects_off + pe->num_sects * sizeof(struct PEs_section_header)) {
+    int num_sects = pe->num_sects;
+    pe->num_sects = 0;
+
+    if(num_sects < 0 || pe->sects_off < 0 ||
+       (uint64_t) pe->sects_off + (uint64_t) num_sects * sizeof(struct PEs_section_header) > (uint64_t) pe->size) {
         log_error("Invalid PE section table offset! [%08x]", pe->sects_off);
         return false;
     }
 
-    pe->sections = (struct pe_section*) malloc(pe->num_sects * sizeof(struct pe_section));
+    if(pe->file_align == 0 || pe->sect_align == 0) {
+        log_error("PE file has a zero section/file alignment!");
+        return false;
+    }
+
+    pe->sections = (struct pe_section*) calloc(num_sects, sizeof(struct pe_section));
+    if(!pe->sections) {
+        log_error("Couldn't allocate PE section table!");
+        return false;
+    }
+    pe->num_sects = num_sects;
 
     //Iterate over sections
     for(int i = 0; i < pe->num_sects; i++) {
@@ -18,21 +32,22 @@ bool pe_parse_sections(struct pe_file *pe) {
 
         //Initialize section entry
         struct pe_section *sec = &pe->sections[i];
-        strncpy(sec->name, sec_header->Name, 8);
+        memcpy(sec->name, sec_header->Name, 8);
+        sec->name[8] = '\0';
         sec->file_off = le32toh(sec_header->PointerToRawData);
         sec->file_size = le32toh(sec_header->SizeOfRawData);
         sec->mem_off = le32toh(sec_header->VirtualAddress);
         sec->mem_size = le32toh(sec_header->VirtualSize);
         sec->flags = le32toh(sec_header->Characteristics);
 
-        //Check bounds
-        if(sec->file_off + sec->file_size > pe->size) {
-            log_error("Section %d has invalid file bounds! [end 0x%x > file end 0x%x]", i, sec->file_off + sec->file_size, pe->size);
+        //Check bounds (64-bit sums so that a huge offset can't wrap past the check)
+        if((uint64_t) sec->file_off + sec->file_size > (uint64_t) pe->size) {
+            log_error("Section %d has invalid file bounds! [off 0x%x size 0x%x file end 0x%x]", i, sec->file_off, sec->file_size, pe->size);
             return false;
         }
 
-        if(sec->mem_off + sec->mem_size > pe->image_size) {
-            log_error("Section %d has invalid memory bounds! [end 0x%x > image end 0x%x]", i, sec->mem_off + sec->mem_size, pe->image_size);
+        if((uint64_t) sec->mem_off + sec->mem_size > pe->image_size) {
+            log_error("Section %d has invalid memory bounds! [off 0x%x size 0x%x image end 0x%x]", i, sec->mem_off, sec->mem_size, pe->image_size);
             return false;
         }
 
@@ -154,6 +169,10 @@ char *pe_copy_mem_string(struct pe_file *pe, uint32_t off) {
 
     //Allocate the string
     char *str = (char*) malloc(str_len+1);
+    if(!str) {
+        log_error("Couldn't allocate PE string copy!");
+        return NULL;
+    }
 
     //Copy the string's data
     pe_copy_mem(pe, off, str_len+1, (uint8_t*) str);

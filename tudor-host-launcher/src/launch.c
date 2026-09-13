@@ -107,7 +107,9 @@ static void host_watch_cb(GPid pid, gint status, gpointer user_data) {
                 g_info("Host process %u died: status %d", host_id, status);
 
                 if(entry->orphan) {
-                    //Clean up orphan process
+                    //Clean up orphan process; GLib already reaped the PID,
+                    //so it must not be signalled again
+                    entry->alive = false;
                     free_host(entry);
                     g_array_remove_index_fast(hosts_array, i);
                     return;

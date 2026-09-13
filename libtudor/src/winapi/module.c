@@ -93,8 +93,8 @@ __winfnc HANDLE LoadLibraryA(const char *name) {
     if(!module) { winerr_set_errno(); return NULL; }
     *module = (struct winmodule) {0};
 
-    module->name = malloc(strlen(name) + 1);
-    strcpy(module->name, name);
+    module->name = strdup(name);
+    if(!module->name) { free(module); winerr_set_errno(); return NULL; }
     winmodule_register(module);
 
     printf("LoadLibraryA: create handle: %p\n", module->handle);
@@ -332,41 +332,15 @@ __winfnc void *GetProcAddress(HANDLE handle, const char *name) {
 }
 WINAPI(GetProcAddress)
 
-static uintptr_t get_pointer_obfuscator( void )
-{
-    static uintptr_t pointer_obfuscator;
-
-    if (!pointer_obfuscator)
-    {
-        ULONG seed = 12345;
-        uintptr_t r;
-
-        srand(seed);
-        /* generate a random value for the obfuscator */
-        r = (uintptr_t) rand(  );
-
-        pointer_obfuscator = r;
-    }
-
-    return pointer_obfuscator;
-}
-
-
 __winfnc void *EncodePointer(void* ptr) {
     TRACE();
-    printf("Ptr = %p\n", ptr);
     return ptr;
-    // void* ptrval = (void*) ptr;
-    // return (void*)((uintptr_t)ptrval ^ get_pointer_obfuscator());
 }
 WINAPI(EncodePointer)
 
 __winfnc void *DecodePointer(void* ptr) {
     TRACE();
-    printf("Ptr = %p\n", ptr);
     return ptr;
-    // void* ptrval = (void*) ptr;
-    // return (void*)((uintptr_t)ptrval ^ get_pointer_obfuscator());
 }
 WINAPI(DecodePointer)
 

@@ -129,9 +129,12 @@ WINAPI(DbgPrintEx)
 #define WMI_ENABLE_EVENTS 4
 #define WMI_DISABLE_EVENTS 5
 
+/* Win32 layout: a pointer to the GUID followed by a 64-bit TRACEHANDLE.
+ * Using an inline GUID here would make the struct 24 bytes instead of 16 and
+ * write the handle past the end of the driver's registration array. */
 typedef struct {
-    GUID Guid;
-    HANDLE RegHandle;
+    const GUID *Guid;
+    ULONGLONG RegHandle;
 } TRACE_GUID_REGISTRATION;
 
 typedef ULONG Wmidprequest(DWORD RequestCode, void *RequestContext, ULONG *BufferSize, void *Buffer);
@@ -167,14 +170,14 @@ __winfnc DWORD RegisterTraceGuidsA(Wmidprequest *request_fnc, void *request_ctx,
 
     //Initialize GUIDs
     prov->num_guids = num_guids;
-    prov->guids = (struct trace_guid*) malloc(num_guids * sizeof(struct trace_guid));
-    if(!prov->guids) return winerr_from_errno();
+    prov->guids = (struct trace_guid*) calloc(num_guids, sizeof(struct trace_guid));
+    if(!prov->guids) { free(prov); return winerr_from_errno(); }
 
-    for(int i = 0; i < num_guids; i++) {
+    for(ULONG i = 0; i < num_guids; i++) {
         prov->guids[i].prov = prov;
-        prov->guids[i].guid = trace_guids[i].Guid;
+        prov->guids[i].guid = trace_guids[i].Guid ? *trace_guids[i].Guid : (GUID) {0};
         prov->guids[i].handle = winhandle_create(&prov->guids[i], NULL);
-        trace_guids[i].RegHandle = prov->guids[i].handle;
+        trace_guids[i].RegHandle = (ULONGLONG) (uintptr_t) prov->guids[i].handle;
     }
 
     *handle = winhandle_create(prov, trace_prov_destr);
@@ -196,10 +199,14 @@ __winfnc DWORD UnregisterTraceGuids(HANDLE handle) {
 }
 WINAPI(UnregisterTraceGuids)
 
-__winfnc ULONG TraceMessage(HANDLE handle, ULONG flags, GUID *guid, USHORT num, ...) {
+/* The Windows prototype declares the message number as USHORT.  A parameter
+ * narrower than int must not be passed to va_start, so accept the full
+ * register/stack slot and truncate to the ABI-visible width ourselves. */
+__winfnc ULONG TraceMessage(HANDLE handle, ULONG flags, GUID *guid, unsigned int num_arg, ...) {
     TRACE();
+    USHORT num = (USHORT) num_arg;
     win_va_list vas;
-    win_va_start(vas, num);
+    win_va_start(vas, num_arg);
     winlog_trace(*guid, num, vas);
     win_va_end(vas);
     return ERROR_SUCCESS;

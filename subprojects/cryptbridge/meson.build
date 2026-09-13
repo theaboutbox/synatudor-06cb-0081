@@ -1,9 +1,9 @@
 project('cryptbridge', 'c',
   version : '1.0.0',
-  default_options : ['warning_level=0', 'c_std=c11']
+  default_options : ['warning_level=0', 'c_std=gnu11']
 )
 
-add_project_arguments('-std=gnu11', language: 'c')
+# Vendored Wine-derived code; its warnings are not actionable here.
 add_project_arguments('-w', language: 'c')
 
 # List of source files
@@ -55,10 +55,16 @@ libcryptbridge = library(
 )
 
 
+# The bundled Wine-derived headers are exposed as system headers so that
+# their internal #pragma pack juggling does not surface as warnings in the
+# code that consumes them.
 cryptbridge_dep = declare_dependency(
   link_with: libcryptbridge,
-  include_directories: include_directories('include')
+  include_directories: include_directories('include', is_system: true)
 )
+
+# Internal headers, for tests that exercise unexported state helpers.
+cryptbridge_internal_inc = include_directories('.')
 
 # Optionally install headers
 # install_headers(headers)
