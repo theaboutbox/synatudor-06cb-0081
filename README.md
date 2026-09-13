@@ -1,38 +1,32 @@
 # Synaptics `06cb:0081` fingerprint support for Linux
 
-This project makes the Synaptics Tudor fingerprint reader with USB ID
-`06cb:0081` available to `fprintd` on x86-64 Linux. It runs the matching
-Windows biometric driver in a restricted compatibility host and connects it
-to libfprint through the TOD ABI.
+Use a Synaptics Tudor fingerprint reader with USB ID `06cb:0081` through
+`fprintd` on x86-64 Linux. This project runs the matching Windows biometric
+driver in a restricted compatibility host and connects it to libfprint through
+the TOD ABI, enabling enrollment and fingerprint authentication in Linux.
 
-The current release targets Arch Linux and [Omarchy](https://omarchy.org/).
-Earlier bring-up was tested on a Lenovo Yoga C930-13IKB. Revision 12 passed
-pairing, enrollment, and verification on that system. Revision 12.4 fixes a
-capture input-lifetime bug that caused repeated retries; five matching-finger
-checks and one unenrolled-finger rejection completed in 1.04–1.32 seconds,
-including finger placement, with no timeouts. See the
-[latency investigation and test results](docs/LATENCY-INVESTIGATION-2026-09-13.md).
-A service-only restart failure was observed during earlier testing; ordinary
-USB reset recovered the reader. Suspend/resume and reboot checks remain pending.
-Other laptops with the same USB ID are especially useful test cases.
+The installer targets **Arch Linux and [Omarchy](https://omarchy.org/)**.
+Hardware testing has been on a Lenovo Yoga C930-13IKB (type 81C4), with sensor
+firmware 6.7 and Lenovo driver 5.5.2731.1050. Other computers with the exact
+same USB ID need testing; other Synaptics product IDs are not supported by
+this port.
 
 > [!WARNING]
 > This is experimental system software. Initializing the reader may replace
-> fingerprints enrolled through Windows Hello. Keep password login available,
-> and use it at your own risk. The project comes without warranty; failures in
-> this compatibility layer or the vendor driver could affect the reader,
-> authentication, or system security.
+> fingerprints enrolled through Windows Hello. Keep password login available.
+> Failures in the compatibility layer or vendor driver could affect the reader,
+> authentication, or system security. The project comes without warranty.
 
-## Install on Arch Linux or Omarchy
+## Install
 
-Confirm that the reader has the exact supported USB ID:
+Confirm the exact supported USB ID:
 
 ```console
 $ lsusb -d 06cb:0081
 Bus 001 Device 003: ID 06cb:0081 Synaptics, Inc. Metallica MIS Touch Fingerprint Reader
 ```
 
-Then clone the repository and run the installer as your regular desktop user:
+Clone and run the installer from a terminal as your regular desktop user:
 
 ```console
 $ git clone https://github.com/theaboutbox/synatudor-06cb-0081.git
@@ -40,177 +34,110 @@ $ cd synatudor-06cb-0081
 $ ./scripts/install
 ```
 
-The installer ensures that the exact tested TOD-enabled libfprint package is
-installed, builds the driver as a local Arch package, and guides you through
-reader initialization, calibration, fingerprint enrollment, and a test match.
-Setup can make up to three bounded ordinary initialization attempts, with an
-ordinary USB/session restart between attempts because the vendor's pairing
-flow can continue after re-enumeration in a new host process. It succeeds only
-after the pairing worker finishes, the vendor initializes its capture
-strategy, and the complete biometric pipeline reports ready. Setup never
-invokes the separate vendor-unpair operation. If those normal attempts fail,
-it stops and tells you to inspect the service log before deciding whether to
-run `synatudor-reset-ownership` explicitly. On Omarchy, setup can also
-configure fingerprint authentication for sudo, polkit, and the lock screen
-while preserving password fallback.
+The installer builds the tested TOD-enabled libfprint and driver packages,
+then guides you through initialization, reader-specific calibration, enrollment,
+and a test match. Keep the sensor uncovered until prompted to scan. Enrollment
+is interactive. On Omarchy, setup also configures fingerprint authentication
+for sudo, polkit, and the lock screen with password fallback. On plain Arch,
+it leaves PAM configuration to you.
 
-Enrollment is interactive, so the complete setup cannot run unattended. To
-install the driver now and enroll later:
+No Synaptics or Lenovo binary is stored in this repository. The local build
+downloads a pinned Lenovo driver package, verifies its SHA-256, and extracts two
+DLLs without running the Windows installer. The locally built package embeds
+those DLLs and remains subject to their vendor terms.
 
-```console
-$ ./scripts/install --driver-only
-$ synatudor-setup
-```
+To install now and enroll later, run `./scripts/install --driver-only`, then
+`synatudor-setup` when ready. To uninstall, use `synatudor-uninstall`; it preserves
+device state for a later reinstall. See [Installation](docs/INSTALL.md) for
+requirements, build options, updates, recovery, and removal.
 
-See [Installation](docs/INSTALL.md) for all installer modes and the manual
-build path. See [Troubleshooting](docs/TROUBLESHOOTING.md) if initialization or
-capture stalls.
+## Known issues and validation limits
 
-## What the local build downloads
+Normal pairing and enrollment have passed on the tested laptop. The latest
+recorded production build passed five matching-finger checks and one
+unenrolled-finger rejection without timeouts or the earlier capture retry loop.
+The [latest hardware results](docs/LATENCY-INVESTIGATION-2026-09-13.md#final-guided-hardware-results)
+include timings and the limits of that short test series.
 
-No Synaptics or Lenovo binary is stored in this repository or its source
-release. During the build, the project downloads Lenovo package
-`huy103af07m6.exe`, requires SHA-256
-`2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343`, and
-extracts only the two required DLLs without running the Windows installer.
-The resulting Arch package is for local use and contains those vendor files in
-embedded form, subject to their vendor terms.
+- **Service restarts can leave the reader unavailable.** This occurred in an
+  earlier tested build and has not been retested after the capture fix.
+  Ordinary USB reset with `sudo synatudor-reset` restored the reader and its
+  enrollment. See [Troubleshooting](docs/TROUBLESHOOTING.md).
+- **Lifecycle coverage is incomplete.** Suspend/resume and reboot remain
+  untested. New enrollment/deletion and each PAM consumer still need rechecking
+  on the latest build; earlier success does not validate every later change.
+- **Broader reliability is unproven.** Another laptop, a clean install on another
+  reader, upgrades, and long-term use need validation. Explicit vendor-unpair
+  recovery has not passed a complete end-to-end recovery test on the corrected
+  lifecycle.
+- **Password entry can follow a fingerprint wait.** With the configured PAM
+  sequence, administrative dialogs may wait for fingerprint authentication to
+  time out before showing a password field. See the
+  [authorization guidance](docs/TROUBLESHOOTING.md#authorization-dialog-and-repeated-scan-retries).
+- **Automated checks have limits.** The review records passing native and
+  ASan/UBSan suites alongside unresolved TSan, static-analysis, and vendor-PAL
+  Memcheck findings. The proprietary DLL is not sanitizer-instrumented. See
+  the [code review](docs/CODE-REVIEW-2026-09-13.md).
 
-The installer also builds a pinned, signed `libfprint-tod` release because the
-regular Arch `libfprint` package does not expose the required TOD driver ABI.
+Keep `/var/lib/tudor`, `/var/lib/fprint`, and `~/.cache/synatudor-0081` private.
+They contain device state, enrollment references, or locally packaged vendor
+code. Do not share fingerprint captures or unedited debug logs. The separate
+`synatudor-reset-ownership` command changes pairing state and may invalidate
+Windows and Linux enrollments; read the [recovery instructions](docs/INSTALL.md#pairing-and-first-setup)
+before using it. It is not a proven secure-erase tool.
 
-## Validation status
+## Why this repository exists
 
-An earlier hardware bring-up on the system listed below passed:
+The upstream projects supplied the foundation for running Synaptics Windows
+drivers on Linux. Making this particular reader usable through normal
+installation, enrollment, authentication, and recovery required substantial
+additional work:
 
-- first initialization and reader-specific calibration
-- enrollment and deletion through `fprintd`
-- repeated matching and wrong-finger rejection
-- persistence across service restarts and a USB reset
-- sudo, polkit, and the Omarchy lock screen with password fallback
-- the full automated suite under GCC, Clang, ASan/UBSan, and TSan
+- **Device compatibility:** the pinned driver's WUDF and cryptographic APIs,
+  secure-channel setup, and native biometric storage, so enrollment actually
+  commits templates to the sensor.
+- **Reliable operation:** pairing completion and capture-readiness checks,
+  asynchronous request lifetime fixes, and repairs to USB cancellation,
+  timeouts, threading, and cleanup.
+- **Persistent state and recovery:** reader-specific calibration and pairing,
+  protected storage across the sandbox, ordinary USB recovery, and explicit
+  one-shot vendor-unpair maintenance with resumable validation.
+- **Installation and maintenance:** reproducible source packaging, pinned build
+  inputs, Arch installation helpers, Omarchy authentication setup and rollback,
+  regression tests, and recorded hardware validation.
 
-Later reinstall testing reproduced incomplete pairing: the vendor driver
-wrote `SetOwnershipFailureCount`, the earlier bridge advertised the device
-before its asynchronous pairing worker had established the capture strategy,
-and capture then crashed inside the vendor DLL. Reverse engineering showed
-that this value is a generic `DoPairing` failure counter. A nonzero value,
-especially during the first few attempts, can be part of a recoverable
-multi-process or USB re-enumeration transition and is not by itself proof of
-an ownership mismatch.
+This repository brings that work together as an installable, documented
+`06cb:0081` project. The [development history](docs/DEVELOPMENT-HISTORY.md)
+explains the engineering decisions and post-fork fixes; [Architecture](docs/ARCHITECTURE.md)
+describes how the components fit together.
 
-The package revision 11 candidate joins the exact vendor pairing worker,
-requires its capture-strategy pointer to be nonnull, and opens the full
-pipeline through the sensor's ready status before exposing the device. The
-counter remains diagnostic. It also reconstructs omitted ECDSA P-256 public
-coordinates for the vendor's scalar-only certificate-signing keys, while
-validating the scalar and any supplied coordinates, and accepts the vendor's
-bounded TLS labels without requiring a trailing NUL. Revision 12 completes
-enrollment authorization before scan instructions and logs the vendor's
-calibration result and capture prerequisites. Normal pairing, device listing,
-enrollment, and a successful fingerprint match have now passed hardware
-revalidation. Capture still produces frequent retries before completing.
-Restart, USB reset, reboot, and explicit recovery validation remain pending.
-See [Validation](docs/VALIDATION.md) for the recorded results; this tree remains
-a prerelease. The [next steps](docs/ROADMAP.md) prioritize capture reliability,
-persistence, and installation on another supported machine.
+## Credits
 
-Only the following combination has received hardware validation:
+Built on [Popax21/synaTudor](https://github.com/Popax21/synaTudor), particularly
+its relink branch, and the subsequent work in
+[rstar000/synaTudor](https://github.com/rstar000/synaTudor). Their work made this
+port possible, and the repository retains their history and authorship.
+Wine and CodeWeavers contributors are credited in the inherited compatibility
+code and its original license notices.
 
-| Component | Validated value |
+See [NOTICE](NOTICE), [LICENSE](LICENSE), and individual source-file notices.
+The vendor driver remains the work of Synaptics and Lenovo; this project is
+not affiliated with or endorsed by either company.
+
+## Documentation
+
+| Document | What it covers |
 | --- | --- |
-| USB device | Synaptics `06cb:0081` |
-| Laptop | Lenovo Yoga C930-13IKB (type 81C4) |
-| Sensor firmware | 6.7 |
-| Operating system | Arch Linux with Omarchy |
-| Architecture | x86-64 |
-| Lenovo driver | 5.5.2731.1050, package `huy103af07m6.exe` |
+| [Installation](docs/INSTALL.md) | Setup, manual builds, updates, recovery, and uninstall. |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Device discovery, stalled captures, authorization, and diagnostics. |
+| [Architecture](docs/ARCHITECTURE.md) | Components, sandbox, device state, pairing, and recovery design. |
+| [Testing](docs/TESTING.md) | Automated checks and the hardware validation checklist. |
+| [Validation record](docs/VALIDATION.md) | Build provenance and recorded results, with links to later checks. |
+| [Roadmap](docs/ROADMAP.md) | Remaining reliability and hardware validation work. |
+| [Development history](docs/DEVELOPMENT-HISTORY.md) | Post-fork engineering history and revision context for maintainers and agents. |
+| [Code review — 2026-09-13](docs/CODE-REVIEW-2026-09-13.md) | Reliability repairs, regression coverage, and unresolved analysis findings. |
+| [Hardware validation — 2026-09-13](docs/HARDWARE-VALIDATION-2026-09-13.md) | Matching, cancellation, service-restart failure, and USB recovery checks. |
+| [Latency investigation — 2026-09-13](docs/LATENCY-INVESTIGATION-2026-09-13.md) | Capture input-lifetime fix, latest guided results, and local polkit observations. |
 
-A matching vendor ID alone is insufficient. Other Synaptics product IDs can
-use different firmware, protocols, and driver ABIs.
-
-## Privacy and device state
-
-Calibration, pairing material, and cryptographic registry state are stored
-under root-only `/var/lib/tudor`. Fingerprint templates live in the
-sensor-managed database, while fprintd keeps local enrollment references under
-root-only `/var/lib/fprint`. Calibration and pairing state are specific to one
-physical reader. Never copy or publish files from either state directory,
-fingerprint captures, or unedited verbose logs.
-
-Keep `~/.cache/synatudor-0081` private as well. It contains Lenovo's downloaded
-package and the locally built Arch package, which embeds the vendor DLL data.
-
-The normal uninstaller preserves this state so a reinstall can reuse it:
-
-```console
-$ synatudor-uninstall
-```
-
-Use `synatudor-reset-ownership` only when you deliberately want to change the
-reader's pairing state after ordinary setup attempts have failed. This
-destructive maintenance command invokes the pinned vendor DLL's custom
-`OnResetOwnership` to `DoUnpairing` callback. It is not the standard
-`IOCTL_BIOMETRIC_RESET`, and static analysis does not prove that it physically
-erases the sensor's template database. Do not use it as a secure-erase tool;
-assume existing Windows and Linux enrollments may stop working.
-
-The command makes a private backup below
-`/var/lib/tudor/migration-backups`, consumes a one-shot request before calling
-the vendor callback, and removes incompatible local pairing state and this
-driver's fprintd metadata for every local user after reported success. It also
-backs up and removes all legacy `.tpd` pairing records managed by the driver
-because that older store did not identify the physical reader. Any older
-unscoped calibration is backed up; an exact match is migrated into this
-reader's directory and every unscoped calibration value is then removed.
-After cleanup, a durable pending-validation marker remains until a normal host
-passes the full safe-open boundary. The helper makes up to three ordinary
-validation attempts. If they fail, it leaves both fingerprint services stopped
-behind helper-owned runtime masks; rerunning the helper resumes validation
-without issuing the vendor callback again. A successful open changes that
-existing marker to a durable completed value. Later helper invocations preserve
-and report the completed result without invoking the callback; another reset
-requires the explicit `--new` option. A failed or interrupted callback is also
-never replayed automatically. Recovery first disables any stale request, and a
-later `--new` invocation is required to authorize a separate operation.
-
-Use `synatudor-uninstall --purge` only when you also want to delete every
-fingerprint fprintd exposes for your user and all Tudor state, including
-recovery backups. A local purge alone does not invoke the reader's vendor
-unpair callback.
-
-## How it works
-
-```text
-PAM and desktop clients
-          |
-       fprintd
-          |
- libfprint TOD ABI
-          |
-   libtudor_tod.so
-          |
- sandboxed Tudor host
-          |
- Windows driver + libusb
-          |
- Synaptics 06cb:0081
-```
-
-The bridge implements the WinAPI and WUDF behavior needed by this particular
-driver, including its secure channel, persistent state, asynchronous capture,
-and native biometric storage interfaces. [Architecture](docs/ARCHITECTURE.md)
-describes the components and the work required for this sensor.
-
-## Development
-
-Build instructions and the hardware release checklist are in
-[Testing](docs/TESTING.md). Completed checks are recorded in
-[Validation](docs/VALIDATION.md). Please read [Contributing](CONTRIBUTING.md)
-before posting diagnostics; state and logs can contain sensitive material.
-
-This repository retains the history and work of
-[Popax21/synaTudor](https://github.com/Popax21/synaTudor) and
-[rstar000/synaTudor](https://github.com/rstar000/synaTudor). Wine-derived
-compatibility code keeps its original copyright and license notices. See
-[NOTICE](NOTICE) and [LICENSE](LICENSE).
+Read [Contributing](CONTRIBUTING.md) before submitting changes or diagnostics.
+Reports from another `06cb:0081` machine are especially useful.

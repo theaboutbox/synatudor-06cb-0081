@@ -5,7 +5,28 @@ a result summary rather than a hardware support guarantee. Logs and reader
 state are intentionally excluded because they can contain device-specific,
 cryptographic, or biometric-derived data.
 
-## Current release-candidate status
+## Latest recorded results
+
+The detailed candidate history below runs through revision 12. Later work on
+2026-09-13 is recorded separately:
+
+- [Code review](CODE-REVIEW-2026-09-13.md): reliability repairs, expanded
+  regression coverage, and unresolved analysis findings.
+- [Revision 12.1 hardware validation](HARDWARE-VALIDATION-2026-09-13.md):
+  matching, rejection, cancellation, and USB recovery passed; restarting the
+  services without USB reset left the reader unavailable.
+- [Capture latency investigation](LATENCY-INVESTIGATION-2026-09-13.md): the
+  asynchronous input-lifetime fix and revision 12.4's five guided matches and
+  one rejection, without timeouts or the former retry loop.
+
+The service-only restart failure has not been retested after that fix.
+Suspend/resume, reboot, and broader hardware validation remain pending.
+See the [roadmap](ROADMAP.md) for follow-up and the
+[development history](DEVELOPMENT-HISTORY.md) for a consolidated account.
+Pending checks below describe their historical revision, not necessarily the
+latest recorded result.
+
+## Release-candidate history through revision 12
 
 Reinstall testing on 2026-09-12 exposed a pairing failure that the earlier
 bridge did not handle safely. A fresh host restored saved software state, but

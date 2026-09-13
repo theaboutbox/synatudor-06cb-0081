@@ -1,12 +1,12 @@
 # Install on Arch Linux or Omarchy
 
-This release supports the x86-64 Synaptics USB fingerprint reader
-`06cb:0081`. The earlier bring-up was tested end to end on a Lenovo Yoga
-C930-13IKB with Arch Linux and Omarchy. Package revision 12 has now passed
-pairing, enrollment, and a fingerprint match on that system. Frequent retries
-and pending persistence and recovery checks are recorded in
-[Validation](VALIDATION.md). Other computers exposing
-the same USB ID also need field testing.
+This release targets the Synaptics USB fingerprint reader `06cb:0081` on
+x86-64 Arch Linux and Omarchy. Pairing and enrollment have passed on a Lenovo
+Yoga C930-13IKB; the latest recorded production build also passed repeated
+matching and wrong-finger rejection after a capture input-lifetime fix. See
+the [latest hardware results](LATENCY-INVESTIGATION-2026-09-13.md#final-guided-hardware-results)
+and [README limitations](../README.md#known-issues-and-validation-limits).
+Other computers exposing the same USB ID still need field testing.
 
 Setup performs ordinary initialization, calibration, enrollment, and
 verification. It never invokes the separate vendor-unpair maintenance
