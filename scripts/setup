@@ -165,6 +165,22 @@ ownership_reset_pending_validation() {
   printf '%s\n' "$value"
 }
 
+enroll_finger() {
+  local finger=$1 target_user=$2
+
+  printf '\nAuthorize enrollment for %s before scanning. Keep the reader uncovered.\n' "$target_user"
+  sudo -v
+  printf '\nEnroll %s.\n' "$finger"
+  printf '%s\n' \
+    'Follow the scan prompts.' \
+    'Move the finger slightly between scans.' \
+    ''
+  # Complete sudo authentication before Claim/EnrollStart. This root client
+  # needs no separate polkit dialog after it claims the reader.
+  # The explicit desktop username remains the owner of the enrolled print.
+  sudo -n -- /usr/bin/fprintd-enroll -f "$finger" "$target_user"
+}
+
 probe_reader_once() {
   printf 'Initializing the reader once; this can take up to 30 seconds...\n'
   timeout --kill-after=2s 30s fprintd-list "$target_user"
@@ -266,7 +282,7 @@ unset sensor_path
 pacman -Q synatudor-0081 libfprint-tod fprintd >/dev/null || \
   die 'install synatudor-0081, libfprint-tod, and fprintd first'
 command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
-command -v fprintd-enroll >/dev/null || die 'fprintd-enroll is unavailable'
+[[ -x /usr/bin/fprintd-enroll ]] || die 'fprintd-enroll is unavailable'
 command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
 command -v timeout >/dev/null || die 'timeout is unavailable'
 command -v od >/dev/null || die 'od is unavailable'
@@ -358,7 +374,7 @@ if [[ $calibration == missing || $calibration == incomplete ]]; then
 fi
 [[ $calibration == valid ]] || \
   die 'the ordinary initialization attempts did not produce calibration for the attached physical reader'
-printf 'Reader-specific calibration is valid and stored privately under /var/lib/tudor.\n'
+printf 'Saved calibration matches this reader and is stored privately under /var/lib/tudor.\n'
 
 if (( calibrate_only )); then
   printf 'Calibration-only setup completed. PAM was not changed.\n'
@@ -369,8 +385,7 @@ listing=$(fprintd-list "$target_user" 2>&1 || true)
 if grep -Fq -- "$finger" <<<"$listing"; then
   printf '%s is already enrolled for %s.\n' "$finger" "$target_user"
 else
-  printf '\nEnroll %s. Follow fprintd prompts and move the finger slightly between scans.\n\n' "$finger"
-  fprintd-enroll -f "$finger" "$target_user"
+  enroll_finger "$finger" "$target_user"
 fi
 
 printf '\nVerify the enrolled finger once before authentication is enabled.\n\n'

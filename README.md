@@ -7,7 +7,7 @@ to libfprint through the TOD ABI.
 
 The current release targets Arch Linux and [Omarchy](https://omarchy.org/).
 Earlier bring-up was tested on a Lenovo Yoga C930-13IKB; the corrected pairing
-and recovery lifecycle intended for package revision 11 still needs the
+and recovery lifecycle intended for package revision 12 still needs the
 hardware revalidation described below. Other laptops with the same USB ID are
 especially useful test cases.
 
@@ -100,9 +100,11 @@ pipeline through the sensor's ready status before exposing the device. The
 counter remains diagnostic. It also reconstructs omitted ECDSA P-256 public
 coordinates for the vendor's scalar-only certificate-signing keys, while
 validating the scalar and any supplied coordinates, and accepts the vendor's
-bounded TLS labels without requiring a trailing NUL. The corrected normal-pairing
-path, explicit vendor-unpair recovery, and subsequent enroll/verify sequence
-have not yet completed hardware revalidation. Treat this tree as a prerelease until that
+bounded TLS labels without requiring a trailing NUL. Revision 12 completes
+enrollment authorization before scan instructions and logs the vendor's
+calibration result and capture prerequisites. Normal pairing and device listing
+have now succeeded; the subsequent enroll/verify and recovery sequence
+has not yet completed hardware revalidation. Treat this tree as a prerelease until that
 result is recorded in [Validation](docs/VALIDATION.md).
 
 Only the following combination has received hardware validation:

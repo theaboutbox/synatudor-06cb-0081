@@ -113,6 +113,20 @@ callback. If unpair maintenance is necessary, run
 `synatudor-reset-ownership` while the driver is installed, then use the purge
 option if you also want to remove all remaining local state.
 
+## Authorization dialog and repeated scan retries
+
+Guided setup completes sudo authorization before printing scan instructions and
+enrolls for your regular user explicitly. Keep the reader uncovered while
+authorizing. A manually invoked `fprintd-enroll` may print `Enrolling` before
+its separate graphical authorization dialog finishes.
+
+Repeated `enroll-retry-scan` does not necessarily mean poor finger contact. If
+the service log reports a capture worker exiting with its request pending and
+cancellation status `0x800703e3`, capture did not produce a usable image. Inspect
+the status-only calibration result and capture-prerequisite diagnostics rather
+than repeatedly changing finger placement. Saved calibration matching the reader
+proves its format and association, not that the vendor accepted it at runtime.
+
 ## Improve finger contact
 
 This is a small swipe-style pad presented as a touch reader. Place a broad part

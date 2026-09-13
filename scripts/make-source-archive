@@ -61,6 +61,7 @@ archive_paths=(
   scripts/uninstall
   scripts/omarchy-pam
   tests/reset-ownership.sh
+  tests/setup.sh
 )
 
 for required in LICENSE NOTICE meson.build meson_options.txt; do

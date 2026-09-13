@@ -85,6 +85,10 @@ static constexpr uintptr_t SYNA_PNP_VTABLE_RVA = 0x119ea0;
 static constexpr uintptr_t SYNA_HARDWARE_VTABLE_RVA = 0x119f70;
 static constexpr size_t SYNA_PAIRING_THREAD_HANDLE_OFFSET = 0x1a8;
 static constexpr size_t SYNA_PROTOCOL_STRATEGY_OFFSET = 0x1c0;
+static constexpr size_t SYNA_CAPTURE_BLOCKED_OFFSET = 0xf4;
+static constexpr size_t SYNA_CAPTURE_READY_FLAG_OFFSET = 0x14c;
+static constexpr size_t SYNA_CAPTURE_CALIBRATED_OFFSET = 0x150;
+static constexpr size_t SYNA_CAPTURE_REQUEST_OFFSET = 0x170;
 static constexpr useconds_t SYNA_CAPTURE_RECOVERY_DELAY_US = 250000;
 static constexpr ULONG SYNA_CAPTURE_IOCTL = 0x440014;
 static constexpr ULONG SYNA_RESET_OWNERSHIP_IOCTL = 0x442040;
@@ -93,6 +97,45 @@ static constexpr unsigned int SYNA_PAIRING_WORKER_WAIT_MS = 15000;
 /* Leave enough room for the host to persist a terminal result before the
  * surrounding fprintd/helper process deadline. */
 static constexpr unsigned int SYNA_RESET_OWNERSHIP_WAIT_MS = 15000;
+
+typedef DWORD __winfnc VendorDeviceCalibrate(void *);
+static void *vendor_calibration_target;
+
+static DWORD __winfnc vendor_calibration_observe(void *device) {
+    auto *calibrate = reinterpret_cast<VendorDeviceCalibrate*>(
+        vendor_calibration_target);
+    if(!calibrate) {
+        log_error("Pinned calibration target is unavailable");
+        return 0x80004005u;
+    }
+    const DWORD status = calibrate(device);
+    log_info("Pinned calibration returned status 0x%x", status);
+    return status;
+}
+
+/* ProcessPairing advances to initialization even when deviceCalibrate fails,
+ * and that later result overwrites the calibration HRESULT. Observe this
+ * one pinned call without changing its arguments, result, or state writes.
+ * The loader validates its bytes/target before patching and clears the
+ * original target when the image is destroyed, including a later reload. */
+static struct dll_callsite_hook vendor_calibration_hook = {
+    "synaWudfBioUsb.dll", 0x23b14, 0x25b00,
+    {0xe8, 0xe7, 0x1f, 0x00, 0x00},
+    reinterpret_cast<void*>(&vendor_calibration_observe),
+    &vendor_calibration_target, nullptr
+};
+
+__attribute__((constructor))
+static void register_vendor_calibration_hook(void) {
+    dll_register_callsite_hook(&vendor_calibration_hook);
+}
+
+#ifdef TUDOR_RECOVERY_TEST_HOOK
+extern "C" __attribute__((visibility("hidden")))
+const struct dll_callsite_hook *tudor_internal_test_vendor_calibration_hook() {
+    return &vendor_calibration_hook;
+}
+#endif
 
 /* This vendor counter records failed DoPairing invocations, including
  * recoverable multi-process transitions.  Keep the latest value for a useful
@@ -2663,6 +2706,49 @@ static void *vendor_protocol_strategy(void) {
     return strategy;
 }
 
+struct vendor_capture_readiness {
+    bool ready_flag;
+    bool calibrated;
+    bool blocked;
+    bool request_pending;
+};
+
+static vendor_capture_readiness vendor_capture_readiness_snapshot(
+    const void *device) {
+    vendor_capture_readiness result{};
+    if(!device) return result;
+    const auto *base = static_cast<const uint8_t*>(device);
+    DWORD ready_flag = 0, calibrated = 0, blocked = 0;
+    void *request = nullptr;
+    memcpy(&ready_flag, base + SYNA_CAPTURE_READY_FLAG_OFFSET,
+           sizeof(ready_flag));
+    memcpy(&calibrated, base + SYNA_CAPTURE_CALIBRATED_OFFSET,
+           sizeof(calibrated));
+    memcpy(&blocked, base + SYNA_CAPTURE_BLOCKED_OFFSET, sizeof(blocked));
+    memcpy(&request, base + SYNA_CAPTURE_REQUEST_OFFSET, sizeof(request));
+    result.ready_flag = ready_flag != 0;
+    result.calibrated = calibrated != 0;
+    result.blocked = blocked != 0;
+    result.request_pending = request != nullptr;
+    return result;
+}
+
+static void log_vendor_capture_readiness(const char *stage) {
+    /* Only read the primary object accepted by the pinned COM layout check.
+     * Capture checks +f4 at RVA 1acfb, +150/+14c at 1b41a/1b42f, and its
+     * request at +170 at 1ae08. deviceCalibrate sets +150 from its SDK result
+     * at 25db3/25df0; deviceInit sets +f4 after requesting a reset at 2641b.
+     * These are diagnostic booleans, not an additional ownership decision. */
+    if(!vendor_device_base) return;
+    auto readiness = vendor_capture_readiness_snapshot(vendor_device_base);
+    log_info("Pinned capture readiness during %s: ready_flag=%u "
+             "calibrated=%u blocked=%u request_pending=%u", stage,
+             static_cast<unsigned int>(readiness.ready_flag),
+             static_cast<unsigned int>(readiness.calibrated),
+             static_cast<unsigned int>(readiness.blocked),
+             static_cast<unsigned int>(readiness.request_pending));
+}
+
 #ifdef TUDOR_RECOVERY_TEST_HOOK
 extern "C" __attribute__((visibility("hidden")))
 void *tudor_internal_test_vendor_device_layout(const struct dll_image *image,
@@ -2680,6 +2766,15 @@ void tudor_internal_test_vendor_pairing_fields(void *device, HANDLE *worker,
     *worker = vendor_pairing_thread_handle();
     *strategy = vendor_protocol_strategy();
     vendor_device_base = saved_device;
+}
+
+extern "C" __attribute__((visibility("hidden")))
+unsigned int tudor_internal_test_vendor_capture_readiness(const void *device) {
+    auto readiness = vendor_capture_readiness_snapshot(device);
+    return (readiness.ready_flag ? 1u : 0u) |
+           (readiness.calibrated ? 2u : 0u) |
+           (readiness.blocked ? 4u : 0u) |
+           (readiness.request_pending ? 8u : 0u);
 }
 #endif
 
@@ -2708,6 +2803,8 @@ static bool wait_for_vendor_pairing_worker(bool ownership_reset_mode) {
                   wait_status);
         return false;
     }
+
+    log_vendor_capture_readiness("pairing worker join");
 
     /* Joining is the synchronization boundary for the vendor's write to the
      * pinned CBiometricDevice strategy field.  Capture dereferences this
@@ -3805,6 +3902,8 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
         tudor_unwind_failed_open(device, progress);
         return false;
     }
+
+    log_vendor_capture_readiness("pipeline publication");
 
     /* This is the only successful validation boundary: the exact pairing
      * worker was joined, its capture strategy exists, and every normal

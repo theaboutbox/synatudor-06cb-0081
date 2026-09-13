@@ -61,6 +61,21 @@ Use another finger with, for example:
 synatudor-setup --finger left-index-finger
 ```
 
+Setup completes sudo authorization before showing scan instructions, then runs
+only the enrollment client as root with the desktop username supplied explicitly:
+
+```bash
+sudo -v
+sudo -n -- /usr/bin/fprintd-enroll -f right-index-finger "$USER"
+```
+
+This enrolls the desktop user's finger and avoids a separate polkit dialog during
+enrollment. Keep the reader uncovered while authorizing, then follow the scan
+prompts. Setup and verification run as the desktop user; no polkit policy is
+changed. A manual `fprintd-enroll` invocation as a regular user can still print
+`Enrolling` before showing its polkit password dialog; authorize with the
+password before touching the reader.
+
 On plain Arch, enrollment works but the helper leaves PAM unchanged. Configure
 PAM according to your desktop or distribution after `fprintd-verify` succeeds.
 

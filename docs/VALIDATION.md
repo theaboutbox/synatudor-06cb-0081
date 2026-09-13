@@ -129,8 +129,27 @@ transition that permits this staged startup; the exact runtime branch was not
 traced. The following ordinary session created the strategy, opened the full biometric
 pipeline and native database, and sent READY. The initial device-list query
 appears to have returned before that later session was ready. No further code change was
-needed for this transition. A subsequent fprintd device-list check, enrollment,
-verification, restart, USB reset, and reboot validation remain pending.
+needed for this transition. A subsequent device-list check found the reader and
+reported no enrolled fingers. Enrollment, verification, restart, USB reset, and
+reboot validation remain pending.
+
+The subsequent enrollment attempt displayed a graphical authorization dialog
+and repeatedly reported `enroll-retry-scan`. The captured service-log window
+contained identification retries, all caused by capture workers exiting with
+their WUDF requests pending, followed by cancellation status `0x800703e3`.
+It contained no enrollment or fingerprint-quality failure messages. The installed
+polkit PAM configuration tries fingerprint authentication before a password;
+this supports an authorization-stage identification attempt, but the caller was
+not correlated with the log window. Core capture recovery matches the earlier
+working development source, so a new recovery-delay regression is not established.
+
+Revision 12 completes sudo authorization before its scan instructions and runs
+only the enrollment client as root, with the regular user's name supplied
+explicitly. Status-only diagnostics also observe the pinned calibration call
+and the vendor's capture prerequisites. Static analysis shows that ProcessPairing
+can overwrite a calibration error with capture-strategy initialization success;
+saved calibration passing the helper's format and reader-ID checks does not
+prove that the vendor accepted it. These changes still require hardware testing.
 
 The package candidate adds these protections:
 
