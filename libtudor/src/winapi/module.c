@@ -213,10 +213,34 @@ static void GetProcAddressStub(char* lib, char *name) {
     abort();
 }
 
-static uint8_t *import_cur_page;
-static int import_cur_slot;
 #define IMPORT_STUB_SIZE 32
 #define STUB_PAGE_SIZE 8192
+#define STUBS_PER_PAGE (STUB_PAGE_SIZE / IMPORT_STUB_SIZE)
+
+struct getproca_stub_page {
+    struct getproca_stub_page *next;
+    uint8_t *code;
+    size_t used;
+    char *names[STUBS_PER_PAGE];
+};
+
+static pthread_mutex_t getproca_stubs_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct getproca_stub_page *getproca_stubs;
+
+/* GetProcAddress pointers can survive the requesting dummy module handle,
+ * and calls with a NULL handle have no module owner. Keep their code and
+ * embedded names alive with the API library, then release both at teardown. */
+static __attribute__((destructor)) void destroy_getproca_stubs(void) {
+    cant_fail_ret(pthread_mutex_lock(&getproca_stubs_lock));
+    while(getproca_stubs) {
+        struct getproca_stub_page *page = getproca_stubs;
+        getproca_stubs = page->next;
+        cant_fail(munmap(page->code, STUB_PAGE_SIZE));
+        for(size_t i = 0; i < page->used; ++i) free(page->names[i]);
+        free(page);
+    }
+    cant_fail_ret(pthread_mutex_unlock(&getproca_stubs_lock));
+}
 
 static inline void encode_mov(uint8_t *targ, int reg, uint64_t val) {
     targ[0] = 0x48;                 //REX - 64 bit operands
@@ -233,28 +257,43 @@ static inline void encode_mov(uint8_t *targ, int reg, uint64_t val) {
 
 void *create_getproca_stub(const char *name) {
     const char* lib = "GetProcAddress";
-    name = strdup(name);
+    cant_fail_ret(pthread_mutex_lock(&getproca_stubs_lock));
 
     //Obtain a stub slot
-    if(!import_cur_page || import_cur_slot*IMPORT_STUB_SIZE + IMPORT_STUB_SIZE > STUB_PAGE_SIZE) {
-        import_cur_page = (uint8_t*) mmap(NULL, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if(!import_cur_page) {
-            perror("Couldn't allocate import stub page");
+    if(!getproca_stubs || getproca_stubs->used == STUBS_PER_PAGE) {
+        struct getproca_stub_page *page = calloc(1, sizeof(*page));
+        if(!page) {
+            perror("Couldn't allocate import stub metadata");
             abort();
         }
-        import_cur_slot = 0;
-        log_debug("Allocated import stub page at %p", import_cur_page);
+        page->code = mmap(NULL, STUB_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if(page->code == MAP_FAILED) {
+            perror("Couldn't allocate import stub page");
+            free(page);
+            abort();
+        }
+        page->next = getproca_stubs;
+        getproca_stubs = page;
+        log_debug("Allocated import stub page at %p", page->code);
     }
 
-    uint8_t *slot = import_cur_page + (import_cur_slot++)*IMPORT_STUB_SIZE;
+    struct getproca_stub_page *page = getproca_stubs;
+    char *owned_name = strdup(name);
+    if(!owned_name) {
+        perror("Couldn't allocate import stub name");
+        abort();
+    }
+    page->names[page->used] = owned_name;
+    uint8_t *slot = page->code + (page->used++)*IMPORT_STUB_SIZE;
 
     //Encode slot instructions
-    encode_mov(slot +  0, 7, (uint64_t) name);           //mov rdi, <lib>
-    encode_mov(slot + 10, 6, (uint64_t) name);          //mov rsi, <name>
+    encode_mov(slot +  0, 7, (uint64_t) lib);           //mov rdi, <lib>
+    encode_mov(slot + 10, 6, (uint64_t) owned_name);    //mov rsi, <name>
     encode_mov(slot + 20, 0, (uint64_t) &GetProcAddressStub);  //mov rax, <stub function>
     slot[30] = 0xff;                                    //jmp rax
     slot[31] = 0xc0 | (4 << 3) | (0 << 0);              //  - ModR/M          
 
+    cant_fail_ret(pthread_mutex_unlock(&getproca_stubs_lock));
     return slot;
 }
 

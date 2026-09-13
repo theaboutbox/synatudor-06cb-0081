@@ -49,6 +49,15 @@ bcrypt_ecc_test = executable('bcrypt-ecc-test',
     install: false)
 test('bcrypt-ecc', bcrypt_ecc_test, timeout: 10)
 
+palcrypto_ecc_test = executable('palcrypto-ecc-test',
+    'tests/palcrypto-ecc.cpp',
+    dependencies: [libtudor_dep, cryptbridge_dep],
+    include_directories: ['../libtudor/src'],
+    cpp_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('palcrypto-ecc', palcrypto_ecc_test,
+    args: [driver_dlls[1]], timeout: 10)
+
 loader_callsite_test = executable('loader-callsite-test',
     'tests/loader-callsite.c',
     dependencies: [libtudor_dep],

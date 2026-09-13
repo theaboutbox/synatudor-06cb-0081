@@ -8,12 +8,9 @@
 #include "suspend.h"
 
 static void dispose_dev(FpiDeviceTudor *tdev) {
-    //Kill the host process (even though the process might have died already, we still need to tell the launcher to free the associated resources)
-    GError *error = NULL;
-    if(tdev->host_has_id && !kill_host_process(tdev, &error)) {
-        g_warning("Error cleaning up Tudor host process: %s (%s code %d)", error->message, g_quark_to_string(error->domain), error->code);
-        g_clear_error(&error);
-    }
+    /* Even a dead host has launcher resources to release. Snapshot its ID
+     * before clearing local state; a launcher reply must not delay disposal. */
+    guint old_host_id = tdev->host_has_id ? tdev->host_id : 0;
     /* The launcher may already have retired this ID after a USB
      * re-enumeration. Local cleanup must still make a later open start from a
      * complete connection rather than reusing an ID with no IPC socket. */
@@ -41,6 +38,8 @@ static void dispose_dev(FpiDeviceTudor *tdev) {
     g_clear_object(&tdev->ipc_socket);
     g_clear_pointer(&tdev->pdata_sensor_name, g_free);
     g_clear_object(&tdev->close_task);
+
+    if(old_host_id) kill_host_process_async(tdev->dbus_con, old_host_id);
 
     g_debug("Disposed tudor device resources");
 }

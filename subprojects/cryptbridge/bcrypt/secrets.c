@@ -164,7 +164,8 @@ derive_ec_pubkey(unsigned char *buf)
     if(!ctx || !curve) goto done;
     pub = EC_POINT_new(curve);
     prv = BN_bin2bn(buf + 64, 32, NULL);
-    if(!pub || !prv || BN_is_zero(prv)) goto done;
+    if(!pub || !prv || BN_is_zero(prv) ||
+       BN_cmp(prv, EC_GROUP_get0_order(curve)) >= 0) goto done;
     if(EC_POINT_mul(curve, pub, prv, NULL, NULL, ctx) != 1) goto done;
     if(EC_POINT_point2oct(curve, pub, POINT_CONVERSION_UNCOMPRESSED,
                          out, sizeof(out), ctx) != sizeof(out)) goto done;

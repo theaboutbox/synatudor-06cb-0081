@@ -53,6 +53,7 @@ bool open_dbus_con(FpiDeviceTudor *tdev, GError **error);
 bool start_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
                         const gchar *state_id, int *sock_fd, GError **error);
 bool kill_host_process(FpiDeviceTudor *tdev, GError **error);
+void kill_host_process_async(GDBusConnection *con, guint host_id);
 bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,
                         const gchar *state_id, int *sock_fd, GError **error);
 bool orphan_host_process(FpiDeviceTudor *tdev, GError **error);

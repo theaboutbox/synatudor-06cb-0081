@@ -15,15 +15,19 @@ $ meson test -C build --print-errorlogs
 
 The suite covers Windows wait, thread-start filtering, and string behavior;
 cryptographic context, random generation, RSA key generation/export/signing,
-SHA-1, P-256 key generation, ECDH agreement, and ECDSA signing; persistent
-crypto-registry state; WinUSB access and bounded diagnostic playback; capture
+SHA-1, P-256 key generation, ECDH agreement, and ECDSA signing, including the
+pinned DLL's scalar-only signing-key import and invalid-scalar rejection;
+persistent crypto-registry state; WinUSB access and bounded diagnostic playback; capture
 recovery; native storage calls, lifecycle, and IPC; stable host identity;
 persistent launcher state; the joined pairing-worker and nonnull-strategy
 guard; the host's one-shot vendor-unpair transaction; its resumable
 pending-validation marker, its conditional one-to-zero completion, and its
 durable replay guard; and the privileged helper's refusal, cleanup, and
-service-mask paths. Calibration fixtures verify that reader-scoped and legacy
-blobs are bound to the exact `06cb:0081` USB serial.
+service-mask paths. A private mock launcher verifies that failed initialization
+completes without waiting for cleanup, that delayed cleanup cannot change a new
+host, and that its timeout leaves the main loop responsive. Calibration fixtures
+verify that reader-scoped and legacy blobs are bound to the exact `06cb:0081`
+USB serial.
 
 For a Clang sanitizer build:
 
@@ -38,7 +42,7 @@ $ meson test -C build-asan --print-errorlogs
 ## Hardware validation
 
 Automated tests do not prove that a vendor-driver ABI works on hardware. The
-package revision 8 candidate should pass this sequence on USB `06cb:0081`.
+package revision 10 candidate should pass this sequence on USB `06cb:0081`.
 Keep password login available. The optional vendor-unpair step changes pairing
 and local enrollment state and may invalidate existing Windows and Linux
 enrollments; it is not a proven secure erase of the sensor database.
@@ -96,5 +100,5 @@ Arch Linux with Omarchy. Reinstall testing later exposed the incomplete-pairing
 capture failure described in
 [Validation](VALIDATION.md). The joined-worker guard, corrected cryptographic
 pairing support, and vendor-unpair validation lifecycle intended for package
-revision 8 still require the complete hardware sequence above; the earlier
+revision 10 still require the complete hardware sequence above; the earlier
 results do not validate that path. Other laptop models remain unverified.

@@ -34,8 +34,55 @@ and did not verify the actual vendor interface layout.
 The revision 9 candidate derives the complete object only after checking the
 pinned hardware and power callback layouts, and tests that derivation against
 the actual pinned DLL without using the reader. Status-only pairing diagnostics
-are being added to distinguish any remaining protocol or cryptographic failure
+distinguish any remaining protocol or cryptographic failure
 after the corrected worker check. A missing strategy continues to block capture.
+
+After revision 9 was installed, the vendor's startup counter-limit branch
+restored a count of five, saved zero, and returned `0x800710df` before starting
+the worker. Static analysis confirms this is a one-start, self-clearing
+`ERROR_DEVICE_NOT_AVAILABLE` response. A controlled ordinary USB reset and
+initialization then started and joined the pairing worker from count zero.
+The persisted P-256 identity imported successfully and the pinned pairing key
+generator returned zero, but the worker subsequently returned `0x80070259`
+without a capture strategy. The host rejected that state before enrollment.
+This confirms the revision 9 layout correction and safe failure boundary, but
+does not validate successful pairing or recovery.
+
+The revision 9 failure was reproduced without a reader at the real pinned DLL
+boundary. The vendor's certificate-signing setup zeroes a 96-byte private-key
+encoding, then derives only the last 32-byte scalar. Its later CNG ECDSA import
+expects the provider to compute the omitted public coordinates. The bridge's
+hardened import instead rejected those coordinates before signing, producing
+the observed vendor `0x259` and worker `0x80070259` results. Revision 10 permits
+this omission only for ECDSA P-256 with both coordinates entirely zero, derives
+the public key in a copy, and retains checks on nonzero supplied coordinates.
+It explicitly rejects zero or out-of-range scalars. Persisted pairing identity
+validation remains strict and uses the separate ECDH path.
+
+The new `palcrypto-ecc` regression runs the pinned DLL's actual key generation,
+export, import, signing, signature encoding, and verification with synthetic
+in-memory identities. It passes full-coordinate and scalar-only signing for a
+new and a reused identity, rejects altered hashes, malformed coordinates, and
+scalars zero, the curve order, above the curve order, or all-ones, and verifies
+that input private-key encodings remain unchanged. No hardware callback runs.
+
+Revision 10 also makes failed-open disposal independent of a launcher's
+`KillHost` reply. Local host and socket state is cleared immediately, and the
+cleanup request runs asynchronously with a five-second timeout. Its callback
+retains only the old host ID, so it cannot change a later device session.
+The previous synchronous cleanup used a practically unbounded timeout before
+returning the initialization error. This removes a known blocking path; the
+exact blocking site in the observed fprintd timeout was not captured.
+The `tudor-host-cleanup` fixture injects an error through the production
+initialization callback against a private mock D-Bus launcher. It verifies
+that initialization fails within one second with the cleanup reply withheld,
+that local resources clear, that a delayed reply cannot change the next host,
+and that disposal permits device finalization before the reply. A separate
+case checks the five-second timeout while a main-loop heartbeat continues.
+
+The software DLL regression exposed unowned dynamic `GetProcAddress` stub
+names under LeakSanitizer. The API library now owns their names and executable
+pages in a mutex-protected pool and releases both at library teardown.
 
 The package candidate adds these protections:
 
@@ -68,7 +115,7 @@ A superseded package demonstrated that the custom vendor callback could return
 success and that protected local cleanup could complete on the tested reader.
 Its subsequent clean pairing did not reach the safe capture boundary, so that
 result is not a successful end-to-end recovery validation. The corrected
-package revision 9 candidate still needs a fresh on-hardware normal pairing,
+package revision 10 candidate still needs a fresh on-hardware normal pairing,
 optional vendor-unpair recovery, enrollment, verification, restart, and USB
 reset sequence. The results below are the earlier bring-up baseline; they do
 not validate the corrected lifecycle.
@@ -91,6 +138,16 @@ Baseline validation was completed on 2026-09-11 with:
 | Lenovo package SHA-256 | `2713966a9ce5906fce12d33ead81f8c15a72d7b1cbe4e523613147181ce32343` |
 
 ## Automated checks
+
+The revision 10 changes passed all 17 tests outside the new mock-launcher
+fixture under Clang AddressSanitizer plus UndefinedBehaviorSanitizer and GCC
+ThreadSanitizer. ThreadSanitizer reports a cross-thread allocation/free in
+the installed GLib library while the mock fixture opens its private D-Bus
+connection, before the cleanup code runs. A standalone program linked only
+to GLib/GObject/GIO reproduces the same report. This establishes a dependency
+limitation for that run, without determining whether the report represents a
+GLib defect or missing sanitizer synchronization visibility. The 17-test
+ThreadSanitizer run excludes `tudor-host-cleanup`; there are no suppressions.
 
 Revision 9 passed all 16 Meson tests in the fresh GCC package build and a fresh
 Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. The final changes

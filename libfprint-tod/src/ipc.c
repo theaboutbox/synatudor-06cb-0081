@@ -5,6 +5,8 @@
 #include "open.h"
 #include "suspend.h"
 
+#define HOST_CLEANUP_TIMEOUT_MSEC 5000
+
 IPCMessageBuf *ipc_msg_buf_new() {
     IPCMessageBuf *msg = g_new(IPCMessageBuf, 1);
     msg->transfer_fd = -1;
@@ -283,13 +285,38 @@ bool kill_host_process(FpiDeviceTudor *tdev, GError **error) {
     GVariant *rets = g_dbus_connection_call_sync(tdev->dbus_con,
         TUDOR_HOST_LAUNCHER_SERVICE, TUDOR_HOST_LAUNCHER_OBJ, TUDOR_HOST_LAUNCHER_INTERF,
         TUDOR_HOST_LAUNCHER_KILL_METHOD, g_variant_new("(u)", tdev->host_id), NULL, G_DBUS_CALL_FLAGS_NONE,
-        G_MAXINT, NULL, error
+        HOST_CLEANUP_TIMEOUT_MSEC, NULL, error
     );
     if(!rets) return false;
     g_variant_unref(rets);
 
     tdev->host_has_id = false;
     return true;
+}
+
+static void kill_host_process_async_cb(GObject *src_obj, GAsyncResult *res,
+                                       gpointer user_data) {
+    GError *error = NULL;
+    GVariant *rets = g_dbus_connection_call_finish(
+        G_DBUS_CONNECTION(src_obj), res, &error);
+    if(!rets) {
+        g_warning("Error cleaning up Tudor host process ID %u: %s (%s code %d)",
+                  GPOINTER_TO_UINT(user_data), error->message,
+                  g_quark_to_string(error->domain), error->code);
+        g_clear_error(&error);
+    } else g_variant_unref(rets);
+}
+
+void kill_host_process_async(GDBusConnection *con, guint host_id) {
+    /* Cleanup must not gate completion of a failed open/probe. The callback
+     * retains only the old ID, so a delayed reply cannot touch a reopened or
+     * already finalized device. Calls on this connection preserve ordering. */
+    g_dbus_connection_call(con,
+        TUDOR_HOST_LAUNCHER_SERVICE, TUDOR_HOST_LAUNCHER_OBJ,
+        TUDOR_HOST_LAUNCHER_INTERF, TUDOR_HOST_LAUNCHER_KILL_METHOD,
+        g_variant_new("(u)", host_id), G_VARIANT_TYPE_UNIT,
+        G_DBUS_CALL_FLAGS_NONE, HOST_CLEANUP_TIMEOUT_MSEC, NULL,
+        kill_host_process_async_cb, GUINT_TO_POINTER(host_id));
 }
 
 bool adopt_host_process(FpiDeviceTudor *tdev, guint8 usb_bus, guint8 usb_addr,

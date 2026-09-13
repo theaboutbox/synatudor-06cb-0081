@@ -817,6 +817,8 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
     gnutls_datum_t x, y, k;
     UCHAR components[3 * P256_COMPONENT_SIZE];
     DWORD expected_magic;
+    BOOL omitted_public;
+    ULONG i;
     NTSTATUS status;
     int ret;
 
@@ -845,8 +847,22 @@ NTSTATUS key_import_ecc( struct key *key, UCHAR *buf, ULONG len )
         return STATUS_INVALID_PARAMETER;
 
     memcpy( components, ecc_blob + 1, sizeof(components) );
+    /* The pinned driver's certificate-signing path supplies only the private
+     * scalar, with both public coordinates zero. Derive those coordinates for
+     * ECDSA P-256, while retaining consistency checks on supplied coordinates
+     * and leaving the caller's private blob unchanged. */
+    omitted_public = key->alg_id == ALG_ID_ECDSA_P256;
+    for (i = 0; i < 2 * P256_COMPONENT_SIZE; ++i)
+    {
+        if (components[i])
+        {
+            omitted_public = FALSE;
+            break;
+        }
+    }
     if (derive_ec_pubkey( components ) ||
-        memcmp( components, ecc_blob + 1, 2 * P256_COMPONENT_SIZE ))
+        (!omitted_public &&
+         memcmp( components, ecc_blob + 1, 2 * P256_COMPONENT_SIZE )))
     {
         wipe_private_bytes( components, sizeof(components) );
         return STATUS_INVALID_PARAMETER;

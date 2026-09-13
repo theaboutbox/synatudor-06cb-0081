@@ -3,7 +3,7 @@
 This release supports the x86-64 Synaptics USB fingerprint reader
 `06cb:0081`. The earlier bring-up was tested end to end on a Lenovo Yoga
 C930-13IKB with Arch Linux and Omarchy. The corrected pairing and recovery
-lifecycle intended for package revision 8 is still awaiting the hardware
+lifecycle intended for package revision 10 is still awaiting the hardware
 revalidation recorded in [Validation](VALIDATION.md). Other computers exposing
 the same USB ID also need field testing.
 
@@ -252,7 +252,7 @@ payload_sha256=$(sha256sum "$payload" | awk '{print $1}')
 sudo systemctl stop fprintd.service tudor-host-launcher.service \
   2>/dev/null || true
 sudo pacman --noconfirm -U \
-  "$package_dir/synatudor-0081-0.1.0-8-x86_64.pkg.tar.zst"
+  "$package_dir/synatudor-0081-0.1.0-10-x86_64.pkg.tar.zst"
 sudo systemctl daemon-reload
 sudo udevadm control --reload
 sudo systemctl start tudor-host-launcher.service
