@@ -139,15 +139,38 @@ Baseline validation was completed on 2026-09-11 with:
 
 ## Automated checks
 
-The revision 10 changes passed all 17 tests outside the new mock-launcher
-fixture under Clang AddressSanitizer plus UndefinedBehaviorSanitizer and GCC
-ThreadSanitizer. ThreadSanitizer reports a cross-thread allocation/free in
+Revision 10 passed all 18 Meson tests in its fresh GCC package build and the
+updated Clang AddressSanitizer plus UndefinedBehaviorSanitizer build, with leak
+detection and halt-on-error enabled. The complete text, JSON, and JUnit logs contained no sanitizer
+diagnostic. GCC ThreadSanitizer passed all 17 tests outside the new
+mock-launcher fixture, also with no diagnostic in those complete logs.
+ThreadSanitizer reports a cross-thread allocation/free in
 the installed GLib library while the mock fixture opens its private D-Bus
 connection, before the cleanup code runs. A standalone program linked only
 to GLib/GObject/GIO reproduces the same report. This establishes a dependency
 limitation for that run, without determining whether the report represents a
 GLib defect or missing sanitizer synchronization visibility. The 17-test
 ThreadSanitizer run excludes `tudor-host-cleanup`; there are no suppressions.
+
+The revision 10 build-only installer used source commit
+`197de2950b0f06b94e3df2eb035c444f3ba111d5` through metadata commit
+`cba891d06a136c292baf4be1f4c4fffbf7050b13`. It verified both pinned inputs,
+completed 276 build steps, passed the 18 Meson tests and shell recovery
+fixture, and changed no installed package, authentication, service, or reader
+state. Helper syntax checks and `git diff --check` passed. Two independently
+generated source archives were byte-identical, with SHA-256
+`aaee1fdb59f58bdbd615e1d964396f1cdc0b16dcb9d578e34563d28f73757fcf`.
+The curated archive's 288 regular files and 32 directory headers match the
+committed source bytes, types, modes, and canonical metadata. The new source
+blobs and archive passed the private-data and binary-content audit.
+The private package has SHA-256
+`e3e915e312b86a2b4b33566a500ef27224f6d0383587243d2d4ea7c50e6144d6`.
+Its exact 39-entry manifest matches revision 9; its five helpers, license,
+and notice match committed source. All six x86-64 runtime ELF objects retain
+their expected dependencies and search paths, with no exported test hooks.
+All 20 declared runtime dependencies are satisfied. The package is mode 0600
+in a mode 0700 cache and remains private for the vendor-payload reasons below.
+These automated results do not validate normal pairing on hardware.
 
 Revision 9 passed all 16 Meson tests in the fresh GCC package build and a fresh
 Clang AddressSanitizer plus UndefinedBehaviorSanitizer build. The final changes
