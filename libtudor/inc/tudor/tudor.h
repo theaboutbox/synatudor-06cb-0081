@@ -137,8 +137,15 @@ bool tudor_enroll_capture(struct tudor_device *device, bool *done, tudor_async_r
 bool tudor_enroll_commit(struct tudor_device *device, bool *is_duplicate);
 bool tudor_enroll_discard(struct tudor_device *device);
 
-bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, bool *retry, bool *matches, tudor_async_res_t *res);
-bool tudor_identify(struct tudor_device *device, bool *retry, bool *found_match, RECGUID *guid, enum tudor_finger *finger, tudor_async_res_t *res);
+/* A transport restart has captured no sample and requires no user action. */
+enum tudor_capture_retry {
+    TUDOR_RETRY_NONE = 0,
+    TUDOR_RETRY_SCAN = 1,
+    TUDOR_RETRY_CAPTURE_RESTART = 2,
+};
+
+bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, enum tudor_capture_retry *retry, bool *matches, tudor_async_res_t *res);
+bool tudor_identify(struct tudor_device *device, enum tudor_capture_retry *retry, bool *found_match, RECGUID *guid, enum tudor_finger *finger, tudor_async_res_t *res);
 bool tudor_get_sensor_database_size(uint64_t *record_count);
 
 #ifdef __cplusplus

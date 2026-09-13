@@ -17,12 +17,12 @@ struct async_args_enroll {
 struct async_args_verify {
     RECGUID guid;
     enum tudor_finger finger;
-    bool *retry;
+    enum tudor_capture_retry *retry;
     bool *matches;
 };
 
 struct async_args_identify {
-    bool *retry;
+    enum tudor_capture_retry *retry;
     bool *found_match;
     RECGUID *guid;
     enum tudor_finger *finger;

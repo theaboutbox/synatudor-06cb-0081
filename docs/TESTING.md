@@ -20,7 +20,8 @@ cryptographic context, random generation, RSA key generation/export/signing,
 SHA-1, P-256 key generation, ECDH agreement, and ECDSA signing, including the
 pinned DLL's scalar-only signing-key import and invalid-scalar rejection;
 persistent crypto-registry state; WinUSB access and bounded diagnostic playback; capture
-recovery; native storage calls, lifecycle, and IPC; stable host identity;
+recovery; suppression of internal-restart prompts and cancellation before a
+restart or its ACK; preservation of scan-retry and no-match feedback; native storage calls, lifecycle, and IPC; stable host identity;
 persistent launcher state; the joined pairing-worker and nonnull-strategy
 guard; the host's one-shot vendor-unpair transaction; its resumable
 pending-validation marker, its conditional one-to-zero completion, and its
@@ -94,7 +95,13 @@ enrollments; it is not a proven secure erase of the sensor database.
 11. Delete the enrolled finger, confirm that it no longer matches, and enroll
     it again.
 12. If PAM integration is enabled, test sudo, polkit, the Omarchy lock screen,
-    and password fallback separately.
+    and password fallback separately. For sudo, run `sudo -k` followed by
+    `sudo true` and leave the reader untouched: the initial finger prompt
+    should appear once, internal capture restarts should remain quiet, and
+    the default fingerprint timeout should lead to the password prompt.
+    Repeat with a non-enrolled finger and confirm no-match feedback, then
+    authenticate with the enrolled finger. Startup time and cancellation
+    cleanup can add time outside PAM's 30-second fingerprint wait.
 
 The earlier `06cb:0081` bring-up passed the automated suite with GCC and Clang,
 AddressSanitizer/UndefinedBehaviorSanitizer, and ThreadSanitizer. It also passed

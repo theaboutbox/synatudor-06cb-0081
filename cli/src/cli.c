@@ -152,17 +152,17 @@ void cli_main_loop(struct tudor_device *device) {
                 if(abort_cmd_loop) goto cmdend;
 
                 bool matches;
+                puts("Put your finger on the sensor");
                 while(true) {
                     //Capture and verify sample
-                    puts("Put your finger on the sensor");
-
-                    bool retry;
+                    enum tudor_capture_retry retry;
                     tudor_async_res_t async_res = NULL;
                     if(!tudor_verify(device, guid, TUDOR_FINGER_ANY, &retry, &matches, &async_res) || !wait_capture(async_res, NULL)) {
                         if(async_res) tudor_cleanup_async(async_res);
 
                         if(retry) {
-                            log_warn("Retrying verify capture...");
+                            if(retry == TUDOR_RETRY_SCAN)
+                                puts("Scan unsuccessful. Please try again.");
                             continue;
                         }
 
@@ -179,16 +179,17 @@ void cli_main_loop(struct tudor_device *device) {
                 RECGUID match_guid;
                 enum tudor_finger match_finger;
 
+                puts("Put your finger on the sensor");
                 while(true) {
                     //Capture and identify sample
-                    puts("Put your finger on the sensor");
-                    bool retry;
+                    enum tudor_capture_retry retry;
                     tudor_async_res_t async_res = NULL;
                     if(!tudor_identify(device, &retry, &found_match, &match_guid, &match_finger, &async_res) || !wait_capture(async_res, NULL)) {
                         if(async_res) tudor_cleanup_async(async_res);
 
                         if(retry) {
-                            log_warn("Retrying verify capture...");
+                            if(retry == TUDOR_RETRY_SCAN)
+                                puts("Scan unsuccessful. Please try again.");
                             continue;
                         }
 

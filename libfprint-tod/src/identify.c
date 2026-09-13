@@ -25,6 +25,8 @@ static void clear_identify_print(struct identify_print *print) {
     g_clear_object(&print->record);
 }
 
+static void start_identify_capture(struct identify_params *params);
+
 static void identify_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data) {
     GTask *task = G_TASK(res);
     FpiDeviceTudor *tdev = FPI_DEVICE_TUDOR(src_obj);
@@ -50,6 +52,17 @@ static void identify_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_
             if(!check_ipc_msg_size(msg, sizeof(msg->resp_identify), &error)) {
                 fpi_device_identify_complete(FP_DEVICE(tdev), error);
                 free_identify_params(params);
+                break;
+            }
+
+            /* Internal transport recovery did not acquire a fingerprint.
+             * Keep the same libfprint action and PAM deadline without asking
+             * the user to scan again or consuming an authentication attempt. */
+            if(msg->resp_identify.retry == TUDOR_RETRY_CAPTURE_RESTART) {
+                if(tdev->has_canceled)
+                    recv_ipc_msg(tdev, identify_recv_cb, params);
+                else
+                    start_identify_capture(params);
                 break;
             }
 
@@ -122,14 +135,24 @@ static void identify_acked_cb(GObject *src_obj, GAsyncResult *res, gpointer user
 
     g_debug("Tudor host ACKed identify IPC message");
 
-    //Set ready flag
-    fpi_device_report_finger_status_changes(FP_DEVICE(tdev), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
-
-    //Register cancellation handler
-    register_cancel_handler(tdev);
+    /* Register once for the whole action, including internal restarts. */
+    if(!tdev->cancel_handler_id) {
+        fpi_device_report_finger_status_changes(FP_DEVICE(tdev), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
+        register_cancel_handler(tdev);
+    }
 
     //Start response listener
-    recv_ipc_msg_no_timeout(tdev, identify_recv_cb, user_data);
+    if(tdev->has_canceled)
+        recv_ipc_msg(tdev, identify_recv_cb, user_data);
+    else
+        recv_ipc_msg_no_timeout(tdev, identify_recv_cb, user_data);
+}
+
+static void start_identify_capture(struct identify_params *params) {
+    FpiDeviceTudor *tdev = params->tdev;
+    tdev->send_msg->size = sizeof(enum ipc_msg_type);
+    tdev->send_msg->type = IPC_MSG_IDENTIFY;
+    send_acked_ipc_msg(tdev, tdev->send_msg, identify_acked_cb, params);
 }
 
 static void load_next_print(struct identify_params *params);
@@ -167,9 +190,7 @@ static void load_next_print(struct identify_params *params) {
 
         //Send identify IPC message
         g_debug("Sending tudor identify IPC message...");
-        tdev->send_msg->size = sizeof(enum ipc_msg_type);
-        tdev->send_msg->type = IPC_MSG_IDENTIFY;
-        send_acked_ipc_msg(tdev, tdev->send_msg, identify_acked_cb, params);
+        start_identify_capture(params);
         return;
     }
     struct identify_print *print = &g_array_index(params->prints, struct identify_print, params->next_print_idx);

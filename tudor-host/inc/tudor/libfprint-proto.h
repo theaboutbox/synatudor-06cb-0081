@@ -116,13 +116,15 @@ struct ipc_msg_verify {
 struct ipc_msg_resp_verify {
     enum ipc_msg_type type;
 
-    bool retry, did_match;
+    uint8_t retry; /* enum tudor_capture_retry */
+    bool did_match;
 };
 
 struct ipc_msg_resp_identify {
     enum ipc_msg_type type;
 
-    bool retry, did_match;
+    uint8_t retry; /* enum tudor_capture_retry */
+    bool did_match;
     RECGUID guid;
     enum tudor_finger finger;
 };

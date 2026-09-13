@@ -26,6 +26,30 @@ the operation completes. Run `synatudor-setup` rather than repeatedly invoking
 fprintd commands during first initialization; setup makes at most three bounded
 ordinary attempts and safely restarts the USB session between them.
 
+## Repeated terminal scan prompts
+
+A stalled vendor capture can require an internal transport restart before any
+fingerprint is acquired. These restarts stay within the current verification
+request and do not emit a scan-retry message or repeat the initial finger
+prompt. An acquired but unusable scan still reports the standard retry status;
+a nonmatching fingerprint still reports no match.
+
+Password fallback belongs to PAM. The managed sudo and polkit entries use
+`pam_fprintd.so` with its standard defaults: up to three authentication
+attempts and a 30-second fingerprint timeout. An internal transport restart
+does not start a new PAM attempt or reset that deadline. On timeout or failed
+authentication, the `sufficient` fingerprint module falls through to the
+existing password stack. The lock screen uses its separate password stack.
+`fprintd-verify` and `tudor_cli` are diagnostic tools and do not ask for a
+password.
+
+Rebuild and reinstall the complete driver package to apply this change to the
+host and TOD module together. The installer builds committed sources; commit
+reviewed changes before running `./scripts/install --driver-only`. Automated
+socket fixtures cover repeated restarts, scan failures, matches, no matches,
+and cancellation during recovery;
+terminal prompt behavior and password fallback still need hardware validation.
+
 ## Device missing while pairing is incomplete
 
 The reader can retain pairing that no longer matches private state under

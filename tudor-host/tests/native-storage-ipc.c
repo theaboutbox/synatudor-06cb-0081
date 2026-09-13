@@ -21,6 +21,8 @@ static tudor_async_cb_fnc *pending_callback;
 static void *pending_context;
 static tudor_async_res_t pending_result =
     (tudor_async_res_t) (uintptr_t) 0x1234;
+static enum tudor_capture_retry next_retry;
+static bool complete_immediately;
 
 bool tudor_uses_native_storage(struct tudor_device *device) {
     (void) device;
@@ -81,6 +83,7 @@ void tudor_set_async_callback(tudor_async_res_t result,
     assert(result == pending_result);
     pending_callback = callback;
     pending_context = context;
+    if(complete_immediately) callback(result, false, context);
 }
 
 void tudor_cleanup_async(tudor_async_res_t result) {
@@ -93,29 +96,27 @@ void tudor_cancel_async(tudor_async_res_t result) {
 }
 
 bool tudor_verify(struct tudor_device *device, RECGUID guid,
-                  enum tudor_finger finger, bool *retry, bool *matches,
+                  enum tudor_finger finger, enum tudor_capture_retry *retry, bool *matches,
                   tudor_async_res_t *result) {
     (void) device;
     (void) guid;
     (void) finger;
-    (void) retry;
-    (void) matches;
-    (void) result;
-    assert(false);
-    return false;
+    *retry = next_retry;
+    *matches = false;
+    *result = pending_result;
+    return true;
 }
 
-bool tudor_identify(struct tudor_device *device, bool *retry,
+bool tudor_identify(struct tudor_device *device, enum tudor_capture_retry *retry,
                     bool *found_match, RECGUID *guid,
                     enum tudor_finger *finger, tudor_async_res_t *result) {
     (void) device;
-    (void) retry;
-    (void) found_match;
     (void) guid;
     (void) finger;
-    (void) result;
-    assert(false);
-    return false;
+    *retry = next_retry;
+    *found_match = false;
+    *result = pending_result;
+    return true;
 }
 
 static void *handler_thread(void *arg) {
@@ -199,6 +200,34 @@ int main(void) {
     assert(enroll_response.done);
     assert(enroll_commit_calls == 1);
     assert(add_calls == 0);
+
+    /* Preserve the distinction between a bad scan and internal recovery over
+     * IPC. Immediate completion also checks that the request ACK comes first. */
+    complete_immediately = true;
+    for(next_retry = TUDOR_RETRY_SCAN;
+        next_retry <= TUDOR_RETRY_CAPTURE_RESTART; next_retry++) {
+        struct ipc_msg_verify verify = {
+            .type = IPC_MSG_VERIFY, .guid = enroll.guid, .finger = enroll.finger,
+        };
+        send_packet(sockets[0], &verify, sizeof(verify));
+        expect_ack(sockets[0]);
+        struct ipc_msg_resp_verify verify_response;
+        assert(recv(sockets[0], &verify_response, sizeof(verify_response), 0) ==
+               sizeof(verify_response));
+        assert(verify_response.type == IPC_MSG_RESP_VERIFY);
+        assert(verify_response.retry == next_retry);
+        assert(!verify_response.did_match);
+
+        message = IPC_MSG_IDENTIFY;
+        send_packet(sockets[0], &message, sizeof(message));
+        expect_ack(sockets[0]);
+        struct ipc_msg_resp_identify identify_response;
+        assert(recv(sockets[0], &identify_response, sizeof(identify_response), 0) ==
+               sizeof(identify_response));
+        assert(identify_response.type == IPC_MSG_RESP_IDENTIFY);
+        assert(identify_response.retry == next_retry);
+        assert(!identify_response.did_match);
+    }
 
     message = IPC_MSG_SHUTDOWN;
     send_packet(sockets[0], &message, sizeof(message));

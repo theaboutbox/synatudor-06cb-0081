@@ -14,6 +14,8 @@ static void free_verify_params(struct verify_params *params) {
     g_slice_free(struct verify_params, params);
 }
 
+static void start_verify_capture(struct verify_params *params);
+
 static void verify_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data) {
     GTask *task = G_TASK(res);
     FpiDeviceTudor *tdev = FPI_DEVICE_TUDOR(src_obj);
@@ -39,6 +41,17 @@ static void verify_recv_cb(GObject *src_obj, GAsyncResult *res, gpointer user_da
             if(!check_ipc_msg_size(msg, sizeof(msg->resp_verify), &error)) {
                 fpi_device_verify_complete(FP_DEVICE(tdev), error);
                 free_verify_params(params);
+                break;
+            }
+
+            /* Internal transport recovery did not acquire a fingerprint.
+             * Keep the same libfprint action and PAM deadline without asking
+             * the user to scan again or consuming an authentication attempt. */
+            if(msg->resp_verify.retry == TUDOR_RETRY_CAPTURE_RESTART) {
+                if(tdev->has_canceled)
+                    recv_ipc_msg(tdev, verify_recv_cb, params);
+                else
+                    start_verify_capture(params);
                 break;
             }
 
@@ -84,14 +97,30 @@ static void verify_acked_cb(GObject *src_obj, GAsyncResult *res, gpointer user_d
 
     g_debug("Tudor host ACKed verify IPC message");
 
-    //Set ready flag
-    fpi_device_report_finger_status_changes(FP_DEVICE(tdev), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
-
-    //Register cancellation handler
-    register_cancel_handler(tdev);
+    /* Register once for the whole action, including internal restarts. */
+    if(!tdev->cancel_handler_id) {
+        fpi_device_report_finger_status_changes(FP_DEVICE(tdev), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
+        register_cancel_handler(tdev);
+    }
 
     //Start response listener
-    recv_ipc_msg_no_timeout(tdev, verify_recv_cb, user_data);
+    if(tdev->has_canceled)
+        recv_ipc_msg(tdev, verify_recv_cb, user_data);
+    else
+        recv_ipc_msg_no_timeout(tdev, verify_recv_cb, user_data);
+}
+
+static void start_verify_capture(struct verify_params *params) {
+    FpiDeviceTudor *tdev = params->tdev;
+    //Send verify IPC message
+    g_debug("Sending tudor verify IPC message...");
+    tdev->send_msg->size = sizeof(struct ipc_msg_verify);
+    tdev->send_msg->verify = (struct ipc_msg_verify) {
+        .type = IPC_MSG_VERIFY,
+        .guid = params->guid,
+        .finger = params->finger
+    };
+    send_acked_ipc_msg(tdev, tdev->send_msg, verify_acked_cb, params);
 }
 
 static void verify_load_record_cb(GObject *src_obj, GAsyncResult *res, gpointer user_data) {
@@ -110,15 +139,7 @@ static void verify_load_record_cb(GObject *src_obj, GAsyncResult *res, gpointer 
 
     g_info("Loaded tudor verify record: GUID %08x... finger %d", rec->guid.PartA, rec->finger);
 
-    //Send verify IPC message
-    g_debug("Sending tudor verify IPC message...");
-    tdev->send_msg->size = sizeof(struct ipc_msg_verify);
-    tdev->send_msg->verify = (struct ipc_msg_verify) {
-        .type = IPC_MSG_VERIFY,
-        .guid = params->guid,
-        .finger = params->finger
-    };
-    send_acked_ipc_msg(tdev, tdev->send_msg, verify_acked_cb, params);
+    start_verify_capture(params);
 }
 
 void fpi_device_tudor_verify(FpDevice *dev) {

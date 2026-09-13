@@ -20,10 +20,12 @@ struct handler_state {
         struct {
             RECGUID guid;
             enum tudor_finger finger;
-            bool retry, matches;
+            enum tudor_capture_retry retry;
+            bool matches;
         } verify;
         struct {
-            bool retry, has_match;
+            enum tudor_capture_retry retry;
+            bool has_match;
             RECGUID guid;
             enum tudor_finger finger;
         } identify;
@@ -193,7 +195,7 @@ static void verify_cb(tudor_async_res_t res, bool success, void *context) {
     //Send response
     struct ipc_msg_resp_verify msg = {
         .type = IPC_MSG_RESP_VERIFY,
-        .retry = !success,
+        .retry = state->action.verify.retry,
         .did_match = state->action.verify.matches
     };
     ipc_send_msg(state->ipc_sock, &msg, sizeof(msg));
@@ -226,7 +228,7 @@ static void identify_cb(tudor_async_res_t res, bool success, void *context) {
     //Send response
     struct ipc_msg_resp_identify msg = {
         .type = IPC_MSG_RESP_IDENTIFY,
-        .retry = !success,
+        .retry = state->action.identify.retry,
         .did_match = state->action.identify.has_match,
         .guid = state->action.identify.guid,
         .finger = state->action.identify.finger
@@ -394,10 +396,10 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
                 abort();
             }
             log_debug("Started verify action");
-            tudor_set_async_callback(state->async_res, verify_cb, state);
-
-            //Send ACK
+            /* A completed capture can invoke its callback immediately. The
+             * request ACK must precede its response, including on restarts. */
             send_ack(state->ipc_sock);
+            tudor_set_async_callback(state->async_res, verify_cb, state);
         } break;
 
         case IPC_MSG_IDENTIFY: {
@@ -413,10 +415,10 @@ static inline bool handle_msg(struct handler_state *state, enum ipc_msg_type typ
                 abort();
             }
             log_debug("Started identify action");
-            tudor_set_async_callback(state->async_res, identify_cb, state);
-
-            //Send ACK
+            /* A completed capture can invoke its callback immediately. The
+             * request ACK must precede its response, including on restarts. */
             send_ack(state->ipc_sock);
+            tudor_set_async_callback(state->async_res, identify_cb, state);
         } break;
 
         default: {

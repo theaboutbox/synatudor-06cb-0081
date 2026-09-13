@@ -46,3 +46,20 @@ cleanup_test = executable('tudor-host-cleanup-test',
 )
 test('tudor-host-cleanup', cleanup_test, timeout: 15,
      env: ['GIO_USE_VFS=local'])
+
+capture_prompts_src = ['tests/capture-prompts.c']
+foreach source : tudor_tod_src
+    if source != 'src/verify.c' and source != 'src/identify.c'
+        capture_prompts_src += source
+    endif
+endforeach
+capture_prompts_test = executable('tudor-capture-prompts-test',
+    sources: capture_prompts_src,
+    c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
+    dependencies: [libfprint_tod_dep, dependency('libfprint-2'),
+                   libusb_dep, gusb_dep, json_glib_dep],
+    include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],
+    install: false,
+)
+test('tudor-capture-prompts', capture_prompts_test, timeout: 20,
+     env: ['GIO_USE_VFS=local'])
