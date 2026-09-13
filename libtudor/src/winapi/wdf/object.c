@@ -89,6 +89,7 @@ void wdf_cleanup_obj(struct wdf_object *obj) {
     cant_fail_ret(pthread_mutex_unlock(&obj->contexts_lock));
 
     //Free memory
+    cant_fail_ret(pthread_mutex_destroy(&obj->contexts_lock));
     cant_fail_ret(pthread_mutex_destroy(&obj->evtqueue_lock));
 }
 
@@ -103,7 +104,12 @@ void wdf_destroy_obj_list(struct wdf_object_list *list) {
     cant_fail_ret(pthread_rwlock_wrlock(&list->lock));
 
     list->dead = true;
-    while(list->head) winwdf_destroy_object(list->head);
+    while(list->head) {
+        struct wdf_object *obj = list->head;
+        list->head = obj->next;
+        /* A dead list is already locked; child cleanup cannot unlink itself. */
+        winwdf_destroy_object(obj);
+    }
 
     cant_fail_ret(pthread_rwlock_unlock(&list->lock));
 

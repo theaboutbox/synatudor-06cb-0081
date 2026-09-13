@@ -1,6 +1,11 @@
 #include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <limits.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <libusb.h>
@@ -24,6 +29,26 @@ extern __winfnc BOOL WinUsb_WritePipe(HANDLE interface_handle, UCHAR pipe_id,
                                       PUCHAR buffer, ULONG buffer_length,
                                       PULONG length_transferred,
                                       LPOVERLAPPED overlapped);
+
+extern __winfnc BOOL WinUsb_SetPipePolicy(HANDLE, UCHAR, ULONG, ULONG, PVOID);
+extern __winfnc BOOL WinUsb_GetPipePolicy(HANDLE, UCHAR, ULONG, PULONG, PVOID);
+extern __winfnc BOOL WinUsb_AbortPipe(HANDLE, UCHAR);
+extern __winfnc DWORD GetLastError(void);
+typedef struct {
+    UCHAR request_type, request;
+    USHORT value, index, length;
+} setup_packet;
+extern __winfnc BOOL WinUsb_ControlTransfer(HANDLE, setup_packet, PUCHAR,
+                                            ULONG, PULONG, LPOVERLAPPED);
+
+static int transfer_status;
+static int partial_bytes;
+static unsigned int last_timeout;
+static int interrupt_calls;
+static bool block_transfer;
+static pthread_mutex_t transfer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t transfer_cond = PTHREAD_COND_INITIALIZER;
+static bool transfer_started;
 
 static unsigned char fake_handle_storage;
 static unsigned char fake_device_storage;
@@ -63,6 +88,12 @@ static int claim_sequence;
 static void reset_fakes(void)
 {
     memset(&calls, 0, sizeof(calls));
+    transfer_status = LIBUSB_SUCCESS;
+    partial_bytes = 0;
+    last_timeout = 0;
+    interrupt_calls = 0;
+    block_transfer = false;
+    transfer_started = false;
     descriptor_vendor = 0x06cb;
     descriptor_product = 0x0081;
     active_configuration = 1;
@@ -204,21 +235,46 @@ libusb_error_name(int error_code)
     return "fake libusb error";
 }
 
+static int fake_transfer(unsigned char endpoint, unsigned char *data,
+                         int length, int *transferred, unsigned int timeout) {
+    last_timeout = timeout;
+    if(block_transfer) {
+        assert(pthread_mutex_lock(&transfer_lock) == 0);
+        transfer_started = true;
+        assert(pthread_cond_broadcast(&transfer_cond) == 0);
+        assert(pthread_mutex_unlock(&transfer_lock) == 0);
+        usleep(timeout * 1000U);
+    }
+    *transferred = transfer_status == LIBUSB_SUCCESS ? length : partial_bytes;
+    assert(*transferred <= length);
+    if(endpoint & LIBUSB_ENDPOINT_IN)
+        memset(data, 0xa5, (size_t)*transferred);
+    if(partial_bytes) {
+        partial_bytes = 0;
+        transfer_status = LIBUSB_SUCCESS;
+        return LIBUSB_ERROR_TIMEOUT;
+    }
+    return transfer_status;
+}
+
 int LIBUSB_CALL
 libusb_bulk_transfer(libusb_device_handle *handle, unsigned char endpoint,
                      unsigned char *data, int length, int *transferred,
-                     unsigned int timeout)
-{
+                     unsigned int timeout) {
     assert(handle == FAKE_USB_HANDLE);
     assert(endpoint == 0x01 || endpoint == 0x81);
-    assert(data != NULL);
-    assert(length == 32);
-    assert(timeout == 1000);
     calls.bulk_transfer++;
+    return fake_transfer(endpoint, data, length, transferred, timeout);
+}
 
-    if(endpoint == 0x81) memset(data, 0xa5, (size_t)length);
-    *transferred = length;
-    return LIBUSB_SUCCESS;
+int LIBUSB_CALL
+libusb_interrupt_transfer(libusb_device_handle *handle, unsigned char endpoint,
+                          unsigned char *data, int length, int *transferred,
+                          unsigned int timeout) {
+    assert(handle == FAKE_USB_HANDLE);
+    assert(endpoint == 0x83 || endpoint == 0x84);
+    interrupt_calls++;
+    return fake_transfer(endpoint, data, length, transferred, timeout);
 }
 
 int LIBUSB_CALL
@@ -234,8 +290,9 @@ libusb_control_transfer(libusb_device_handle *handle, uint8_t request_type,
     assert(index == 0);
     assert(data != NULL);
     assert(length == 32);
-    assert(timeout == 1000);
+    assert(timeout == 1000 || timeout == 10000);
     calls.control_transfer++;
+    if(transfer_status != LIBUSB_SUCCESS) return transfer_status;
 
     memset(data, 0x3c, length);
     return length;
@@ -376,9 +433,154 @@ static void test_winusb_io_with_small_stack(void)
     assert(WinUsb_Free(interface_handle) == TRUE);
 }
 
-int main(void)
+static void test_transfer_errors_and_bounds(void) {
+    reset_fakes();
+    HANDLE handle = initialize_borrowed();
+    unsigned char data[32] = {0};
+    ULONG count = 123;
+    transfer_status = LIBUSB_ERROR_NO_DEVICE;
+    assert(!WinUsb_ReadPipe(handle, 0x81, data, sizeof(data), &count, NULL));
+    assert(GetLastError() == 1167 && count == 0);
+    assert(!WinUsb_WritePipe(handle, 0x01, data, sizeof(data), &count, NULL));
+    assert(GetLastError() == 1167);
+    assert(!WinUsb_GetDescriptor(handle, 1, 0, 0, data, sizeof(data), &count));
+    assert(GetLastError() == 1167 && count == 0);
+    int old_calls = calls.bulk_transfer;
+    assert(!WinUsb_ReadPipe(handle, 0x81, data, UINT_MAX, &count, NULL));
+    assert(!WinUsb_ReadPipe(handle, 0x01, data, sizeof(data), &count, NULL));
+    assert(!WinUsb_WritePipe(handle, 0x81, data, sizeof(data), &count, NULL));
+    assert(!WinUsb_ReadPipe(handle, 0x81, NULL, sizeof(data), &count, NULL));
+    assert(calls.bulk_transfer == old_calls);
+    assert(!WinUsb_GetDescriptor(handle, 1, 0, 0, data, 65536, &count));
+    transfer_status = LIBUSB_SUCCESS;
+    assert(WinUsb_ReadPipe(handle, 0x81, data, sizeof(data), NULL, NULL));
+    assert(WinUsb_WritePipe(handle, 0x01, data, sizeof(data), NULL, NULL));
+    assert(WinUsb_Free(handle));
+}
+
+static void test_policy_and_deadline(void) {
+    reset_fakes();
+    HANDLE handle = initialize_borrowed();
+    DWORD timeout = 20, result = 0;
+    ULONG size = sizeof(result);
+    assert(!WinUsb_SetPipePolicy(handle, 0x83, 3, 1, &timeout));
+    assert(!WinUsb_SetPipePolicy(handle, 0x83, 3, sizeof(timeout), NULL));
+    assert(WinUsb_SetPipePolicy(handle, 0x83, 3, sizeof(timeout), &timeout));
+    size = 1;
+    assert(!WinUsb_GetPipePolicy(handle, 0x83, 3, &size, &result));
+    assert(size == sizeof(result));
+    assert(WinUsb_GetPipePolicy(handle, 0x83, 3, &size, &result));
+    assert(result == timeout);
+    transfer_status = LIBUSB_ERROR_TIMEOUT;
+    block_transfer = true;
+    unsigned char data[8];
+    ULONG count = 123;
+    assert(!WinUsb_ReadPipe(handle, 0x83, data, sizeof(data), &count, NULL));
+    assert(GetLastError() == 121 && count == 0);
+    assert(last_timeout <= 20 && interrupt_calls <= 2);
+    assert(WinUsb_Free(handle));
+}
+
+struct cancel_context { HANDLE handle; UCHAR pipe; DWORD error; };
+static void *read_until_cancelled(void *opaque) {
+    struct cancel_context *ctx = opaque;
+    unsigned char data[8];
+    ULONG count = 99;
+    assert(!WinUsb_ReadPipe(ctx->handle, ctx->pipe, data, sizeof(data), &count, NULL));
+    ctx->error = GetLastError();
+    assert(count == 0);
+    return NULL;
+}
+
+static void test_cancellation(UCHAR pipe) {
+    reset_fakes();
+    HANDLE handle = initialize_borrowed();
+    transfer_status = LIBUSB_ERROR_TIMEOUT;
+    block_transfer = true;
+    struct cancel_context ctx = { .handle = handle, .pipe = pipe };
+    pthread_t reader;
+    assert(pthread_create(&reader, NULL, read_until_cancelled, &ctx) == 0);
+    assert(pthread_mutex_lock(&transfer_lock) == 0);
+    while(!transfer_started)
+        assert(pthread_cond_wait(&transfer_cond, &transfer_lock) == 0);
+    assert(pthread_mutex_unlock(&transfer_lock) == 0);
+    assert(WinUsb_AbortPipe(handle, pipe));
+    assert(pthread_join(reader, NULL) == 0);
+    assert(ctx.error == 995);
+    assert(WinUsb_AbortPipe(handle, pipe)); /* idle abort is harmless */
+    transfer_status = LIBUSB_SUCCESS;
+    block_transfer = false;
+    unsigned char data[8];
+    ULONG count;
+    assert(WinUsb_ReadPipe(handle, pipe, data, sizeof(data), &count, NULL));
+    assert(count == sizeof(data)); /* next request is not poisoned */
+    assert(WinUsb_Free(handle));
+}
+
+static void test_partial_timeout(void) {
+    reset_fakes();
+    HANDLE handle = initialize_borrowed();
+    unsigned char data[32] = {0};
+    ULONG count = 0;
+    transfer_status = LIBUSB_ERROR_TIMEOUT;
+    partial_bytes = 7;
+    assert(WinUsb_ReadPipe(handle, 0x81, data, sizeof(data), &count, NULL));
+    assert(calls.bulk_transfer == 2 && count == sizeof(data));
+    for(size_t i = 0; i < sizeof(data); i++) assert(data[i] == 0xa5);
+    assert(WinUsb_Free(handle));
+}
+
+static void test_control_transfer(void) {
+    reset_fakes();
+    HANDLE handle = initialize_borrowed();
+    unsigned char data[32];
+    setup_packet setup = {LIBUSB_ENDPOINT_IN, LIBUSB_REQUEST_GET_DESCRIPTOR,
+                          0x0100, 0, sizeof(data)};
+    assert(WinUsb_ControlTransfer(handle, setup, data, sizeof(data), NULL, NULL));
+    assert(calls.control_transfer == 1);
+    ULONG count = 99;
+    assert(!WinUsb_ControlTransfer(handle, setup, data, sizeof(data) - 1, &count, NULL));
+    assert(count == 0 && calls.control_transfer == 1);
+    transfer_status = LIBUSB_ERROR_TIMEOUT;
+    assert(!WinUsb_ControlTransfer(handle, setup, data, sizeof(data), &count, NULL));
+    assert(GetLastError() == 121 && count == 0);
+    assert(WinUsb_Free(handle));
+}
+
+int main(int argc, char **argv)
 {
     tudor_set_usb_device(FAKE_USB_HANDLE);
+    if(argc == 2 && strcmp(argv[1], "--benchmark-control") == 0) {
+        reset_fakes();
+        HANDLE handle = initialize_borrowed();
+        unsigned char data[32];
+        ULONG count;
+        setup_packet setup = {LIBUSB_ENDPOINT_IN, LIBUSB_REQUEST_GET_DESCRIPTOR,
+                              0x0100, 0, sizeof(data)};
+        struct timespec before, after;
+        assert(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
+        for(unsigned int i = 0; i < 4; i++)
+            assert(WinUsb_ControlTransfer(handle, setup, data, sizeof(data), &count, NULL));
+        assert(clock_gettime(CLOCK_MONOTONIC, &after) == 0);
+        printf("Four mocked control transfers: %.3f ms\n",
+            (after.tv_sec - before.tv_sec) * 1000.0 +
+            (after.tv_nsec - before.tv_nsec) / 1000000.0);
+        assert(WinUsb_Free(handle));
+        return 0;
+    }
+    /* Old USB error paths called exit(0), which can falsely pass a test.
+     * Require the child to reach the end of the checks explicitly. */
+    pid_t child = fork();
+    assert(child >= 0);
+    if(child == 0) { test_transfer_errors_and_bounds(); _exit(77); }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 77);
+    test_policy_and_deadline();
+    test_cancellation(0x83);
+    test_cancellation(0x81);
+    test_partial_timeout();
+    test_control_transfer();
     test_active_configuration();
     test_configuration_change();
     test_rejects_unexpected_device();

@@ -1,11 +1,15 @@
 #include <stdlib.h>
 #include "internal.h"
 
+/* Registration, completion, and cleanup may run on different threads. Never
+ * publish callback completion while another path can still touch its record. */
+static pthread_mutex_t overlapped_lock = PTHREAD_MUTEX_INITIALIZER;
+
 struct winfile_op {
     struct winfile *file;
     void *op_ctx;
+    unsigned int refs;
 
-    volatile NTSTATUS cb_status;
     winio_overlapped_cb_fnc *cb_fnc;
     void *cb_ctx;
     bool cb_new_thread;
@@ -28,8 +32,8 @@ static inline bool init_overlapped(OVERLAPPED *ovlp, struct winfile *file, void 
     *op = (struct winfile_op) {
         .file = file,
         .op_ctx = NULL,
+        .refs = 1,
 
-        .cb_status = STATUS_PENDING,
         .cb_fnc = NULL,
         .cb_ctx = NULL
     };
@@ -40,7 +44,7 @@ static inline bool init_overlapped(OVERLAPPED *ovlp, struct winfile *file, void 
     ovlp->Pointer = op;
 
     if(!ovlp->hEvent) ovlp->hEvent = win_create_event(NULL, false, false);
-    if(!ovlp->hEvent) { free(op); return false; }
+    if(!ovlp->hEvent) { ovlp->Pointer = NULL; free(op); return false; }
     win_reset_event(ovlp->hEvent);
 
     return true;
@@ -81,80 +85,81 @@ static inline void call_overlapped_cb(OVERLAPPED *ovlp, NTSTATUS status, winio_o
 //<< END CODE >>
 
 void winio_set_overlapped_callback(OVERLAPPED *ovlp, winio_overlapped_cb_fnc *cb, void *ctx, bool new_thread) {
-    struct winfile_op *op = (struct winfile_op*) ovlp->Pointer;
-    if(!op) {
-        call_overlapped_cb(ovlp, (NTSTATUS) ovlp->Internal, cb, ctx, new_thread);
-        return;
+    cant_fail_ret(pthread_mutex_lock(&overlapped_lock));
+    struct winfile_op *op = (struct winfile_op*)ovlp->Pointer;
+    NTSTATUS status = (NTSTATUS)__atomic_load_n(&ovlp->Internal, __ATOMIC_ACQUIRE);
+    if(op && status == STATUS_PENDING) {
+        op->cb_fnc = cb;
+        op->cb_ctx = ctx;
+        op->cb_new_thread = new_thread;
+        cb = NULL;
     }
+    cant_fail_ret(pthread_mutex_unlock(&overlapped_lock));
+    if(cb) call_overlapped_cb(ovlp, status, cb, ctx, new_thread);
+}
 
-    op->cb_ctx = ctx;
-    op->cb_new_thread = new_thread;
-    __atomic_store_n(&op->cb_fnc, cb, __ATOMIC_RELEASE);
-
-    NTSTATUS status = __atomic_load_n(&op->cb_status, __ATOMIC_ACQUIRE);
-    if(status != STATUS_PENDING) {
-        cb = __atomic_exchange_n(&op->cb_fnc, NULL, __ATOMIC_ACQ_REL);
-        if(cb) call_overlapped_cb(ovlp, status, cb, ctx, new_thread);
-    }
+static void release_overlapped_op(struct winfile_op *op, OVERLAPPED *ovlp) {
+    if(__atomic_sub_fetch(&op->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    if(op->op_ctx && op->file->cleanup_fnc)
+        op->file->cleanup_fnc(op->file->ctx, ovlp, op->op_ctx);
+    free(op);
 }
 
 void winio_cancel_overlapped(OVERLAPPED *ovlp) {
-    if(ovlp->Internal != STATUS_PENDING) {
+    if(__atomic_load_n(&ovlp->Internal, __ATOMIC_ACQUIRE) != STATUS_PENDING) {
         winio_cleanup_overlapped(ovlp);
         return;
     }
 
-    struct winfile_op *op = (struct winfile_op*) ovlp->Pointer;
-    if(op && op->op_ctx && op->file->cancel_fnc) {
-        op->file->cancel_fnc(op->file->ctx, ovlp, op->op_ctx);
+    cant_fail_ret(pthread_mutex_lock(&overlapped_lock));
+    struct winfile_op *op = (struct winfile_op*)ovlp->Pointer;
+    if(op) __atomic_add_fetch(&op->refs, 1, __ATOMIC_RELAXED);
+    cant_fail_ret(pthread_mutex_unlock(&overlapped_lock));
+    if(op) {
+        if(op->op_ctx && op->file->cancel_fnc)
+            op->file->cancel_fnc(op->file->ctx, ovlp, op->op_ctx);
+        release_overlapped_op(op, ovlp);
     }
 
     winio_wait_overlapped(ovlp, NULL);
 }
 
 void winio_complete_overlapped(OVERLAPPED *ovlp, NTSTATUS status, size_t num_transfered) {
-    /* Claim the callback before publishing completion: as soon as the event
-     * is set, a thread blocked in winio_wait_overlapped() may clean up and
-     * free the operation record, so it must not be touched afterwards. */
-    struct winfile_op *op = (struct winfile_op*) ovlp->Pointer;
-    winio_overlapped_cb_fnc *cb = NULL;
-    void *cb_ctx = NULL;
-    bool cb_new_thread = false;
-    if(op) {
-        __atomic_store_n(&op->cb_status, status, __ATOMIC_RELEASE);
-        cb = __atomic_exchange_n(&op->cb_fnc, NULL, __ATOMIC_ACQ_REL);
-        if(cb) {
-            cb_ctx = op->cb_ctx;
-            cb_new_thread = op->cb_new_thread;
-        }
-    }
+    cant_fail_ret(pthread_mutex_lock(&overlapped_lock));
+    struct winfile_op *op = (struct winfile_op*)ovlp->Pointer;
+    winio_overlapped_cb_fnc *cb = op ? op->cb_fnc : NULL;
+    void *cb_ctx = op ? op->cb_ctx : NULL;
+    bool cb_new_thread = cb && op->cb_new_thread;
+    if(op) op->cb_fnc = NULL;
 
-    //Complete overlapped
-    ovlp->Internal = status;
-    if(status == STATUS_SUCCESS) ovlp->InternalHigh = num_transfered;
+    ovlp->InternalHigh = status == STATUS_SUCCESS ? num_transfered : 0;
+    __atomic_store_n(&ovlp->Internal, status, __ATOMIC_RELEASE);
     if(ovlp->hEvent) win_set_event(ovlp->hEvent);
+    cant_fail_ret(pthread_mutex_unlock(&overlapped_lock));
 
-    //Call callback
+    /* The callback is allowed to clean up the operation. Use only snapshots
+     * from here, and never invoke user code under overlapped_lock. */
     if(cb) call_overlapped_cb(ovlp, status, cb, cb_ctx, cb_new_thread);
 }
 
 NTSTATUS winio_wait_overlapped(OVERLAPPED *ovlp, size_t *num_transfered) {
     //Wait for the operation to be completed
-    if(ovlp->Internal == STATUS_PENDING) win_wait_sync_obj(ovlp->hEvent, INFINITE);
+    if(__atomic_load_n(&ovlp->Internal, __ATOMIC_ACQUIRE) == STATUS_PENDING) win_wait_sync_obj(ovlp->hEvent, INFINITE);
 
-    NTSTATUS status = (NTSTATUS) ovlp->Internal;
+    NTSTATUS status = (NTSTATUS)__atomic_load_n(&ovlp->Internal, __ATOMIC_ACQUIRE);
     if(status == STATUS_SUCCESS && num_transfered) *num_transfered = ovlp->InternalHigh;
     winio_cleanup_overlapped(ovlp);
     return status;
 }
 
-inline void winio_cleanup_overlapped(OVERLAPPED *ovlp) {
-    struct winfile_op *op = (struct winfile_op*) ovlp->Pointer;
-    if(!op) return;
+void winio_cleanup_overlapped(OVERLAPPED *ovlp) {
+    cant_fail_ret(pthread_mutex_lock(&overlapped_lock));
+    struct winfile_op *op = (struct winfile_op*)ovlp->Pointer;
     ovlp->Pointer = NULL;
+    cant_fail_ret(pthread_mutex_unlock(&overlapped_lock));
+    if(!op) return;
 
-    if(op->op_ctx && op->file->cleanup_fnc) op->file->cleanup_fnc(op->file->ctx, ovlp, op->op_ctx);
-    free(op);
+    release_overlapped_op(op, ovlp);
 }
 
 static void file_destr(void *data) {
@@ -192,16 +197,16 @@ WINAPI(CancelIoEx)
 
 __winfnc BOOL GetOverlappedResult(HANDLE file, OVERLAPPED *ovlp, DWORD *num_transfered, BOOL wait) {
     TRACE();
-    if(ovlp->Internal == STATUS_PENDING && !wait) return FALSE;
+    if(__atomic_load_n(&ovlp->Internal, __ATOMIC_ACQUIRE) == STATUS_PENDING && !wait) return FALSE;
 
-    size_t sz;
+    size_t sz = 0;
     NTSTATUS status = winio_wait_overlapped(ovlp, &sz);
     if(status != STATUS_SUCCESS) {
         winerr_set_code(status);
         return FALSE;
     }
 
-    *num_transfered = (DWORD) sz;
+    if(num_transfered) *num_transfered = (DWORD)sz;
     return TRUE;
 }
 WINAPI(GetOverlappedResult)
@@ -223,7 +228,12 @@ __winfnc BOOL ReadFile(HANDLE handle, void *buf, DWORD buf_size, DWORD *num_read
     //Start the operation
     NTSTATUS status = file->read_fnc(file->ctx, ovlp, off, buf, buf_size, op_ctx);
     winerr_set_code(status);
-    if(status != STATUS_SUCCESS) return FALSE;
+    if(status != STATUS_SUCCESS) {
+        winio_complete_overlapped(ovlp, status, 0);
+        winio_cleanup_overlapped(ovlp);
+        if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+        return FALSE;
+    }
 
     if(file->is_async) {
         winerr_set_code(ERROR_IO_PENDING);
@@ -231,7 +241,9 @@ __winfnc BOOL ReadFile(HANDLE handle, void *buf, DWORD buf_size, DWORD *num_read
     }
 
     //Wait for the operation to complete
-    return GetOverlappedResult(handle, ovlp, num_read, TRUE);
+    BOOL success = GetOverlappedResult(handle, ovlp, num_read, TRUE);
+    if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+    return success;
 }
 WINAPI(ReadFile)
 
@@ -252,7 +264,12 @@ __winfnc BOOL WriteFile(HANDLE handle, const void *buf, DWORD buf_size, DWORD *n
     //Start the operation
     NTSTATUS status = file->write_fnc(file->ctx, ovlp, off, buf, buf_size, op_ctx);
     winerr_set_code(status);
-    if(status != STATUS_SUCCESS) return FALSE;
+    if(status != STATUS_SUCCESS) {
+        winio_complete_overlapped(ovlp, status, 0);
+        winio_cleanup_overlapped(ovlp);
+        if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+        return FALSE;
+    }
 
     if(file->is_async) {
         winerr_set_code(ERROR_IO_PENDING);
@@ -260,7 +277,9 @@ __winfnc BOOL WriteFile(HANDLE handle, const void *buf, DWORD buf_size, DWORD *n
     }
 
     //Wait for the operation to complete
-    return GetOverlappedResult(handle, ovlp, num_written, TRUE);
+    BOOL success = GetOverlappedResult(handle, ovlp, num_written, TRUE);
+    if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+    return success;
 }
 WINAPI(WriteFile)
 
@@ -280,7 +299,12 @@ __winfnc BOOL DeviceIoControl(HANDLE handle, DWORD code, const void *in_buf, DWO
     //Start the operation
     NTSTATUS status = file->devctrl_fnc(file->ctx, ovlp, code, in_buf, in_size, out_buf, out_size, op_ctx);
     winerr_set_code(status);
-    if(status != STATUS_SUCCESS) return FALSE;
+    if(status != STATUS_SUCCESS) {
+        winio_complete_overlapped(ovlp, status, 0);
+        winio_cleanup_overlapped(ovlp);
+        if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+        return FALSE;
+    }
 
     if(file->is_async) {
         winerr_set_code(ERROR_IO_PENDING);
@@ -288,7 +312,9 @@ __winfnc BOOL DeviceIoControl(HANDLE handle, DWORD code, const void *in_buf, DWO
     }
 
     //Wait for the operation to complete
-    return GetOverlappedResult(handle, ovlp, out_ret, TRUE);
+    BOOL success = GetOverlappedResult(handle, ovlp, out_ret, TRUE);
+    if(ovlp == &lovlp) winhandle_destroy(ovlp->hEvent);
+    return success;
 }
 WINAPI(DeviceIoControl)
 

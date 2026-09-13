@@ -34,6 +34,9 @@ struct tudor_state_load_request {
     uint32_t type;
     char state_id[TUDOR_STATE_ID_SIZE + 1];
     char name[TUDOR_STATE_PROPERTY_NAME_SIZE + 1];
+    /* Name the existing ABI padding so aggregate initialization also clears
+     * these bytes before a request crosses the sandbox boundary. */
+    uint8_t reserved[2];
 };
 
 struct tudor_state_load_response {
@@ -48,6 +51,9 @@ struct tudor_state_store_request {
     uint32_t type;
     char state_id[TUDOR_STATE_ID_SIZE + 1];
     char name[TUDOR_STATE_PROPERTY_NAME_SIZE + 1];
+    /* Name the existing ABI padding so aggregate initialization also clears
+     * these bytes before a request crosses the sandbox boundary. */
+    uint8_t reserved[2];
     uint32_t value_type;
     uint8_t data[];
 };

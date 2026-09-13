@@ -53,6 +53,7 @@ typedef struct {
 })
 
 #define ERROR_INVALID_PARAMETER                            87
+#define ERROR_INVALID_DATA                                 13
 #define ERROR_GEN_FAILURE                                  31
 #define ERROR_NO_MORE_ITEMS                                259
 #define NTE_BAD_FLAGS                                      0x80090009

@@ -9,6 +9,8 @@
 #define WIN32_NO_STATUS
 #include "windef.h"
 #include "bcrypt.h"
+#include "winbase.h"
+#include "wincrypt.h"
 
 extern void *resolve_windows_api( const char *name );
 NTSTATUS WINAPI BCryptExportKey( BCRYPT_KEY_HANDLE, BCRYPT_KEY_HANDLE, LPCWSTR,
@@ -115,6 +117,108 @@ static void test_component_padding(void)
     assert(!cryptbridge_copy_be_component(dst, sizeof(dst), &datum));
 }
 
+static void test_signature_leading_zeros(void)
+{
+    /* Public test key d=1, hash bytes 1..32, ECDSA nonces 379 and 544.
+     * Independently verified with OpenSSL pkeyutl. Each signature has an
+     * leading zero in one fixed-width CNG component. Decoding the shorter
+     * DER integer must leave its backing P-256 storage zero-padded. */
+    struct {
+        BCRYPT_ECCKEY_BLOB header;
+        UCHAR coordinates[64];
+    } public_blob = {{BCRYPT_ECDSA_PUBLIC_P256_MAGIC, 32}, {
+        0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47,
+        0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
+        0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0,
+        0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96,
+        0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b,
+        0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
+        0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce,
+        0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5,
+    }};
+    UCHAR signatures[2][64] = {{
+        0x00, 0x55, 0x43, 0x89, 0x4a, 0xf3, 0xd0, 0x0e,
+        0xd7, 0xd7, 0x40, 0xab, 0xdb, 0xd7, 0x5c, 0x96,
+        0xb0, 0x68, 0x77, 0xb7, 0x87, 0xdb, 0x5f, 0x70,
+        0xee, 0xa7, 0x8b, 0x90, 0xa8, 0xd7, 0xc0, 0x0a,
+        0xd2, 0x12, 0x77, 0xbd, 0x5b, 0x65, 0xfa, 0x7d,
+        0xd7, 0x63, 0xe3, 0x27, 0xa9, 0x7a, 0xdd, 0x28,
+        0xc0, 0xab, 0x9f, 0x76, 0x0a, 0x8a, 0x39, 0x70,
+        0xd6, 0x33, 0xa6, 0x25, 0x86, 0x00, 0x46, 0x63,
+    }, {
+        0xab, 0x23, 0x7d, 0x75, 0x3c, 0xd6, 0x70, 0x20,
+        0x71, 0x9d, 0xfc, 0x3d, 0xb5, 0x6d, 0xb6, 0x6c,
+        0x85, 0xe3, 0x6a, 0xbf, 0x34, 0xab, 0xc5, 0x56,
+        0x69, 0x61, 0x20, 0x95, 0xae, 0xbd, 0x60, 0x60,
+        0x00, 0x51, 0x02, 0x96, 0xcf, 0xa6, 0x85, 0xdd,
+        0xb8, 0xb2, 0x30, 0xf4, 0x5e, 0xf2, 0x1c, 0x20,
+        0xb3, 0x19, 0xdc, 0xef, 0xea, 0xf5, 0x88, 0x67,
+        0xbb, 0x88, 0xb2, 0x76, 0x71, 0xc9, 0x58, 0x3c,
+    }};
+    /* libtudor uses unsigned BOOL; match its actual function type. */
+    typedef DWORD (WINAPI *Encode)(DWORD, LPCSTR, void *, BYTE *, DWORD *);
+    typedef DWORD (WINAPI *Decode)(DWORD, LPCSTR, const BYTE *, DWORD,
+                                  DWORD, void *, DWORD *);
+    Encode encode = (Encode)resolve_windows_api("CryptEncodeObject");
+    Decode decode = (Decode)resolve_windows_api("CryptDecodeObject");
+    assert(encode && decode);
+    UCHAR hash[32], malformed[65] = {0};
+    BCRYPT_ALG_HANDLE algorithm;
+    BCRYPT_KEY_HANDLE key;
+    for(size_t i = 0; i < sizeof(hash); ++i) hash[i] = i + 1;
+    assert(!BCryptOpenAlgorithmProvider(&algorithm,
+        BCRYPT_ECDSA_P256_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0));
+    assert(!BCryptImportKeyPair(algorithm, NULL, BCRYPT_ECCPUBLIC_BLOB,
+        &key, (UCHAR *)&public_blob, sizeof(public_blob), 0));
+    for(size_t i = 0; i < 2; ++i) {
+        UCHAR little_r[32], little_s[32], der[80], expanded[64];
+        for(size_t j = 0; j < 32; ++j) {
+            little_r[j] = signatures[i][31 - j];
+            little_s[j] = signatures[i][63 - j];
+        }
+        CERT_ECC_SIGNATURE input = {{32, little_r}, {32, little_s}};
+        DWORD der_size = sizeof(der), decoded_size = 0;
+        assert(encode(X509_ASN_ENCODING, X509_ECC_SIGNATURE, &input,
+                      der, &der_size));
+        assert(decode(X509_ASN_ENCODING, X509_ECC_SIGNATURE, der,
+                      der_size, 0, NULL, &decoded_size));
+        /* The pinned PAL copies 32 bytes from each pbData regardless of
+         * cbData. Reserve and zero-pad each component independently. */
+        assert(decoded_size >= sizeof(CERT_ECC_SIGNATURE) + 64);
+        CERT_ECC_SIGNATURE *decoded = malloc(decoded_size);
+        assert(decoded);
+        memset(decoded, 0xa5, decoded_size);
+        DWORD small_size = sizeof(*decoded);
+        assert(!decode(X509_ASN_ENCODING, X509_ECC_SIGNATURE, der,
+                       der_size, 0, decoded, &small_size));
+        assert(small_size == decoded_size);
+        assert(decode(X509_ASN_ENCODING, X509_ECC_SIGNATURE, der,
+                      der_size, 0, decoded, &decoded_size));
+        assert(decoded->r.cbData == (i == 0 ? 31 : 32));
+        assert(decoded->s.cbData == (i == 1 ? 31 : 32));
+        assert(decoded->r.pbData + 32 <= decoded->s.pbData);
+        assert(decoded->s.pbData + 32 <= (UCHAR *)decoded + decoded_size);
+        for(size_t j = 0; j < 32; ++j) {
+            expanded[j] = decoded->r.pbData[31 - j];
+            expanded[32 + j] = decoded->s.pbData[31 - j];
+        }
+        assert(!memcmp(expanded, signatures[i], sizeof(expanded)));
+        free(decoded);
+        assert(!BCryptVerifySignature(key, NULL, hash, sizeof(hash),
+            signatures[i], sizeof(signatures[i]), 0));
+        hash[0] ^= 1;
+        assert(BCryptVerifySignature(key, NULL, hash, sizeof(hash),
+            signatures[i], sizeof(signatures[i]), 0) == STATUS_INVALID_SIGNATURE);
+        hash[0] ^= 1;
+    }
+    const ULONG lengths[] = {1, 63, 65};
+    for(size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i)
+        assert(BCryptVerifySignature(key, NULL, hash, sizeof(hash),
+            malformed, lengths[i], 0) == STATUS_INVALID_SIGNATURE);
+    assert(!BCryptDestroyKey(key));
+    assert(!BCryptCloseAlgorithmProvider(algorithm, 0));
+}
+
 static void test_random(void)
 {
     BCRYPT_ALG_HANDLE algorithm;
@@ -206,6 +310,7 @@ int main(void)
     unsigned int i;
 
     test_component_padding();
+    test_signature_leading_zeros();
     test_random();
     test_tls_prf_known_answer();
 

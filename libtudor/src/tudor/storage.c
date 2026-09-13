@@ -53,7 +53,7 @@ static int tudor_wipe_native_records(struct tudor_device *device,
     WINBIO_IDENTITY identity = {0};
     if(guid) {
         identity.Type = WINBIO_ID_TYPE_GUID;
-        identity.TemplateGuid = *(GUID*) (void*) guid;
+        identity.TemplateGuid = winbio_guid(*guid);
     } else {
         /* This is the wildcard cookie used by the 0081 vendor storage
          * adapter.  A zero Wildcard value is rejected by its delete path. */
@@ -124,7 +124,7 @@ bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_fing
     rec->identity = (WINBIO_IDENTITY*) malloc(sizeof(WINBIO_IDENTITY));
     if(!rec->identity) { perror("Couldn't allocate record identity"); abort(); }
     rec->identity->Type = WINBIO_ID_TYPE_GUID;
-    rec->identity->TemplateGuid = *(GUID*) (void*) &guid;
+    rec->identity->TemplateGuid = winbio_guid(guid);
 
     rec->guid  = guid;
     rec->finger = finger;
@@ -210,7 +210,7 @@ __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STOR
     }
     *rec->identity = *srec->Identity;
 
-    rec->guid = *(RECGUID*) &srec->Identity->TemplateGuid;
+    rec->guid = tudor_guid(srec->Identity->TemplateGuid);
     rec->finger = (enum tudor_finger) srec->SubFactor;
     rec->data_size = srec->TemplateBlobSize;
     rec->data = rec->data_size ? malloc(rec->data_size) : NULL;

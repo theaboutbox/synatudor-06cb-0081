@@ -6,10 +6,15 @@ Windows biometric driver in a restricted compatibility host and connects it
 to libfprint through the TOD ABI.
 
 The current release targets Arch Linux and [Omarchy](https://omarchy.org/).
-Earlier bring-up was tested on a Lenovo Yoga C930-13IKB. Package revision 12
-has now passed pairing, enrollment, and verification on that system; restart
-and recovery revalidation remain pending. Other laptops with the same USB ID are
-especially useful test cases.
+Earlier bring-up was tested on a Lenovo Yoga C930-13IKB. Revision 12 passed
+pairing, enrollment, and verification on that system. Revision 12.4 fixes a
+capture input-lifetime bug that caused repeated retries; five matching-finger
+checks and one unenrolled-finger rejection completed in 1.04–1.32 seconds,
+including finger placement, with no timeouts. See the
+[latency investigation and test results](docs/LATENCY-INVESTIGATION-2026-09-13.md).
+A service-only restart failure was observed during earlier testing; ordinary
+USB reset recovered the reader. Suspend/resume and reboot checks remain pending.
+Other laptops with the same USB ID are especially useful test cases.
 
 > [!WARNING]
 > This is experimental system software. Initializing the reader may replace

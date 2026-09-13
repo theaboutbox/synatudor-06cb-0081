@@ -28,7 +28,7 @@ typedef struct _WINUSB_SETUP_PACKET {
   USHORT Length;
 } WINUSB_SETUP_PACKET, *PWINUSB_SETUP_PACKET;
 
-WINUSB_PIPE_INFORMATION pipe_types[] = {
+static const WINUSB_PIPE_INFORMATION pipe_types[] = {
     { UsbdPipeTypeBulk, 0x01, 0x40, 0 },
     { UsbdPipeTypeBulk, 0x81, 0x40, 0 },
     { UsbdPipeTypeBulk, 0x82, 0x40, 0 },
@@ -51,7 +51,11 @@ struct driver_info {
     bool interface_claimed;
 
     DWORD timeouts[0x100];
-    volatile char abort[0x100];
+    pthread_mutex_t pipe_lock;
+    pthread_cond_t pipe_cond;
+    bool active[0x100];
+    bool abort_requested[0x100];
+    uint64_t completed[0x100];
 
     FILE *script;
     int playback;
@@ -332,6 +336,8 @@ static void free_driver_info(struct driver_info *info) {
     if(info->owns_dev && info->dev) libusb_close(info->dev);
     if(info->owns_ctx && info->ctx) libusb_exit(info->ctx);
     if(info->script) fclose(info->script);
+    cant_fail_ret(pthread_cond_destroy(&info->pipe_cond));
+    cant_fail_ret(pthread_mutex_destroy(&info->pipe_lock));
     free(info);
 }
 
@@ -347,6 +353,8 @@ WinUsb_Initialize (HANDLE DeviceHandle, void** InterfaceHandle)
 
     struct driver_info *info = calloc(1, sizeof(*info));
     if(!info) return FALSE;
+    cant_fail_ret(pthread_mutex_init(&info->pipe_lock, NULL));
+    cant_fail_ret(pthread_cond_init(&info->pipe_cond, NULL));
 
     printf("DeviceHandle: %p\n", DeviceHandle);
     printf("ppInterfaceHandle: %p\n", InterfaceHandle);
@@ -420,268 +428,157 @@ WINAPI(WinUsb_Free)
 
 
 
-__winfnc BOOL WinUsb_GetDescriptor(
-            HANDLE InterfaceHandle, 
-            UCHAR DescriptorType, 
-            UCHAR Index,
-            USHORT LanguageID,
-            PUCHAR Buffer,
-            ULONG BufferLength,
-            PULONG LengthTransferred)
-{
-    TRACE();
+/* Keep cancellation bounded without spinning in AbortPipe. No-data polling
+ * timeouts are internal; the caller's timeout is one monotonic deadline. */
+#define USB_CANCEL_POLL_MS 200U
 
-    struct driver_info *info = (struct driver_info *) InterfaceHandle;
-    int rc;
-    uint16_t dti = (uint16_t)((DescriptorType << 8) | Index);
+static BOOL transfer_result(int status) {
+    if(status >= 0) {
+        winerr_clear();
+        return TRUE;
+    }
+    switch(status) {
+        case LIBUSB_ERROR_TIMEOUT: winerr_set_code(121); break; /* ERROR_SEM_TIMEOUT */
+        case LIBUSB_ERROR_NO_DEVICE: winerr_set_code(1167); break; /* ERROR_DEVICE_NOT_CONNECTED */
+        case LIBUSB_ERROR_INVALID_PARAM: winerr_set_code(ERROR_INVALID_PARAMETER); break;
+        case LIBUSB_ERROR_NO_MEM: winerr_set_code(8); break;
+        default: winerr_set_code(ERROR_GEN_FAILURE); break;
+    }
+    return FALSE;
+}
 
-    if (info->playback) {
-        return playback_transfer(info, dti, "dsc", Buffer, BufferLength,
+static const WINUSB_PIPE_INFORMATION *find_pipe(UCHAR id) {
+    for(size_t i = 0; i < sizeof(pipe_types) / sizeof(*pipe_types); i++)
+        if(pipe_types[i].PipeId == id) return &pipe_types[i];
+    return NULL;
+}
+
+static uint64_t usb_monotonic_ms(void) {
+    struct timespec now;
+    cant_fail(clock_gettime(CLOCK_MONOTONIC, &now));
+    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
+
+__winfnc BOOL WinUsb_GetDescriptor(HANDLE InterfaceHandle, UCHAR DescriptorType,
+        UCHAR Index, USHORT LanguageID, PUCHAR Buffer, ULONG BufferLength,
+        PULONG LengthTransferred) {
+    struct driver_info *info = (struct driver_info *)InterfaceHandle;
+    if(LengthTransferred) *LengthTransferred = 0;
+    if(!info || (!Buffer && BufferLength) || BufferLength > UINT16_MAX)
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+    uint16_t selector = (uint16_t)((DescriptorType << 8) | Index);
+    if(info->playback)
+        return playback_transfer(info, selector, "dsc", Buffer, BufferLength,
                                  LengthTransferred, false);
-    }
-
-
-
-        rc = libusb_control_transfer(info->dev, LIBUSB_ENDPOINT_IN,
-                    LIBUSB_REQUEST_GET_DESCRIPTOR, dti,
-                    LanguageID, Buffer, (uint16_t) BufferLength, 1000);
-
-
-        // if(rc >= 0) {
-        //     fprintf(info->script, "blackbox: usb %d dsc ", dti);
-        //     for(i=0;i<rc;i++) {
-        //         fprintf(info->script, "%02x", Buffer[i]);
-        //     }
-        //     fprintf(info->script, "\r\n");
-        //     fflush(info->script);
-        // }
-
-	    TRACE_PRINTF("rc = %d\n", rc);
-    if(rc < 0) {
-        if(LengthTransferred) *LengthTransferred = 0;
-        winerr_set_code(ERROR_GEN_FAILURE);
-        return FALSE;
-    }
-
-    if(LengthTransferred) *LengthTransferred = (ULONG) rc;
-    return TRUE;
+    int rc = libusb_control_transfer(info->dev, LIBUSB_ENDPOINT_IN,
+        LIBUSB_REQUEST_GET_DESCRIPTOR, selector, LanguageID, Buffer,
+        (uint16_t)BufferLength, 1000);
+    if(rc >= 0 && LengthTransferred) *LengthTransferred = (ULONG)rc;
+    return transfer_result(rc);
 }
 WINAPI(WinUsb_GetDescriptor)
 
-__winfnc BOOL WinUsb_QueryInterfaceSettings(
-            HANDLE InterfaceHandle, 
-            UCHAR AlternateInterfaceNumber, 
-            void* UsbAltInterfaceDescriptor)
-{
-    TRACE();
+__winfnc BOOL WinUsb_QueryInterfaceSettings(HANDLE InterfaceHandle,
+        UCHAR AlternateInterfaceNumber, void *UsbAltInterfaceDescriptor) {
     return FALSE;
 }
 WINAPI(WinUsb_QueryInterfaceSettings)
 
-__winfnc BOOL WinUsb_ControlTransfer(
-            HANDLE InterfaceHandle, 
-            WINUSB_SETUP_PACKET SetupPacket,
-            PUCHAR Buffer,
-            ULONG BufferLength, 
-            PULONG LengthTransferred, 
-            LPOVERLAPPED Overlapped)
-{
-    struct driver_info *info = (struct driver_info *) InterfaceHandle;
-    TRACE();
-    int rc;
-
-	    TRACE_PRINTF("%x %x %x %x %x\n",
-                SetupPacket.RequestType, 
-                SetupPacket.Request, 
-                SetupPacket.Value, 
-                SetupPacket.Index,
-                SetupPacket.Length);
-    /* The setup packet's wLength drives the transfer; an IN transfer
-     * longer than the caller's buffer would overrun it. */
-    if(SetupPacket.Length > BufferLength) {
-        winerr_set_code(ERROR_INVALID_PARAMETER);
-        return FALSE;
+__winfnc BOOL WinUsb_ControlTransfer(HANDLE InterfaceHandle,
+        WINUSB_SETUP_PACKET SetupPacket, PUCHAR Buffer, ULONG BufferLength,
+        PULONG LengthTransferred, LPOVERLAPPED Overlapped) {
+    struct driver_info *info = (struct driver_info *)InterfaceHandle;
+    if(LengthTransferred) *LengthTransferred = 0;
+    if(!info || (!Buffer && SetupPacket.Length) ||
+       SetupPacket.Length > BufferLength)
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+    if(info->playback) {
+        if(LengthTransferred) *LengthTransferred = SetupPacket.Length;
+        return transfer_result(LIBUSB_SUCCESS);
     }
-
-    if (info->playback) {
-        rc = SetupPacket.Length;
-        *LengthTransferred = rc;
-        return TRUE;
-    }
-    rc = libusb_control_transfer(info->dev,
-        SetupPacket.RequestType, SetupPacket.Request, SetupPacket.Value, SetupPacket.Index,
-        Buffer, SetupPacket.Length, 10000);
-    
-    if(rc < 0) 
-        return FALSE;
-#if 0 
-    printf("After: ");
-    for(i=0;i<BufferLength;i++)
-        printf("%02x ", Buffer[i]);
-    printf("\r\n");
-#endif
-	    TRACE_PRINTF("ControlTransfer rc = %d\n", rc);
-
-    ULONG res = (ULONG) rc;
-    *LengthTransferred = res;
-    winerr_clear();
-    usleep(500000);
-    return TRUE;
+    int rc = libusb_control_transfer(info->dev, SetupPacket.RequestType,
+        SetupPacket.Request, SetupPacket.Value, SetupPacket.Index, Buffer,
+        SetupPacket.Length, 10000);
+    if(rc >= 0 && LengthTransferred) *LengthTransferred = (ULONG)rc;
+    return transfer_result(rc);
 }
 WINAPI(WinUsb_ControlTransfer)
 
-__winfnc BOOL
-WinUsb_ReadPipe(
-            HANDLE InterfaceHandle, 
-            UCHAR PipeID, 
-            PUCHAR Buffer, 
-            ULONG BufferLength, 
-            PULONG LengthTransferred, 
-            LPOVERLAPPED Overlapped)
-{
-    TRACE();
-    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
-    WINUSB_PIPE_INFORMATION *wpi = NULL;
-    int i, rc;
-    bool was_aborted = false;
+static BOOL pipe_transfer(struct driver_info *dev, UCHAR pipe_id,
+        PUCHAR buffer, ULONG length, PULONG transferred, bool read) {
+    if(transferred) *transferred = 0;
+    const WINUSB_PIPE_INFORMATION *pipe = find_pipe(pipe_id);
+    if(!dev || !pipe || (!buffer && length) || length > INT_MAX ||
+       ((pipe_id & LIBUSB_ENDPOINT_IN) != 0) != read)
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+    if(dev->playback)
+        return playback_transfer(dev, pipe_id, read ? "<<<" : ">>>", buffer,
+                                 length, transferred, !read);
 
+    cant_fail_ret(pthread_mutex_lock(&dev->pipe_lock));
+    /* Serialize synchronous transfers on each endpoint, as WinUSB does. */
+    while(dev->active[pipe_id])
+        cant_fail_ret(pthread_cond_wait(&dev->pipe_cond, &dev->pipe_lock));
+    dev->active[pipe_id] = true;
+    dev->abort_requested[pipe_id] = false;
+    DWORD timeout = dev->timeouts[pipe_id];
+    cant_fail_ret(pthread_mutex_unlock(&dev->pipe_lock));
 
-	    TRACE_PRINTF("PipeID=%d\n", PipeID);
+    uint64_t deadline = timeout ? usb_monotonic_ms() + timeout : 0;
+    int rc, count = 0, total = 0;
+    bool aborted;
+    for(;;) {
+        unsigned int slice = USB_CANCEL_POLL_MS;
+        if(timeout) {
+            uint64_t now = usb_monotonic_ms();
+            if(now >= deadline) { rc = LIBUSB_ERROR_TIMEOUT; break; }
+            if(deadline - now < slice) slice = (unsigned int)(deadline - now);
+        }
+        if(pipe->PipeType == UsbdPipeTypeInterrupt)
+            rc = libusb_interrupt_transfer(dev->dev, pipe_id, buffer ? buffer + total : NULL,
+                                            (int)length - total, &count, slice);
+        else
+            rc = libusb_bulk_transfer(dev->dev, pipe_id, buffer ? buffer + total : NULL,
+                                      (int)length - total, &count, slice);
 
-    for(i=0;i<sizeof(pipe_types)/sizeof(*pipe_types);i++) {
-        if(pipe_types[i].PipeId == PipeID)
-            wpi = pipe_types + i;
-    }
-    if(!wpi) {
-        printf("unknown pipe!\n");
-        return FALSE;
-    }
-
-    if (dev->playback) {
-        return playback_transfer(dev, PipeID, "<<<", Buffer, BufferLength,
-                                 LengthTransferred, false);
-    }
-
-    switch(wpi->PipeType) {
-        case UsbdPipeTypeBulk:
-	            TRACE_PRINTF("bulk xfer\n");
-            rc = libusb_bulk_transfer(
-                    dev->dev, 
-                    PipeID, 
-                    Buffer, 
-                    BufferLength, 
-                    (int*)LengthTransferred, 
-                    dev->timeouts[PipeID]+1000);
-            //sleep(3);
-	            TRACE_PRINTF("LengthTransferred: %d\n", *LengthTransferred);
-            break;
-
-        case UsbdPipeTypeInterrupt:
-	            TRACE_PRINTF("interrupt xfer?\n");
-            dev->abort[PipeID] = 1;
-            for(i=0;;) {
-                rc = libusb_interrupt_transfer(
-                        dev->dev, 
-                        PipeID, 
-                        Buffer, 
-                        BufferLength, 
-                        (int*)LengthTransferred, 
-                        200);
-                
-	                TRACE_PRINTF("libusb_interrupt_transfer=%d!\n", rc);
-
-                if(rc == LIBUSB_ERROR_TIMEOUT) {
-                    if(dev->abort[PipeID] == 2) {
-                        printf("W: Pipe was aborted!\n");
-                        was_aborted = true;
-                        break;
-                    }
-
-                    if(dev->timeouts[PipeID]) {
-                        if(i > dev->timeouts[PipeID])
-                            break;
-                        else
-                            i += 200;
-                    }
-                    continue;
-                }
-
-                break;
-            }
-            dev->abort[PipeID] = 0;
-            break;
-
-        default:
-            printf("E: unknown pipe type!\n");
-            return FALSE;
+        cant_fail_ret(pthread_mutex_lock(&dev->pipe_lock));
+        aborted = dev->abort_requested[pipe_id];
+        cant_fail_ret(pthread_mutex_unlock(&dev->pipe_lock));
+        /* libusb may transfer bytes even when a polling slice times out.
+         * Continue only with the remainder so no data is lost or resent. */
+        total += count;
+        if(aborted || rc != LIBUSB_ERROR_TIMEOUT) break;
+        if(total == (int)length) { rc = LIBUSB_SUCCESS; break; }
     }
 
-    if(was_aborted) {
-        /* An aborted read is not a successful zero-byte interrupt packet. */
-        *LengthTransferred = 0;
+    cant_fail_ret(pthread_mutex_lock(&dev->pipe_lock));
+    aborted = dev->abort_requested[pipe_id];
+    dev->active[pipe_id] = false;
+    dev->completed[pipe_id]++;
+    cant_fail_ret(pthread_cond_broadcast(&dev->pipe_cond));
+    cant_fail_ret(pthread_mutex_unlock(&dev->pipe_lock));
+
+    if(transferred) *transferred = (ULONG)total;
+    if(aborted) {
         winerr_set_code(995); /* ERROR_OPERATION_ABORTED */
         return FALSE;
     }
+    return transfer_result(rc);
+}
 
-    if(rc < 0)  {
-        printf("E: xfer Failed - %s\n", libusb_error_name(rc));
-
-        if(rc == LIBUSB_ERROR_TIMEOUT) {
-            winerr_set_code(121); /* ERROR_SEM_TIMEOUT */
-            return FALSE;
-        }
-
-        exit(0); // Don't know what to do, panic quit
-    }
-
-    return TRUE;
+__winfnc BOOL WinUsb_ReadPipe(HANDLE InterfaceHandle, UCHAR PipeID,
+        PUCHAR Buffer, ULONG BufferLength, PULONG LengthTransferred,
+        LPOVERLAPPED Overlapped) {
+    return pipe_transfer((struct driver_info *)InterfaceHandle, PipeID,
+                         Buffer, BufferLength, LengthTransferred, true);
 }
 WINAPI(WinUsb_ReadPipe)
 
-
-
-__winfnc BOOL
-WinUsb_WritePipe(
-            HANDLE InterfaceHandle, 
-            UCHAR PipeID,
-            PUCHAR Buffer,
-            ULONG BufferLength, 
-            PULONG LengthTransferred, 
-            LPOVERLAPPED Overlapped)
-{
-    int rc;
-    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
-    int send;
-
-    TRACE();
-	    TRACE_PRINTF("PipeID=%x\n", PipeID);
-    
-
-    // if(Buffer[0] == 0x10 && Buffer[1] == 0 && Buffer[2] == 0) {
-    //     abort();
-    //     return FALSE;
-    // }
-    if (dev->playback) {
-        return playback_transfer(dev, PipeID, ">>>", Buffer, BufferLength,
-                                 LengthTransferred, true);
-    }
-
-    rc = libusb_bulk_transfer(dev->dev,
-            PipeID,
-            Buffer,
-            BufferLength, 
-            &send, 
-            dev->timeouts[PipeID]+1000);
-	    TRACE_PRINTF("rc=%d send=%d\n", rc, send);
-
-    if(rc < 0) {
-        printf("E: xfer Failed - %s\n", libusb_error_name(rc));
-        exit(0);
-        return FALSE;
-    }
-    *LengthTransferred = send;
-
-    return TRUE;
+__winfnc BOOL WinUsb_WritePipe(HANDLE InterfaceHandle, UCHAR PipeID,
+        PUCHAR Buffer, ULONG BufferLength, PULONG LengthTransferred,
+        LPOVERLAPPED Overlapped) {
+    return pipe_transfer((struct driver_info *)InterfaceHandle, PipeID,
+                         Buffer, BufferLength, LengthTransferred, false);
 }
 WINAPI(WinUsb_WritePipe)
 
@@ -726,15 +623,19 @@ WinUsb_SetPipePolicy(
             ULONG ValueLength,
             PVOID Value)
 {
-    struct driver_info *info = (struct driver_info *) InterfaceHandle;
-
-    TRACE();
-	    TRACE_PRINTF("pipe=%d, policy type=%d, val length=%d, val=%x\n", PipeID, PolicyType, ValueLength, *(DWORD*)Value);
-
+    struct driver_info *info = (struct driver_info *)InterfaceHandle;
+    if(!info || !find_pipe(PipeID) || !Value)
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
     if(PolicyType == PIPE_TRANSFER_TIMEOUT) {
-        info->timeouts[PipeID] = *(DWORD*)Value;
+        if(ValueLength != sizeof(DWORD))
+            return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+        DWORD timeout;
+        memcpy(&timeout, Value, sizeof(timeout));
+        cant_fail_ret(pthread_mutex_lock(&info->pipe_lock));
+        info->timeouts[PipeID] = timeout;
+        cant_fail_ret(pthread_mutex_unlock(&info->pipe_lock));
     }
-    return TRUE;
+    return transfer_result(LIBUSB_SUCCESS);
 }
 WINAPI(WinUsb_SetPipePolicy)
 
@@ -749,17 +650,18 @@ WINAPI(WinUsb_FlushPipe)
 __winfnc BOOL
 WinUsb_AbortPipe (HANDLE InterfaceHandle, UCHAR PipeID)
 {
-    struct driver_info *dev = (struct driver_info *) InterfaceHandle;
-    TRACE();
-	    TRACE_PRINTF("%x\n", PipeID);
-    if(dev->abort[PipeID] == 1) {
-        dev->abort[PipeID] = 2;
-
-        while(dev->abort[PipeID] != 0)
-            usleep(200);
+    struct driver_info *dev = (struct driver_info *)InterfaceHandle;
+    if(!dev || !find_pipe(PipeID))
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+    cant_fail_ret(pthread_mutex_lock(&dev->pipe_lock));
+    if(dev->active[PipeID]) {
+        uint64_t generation = dev->completed[PipeID];
+        dev->abort_requested[PipeID] = true;
+        while(dev->completed[PipeID] == generation)
+            cant_fail_ret(pthread_cond_wait(&dev->pipe_cond, &dev->pipe_lock));
     }
-	    TRACE_PRINTF("abort complete\n");
-    return TRUE;
+    cant_fail_ret(pthread_mutex_unlock(&dev->pipe_lock));
+    return transfer_result(LIBUSB_SUCCESS);
 }
 WINAPI(WinUsb_AbortPipe)
 
@@ -793,20 +695,20 @@ WinUsb_GetPipePolicy(
             PULONG ValueLength,
             PVOID Value)
 {
-    struct driver_info *info = (struct driver_info *) InterfaceHandle;
-
-	    TRACE_PRINTF("PipeID=%d PolicyType=%d ValueLength=%d\n",
-                PipeID, 
-                PolicyType,
-                *ValueLength);
-    if(PolicyType == PIPE_TRANSFER_TIMEOUT) {
-        *(DWORD*)Value = info->timeouts[PipeID];
+    struct driver_info *info = (struct driver_info *)InterfaceHandle;
+    if(!info || !find_pipe(PipeID) || !ValueLength || !Value ||
+       PolicyType != PIPE_TRANSFER_TIMEOUT)
+        return transfer_result(LIBUSB_ERROR_INVALID_PARAM);
+    if(*ValueLength < sizeof(DWORD)) {
+        *ValueLength = sizeof(DWORD);
+        winerr_set_code(122); /* ERROR_INSUFFICIENT_BUFFER */
+        return FALSE;
     }
-	    TRACE_PRINTF("PipeID=%d PolicyType=%d ValueLength=%d Value=%x\n",
-                PipeID, 
-                PolicyType,
-                *ValueLength,
-                *(DWORD*)Value);
-    return TRUE;
+    cant_fail_ret(pthread_mutex_lock(&info->pipe_lock));
+    DWORD timeout = info->timeouts[PipeID];
+    cant_fail_ret(pthread_mutex_unlock(&info->pipe_lock));
+    memcpy(Value, &timeout, sizeof(timeout));
+    *ValueLength = sizeof(DWORD);
+    return transfer_result(LIBUSB_SUCCESS);
 }
 WINAPI(WinUsb_GetPipePolicy)

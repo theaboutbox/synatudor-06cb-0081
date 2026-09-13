@@ -63,3 +63,13 @@ capture_prompts_test = executable('tudor-capture-prompts-test',
 )
 test('tudor-capture-prompts', capture_prompts_test, timeout: 20,
      env: ['GIO_USE_VFS=local'])
+
+ipc_test = executable('tudor-ipc-test',
+    sources: ['tests/ipc.c'] + tudor_tod_src,
+    c_args: ['-D_GNU_SOURCE'],
+    dependencies: [libfprint_tod_dep, dependency('libfprint-2'),
+                   libusb_dep, gusb_dep, json_glib_dep],
+    include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],
+    install: false,
+)
+test('tudor-ipc', ipc_test, timeout: 10, env: ['GIO_USE_VFS=local'])

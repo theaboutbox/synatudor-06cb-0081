@@ -91,3 +91,35 @@ registry_state_test = executable('cryptbridge-registry-state-test',
     c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
     install: false)
 test('cryptbridge-registry-state', registry_state_test, timeout: 5)
+
+wdf_lifecycle_test = executable('wdf-lifecycle-test', 'tests/wdf-lifecycle.c',
+    dependencies: [thread_dep, libtudor_dep, libusb_dep],
+    include_directories: ['../libtudor/src'],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('wdf-lifecycle', wdf_lifecycle_test, timeout: 10)
+
+# Compile the implementation with NDEBUG even in a debug build: time reads
+# must never disappear when assertions are disabled in production.
+time_test = executable('winapi-time-test',
+    ['tests/time.c', '../libtudor/src/winapi/time.c'],
+    dependencies: [libtudor_dep],
+    include_directories: ['../libtudor/src'],
+    c_args: ['-D_GNU_SOURCE', '-DNDEBUG'],
+    install: false)
+test('winapi-time', time_test, timeout: 5)
+
+datastore_test = executable('datastore-test',
+    ['tests/datastore.c', 'src/datastore.c'],
+    dependencies: [thread_dep, libtudor_dep, libusb_dep],
+    include_directories: ['src'],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('datastore', datastore_test, timeout: 5)
+
+overlapped_test = executable('winapi-overlapped-test', 'tests/overlapped.c',
+    dependencies: [thread_dep, libtudor_dep],
+    include_directories: ['../libtudor/src'],
+    c_args: ['-D_GNU_SOURCE', '-UNDEBUG'],
+    install: false)
+test('winapi-overlapped', overlapped_test, timeout: 15)

@@ -73,7 +73,7 @@ bool load_datastore_pair_data(FILE *file) {
     while(true) {
         //Read name
         int name_len = fgetc(file);
-        if(name_len == 0 || name_len == EOF) break;
+        if(name_len == 0 || name_len == EOF) return !ferror(file);
         if(name_len < 0) {
             perror("Error reading pairing data name");
             return false;
@@ -86,6 +86,7 @@ bool load_datastore_pair_data(FILE *file) {
         }
         if(fread(name, 1, name_len, file) != name_len) {
             perror("Error reading pairing data name");
+            free(name);
             return false;
         }
         name[name_len] = 0;
@@ -94,27 +95,32 @@ bool load_datastore_pair_data(FILE *file) {
         size_t data_size;
         if(fread(&data_size, 1, sizeof(size_t), file) != sizeof(size_t)) {
             perror("Error reading pairing data size");
+            free(name);
             return false;
         }
 
-        void *data = malloc(data_size);
+        void *data = malloc(data_size ? data_size : 1);
         if(!data) {
             perror("Error allocating pairing data");
+            free(name);
             return false;
         }
         if(fread(data, 1, data_size, file) != data_size) {
             perror("Error reading pairing data");
+            free(data);
+            free(name);
             return false;
         }
 
         //Add pairing data
-        cant_fail_ret(pthread_mutex_lock(&pdata_lock));
-
         struct pdata *pdata = (struct pdata*) malloc(sizeof(struct pdata));
         if(!pdata) {
             perror("Error allocating pairing data");
+            free(data);
+            free(name);
             return false;
         }
+        cant_fail_ret(pthread_mutex_lock(&pdata_lock));
         *pdata = (struct pdata) {
             .next = pdata_head,
             .name = name,
@@ -133,13 +139,14 @@ bool save_datastore_pair_data(FILE *file) {
     cant_fail_ret(pthread_mutex_lock(&pdata_lock));
     for(struct pdata *pdata = pdata_head; pdata; pdata = pdata->next) {
         //Write name
-        int name_len = strlen(pdata->name);
+        size_t name_len = strlen(pdata->name);
+        if(name_len == 0 || name_len > 255) goto error;
         if(
             fputc((char) name_len, file) == EOF ||
             fwrite(pdata->name, 1, name_len, file) != name_len
         ) {
             perror("Error writing pairing data name");
-            return false;
+            goto error;
         }
 
         //Write data
@@ -148,7 +155,7 @@ bool save_datastore_pair_data(FILE *file) {
             fwrite(pdata->data.data, 1, pdata->data.data_size, file) != pdata->data.data_size
         ) {
             perror("Error writing pairing data");
-            return false;
+            goto error;
         }
     }
     cant_fail_ret(pthread_mutex_unlock(&pdata_lock));
@@ -159,6 +166,10 @@ bool save_datastore_pair_data(FILE *file) {
     }
 
     return true;
+
+error:
+    cant_fail_ret(pthread_mutex_unlock(&pdata_lock));
+    return false;
 }
 
 void free_pair_data() {
@@ -174,8 +185,9 @@ void free_pair_data() {
 bool load_datastore_records(FILE *file, struct tudor_device *device) {
     while(true) {
         //Check for end of records
-        char ind = fgetc(file);
-        if(ind == 0 || ind == EOF) break;
+        int ind = fgetc(file);
+        if(ind == 0 || ind == EOF) return !ferror(file);
+        if(ind != 1) return false;
 
         //Read GUID
         RECGUID guid;
@@ -198,19 +210,21 @@ bool load_datastore_records(FILE *file, struct tudor_device *device) {
             return false;
         }
 
-        void *data = malloc(data_size);
+        void *data = malloc(data_size ? data_size : 1);
         if(!data) {
             perror("Error allocating record data");
             return false;
         }
         if(fread(data, 1, data_size, file) != data_size) {
             perror("Error reading record data");
+            free(data);
             return false;
         }
 
         //Add record
         if(!tudor_add_record(device, guid, finger, data, data_size)) {
             log_error("Duplicate record!");
+            free(data);
             return false;
         }
 
@@ -226,19 +240,19 @@ bool save_datastore_records(FILE *file, struct tudor_device *device) {
         //Write non-end indicator
         if(fputc(1, file) == EOF) {
             perror("Error writing record non-end indicator");
-            return false;
+            goto error;
         }
 
         //Write GUID
         if(fwrite(&rec->guid, 1, sizeof(RECGUID), file) != sizeof(RECGUID)) {
             perror("Error writing record GUID");
-            return false;
+            goto error;
         }
 
         //Write finger
         if(fwrite(&rec->finger, 1, sizeof(enum tudor_finger), file) != sizeof(enum tudor_finger)) {
             perror("Error writing record finger");
-            return false;
+            goto error;
         }
 
         //Write data
@@ -247,15 +261,19 @@ bool save_datastore_records(FILE *file, struct tudor_device *device) {
             fwrite(rec->data, 1, rec->data_size, file) != rec->data_size
         ) {
             perror("Error writing record data");
-            return false;
+            goto error;
         }
     }
     cant_fail_ret(pthread_mutex_unlock(&device->records_lock));
 
-    if(fputc(0, file)) {
+    if(fputc(0, file) == EOF) {
         perror("Error writing record end terminator");
         return false;
     }
 
     return true;
+
+error:
+    cant_fail_ret(pthread_mutex_unlock(&device->records_lock));
+    return false;
 }

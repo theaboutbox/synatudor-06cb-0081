@@ -22,6 +22,7 @@ __winfnc NTSTATUS WdfRegistryOpenKey(WDF_DRIVER_GLOBALS *globals, WDFOBJECT pare
 
     int par_len = strlen(par_name), subkey_len = strlen(subkey_name);
     char *name = (char*) malloc(par_len + 1 + subkey_len + 1);
+    if(!name) { free(subkey_name); return winerr_from_errno(); }
     strcpy(name, par_name);
     name[par_len] = '\\';
     strcpy(name + par_len + 1, subkey_name);
@@ -30,7 +31,7 @@ __winfnc NTSTATUS WdfRegistryOpenKey(WDF_DRIVER_GLOBALS *globals, WDFOBJECT pare
 
     //Create the key object
     struct wdf_reg_key *key = (struct wdf_reg_key*) malloc(sizeof(struct wdf_reg_key));
-    if(!key) return winerr_from_errno();
+    if(!key) { free(name); return winerr_from_errno(); }
 
     wdf_create_obj((struct wdf_object*) winwdf_get_driver(globals), &key->object, (wdf_obj_destr_fnc*) key_destr, obj_attrs);
     key->hkey = winreg_open_key(winwdf_get_driver(globals), name);

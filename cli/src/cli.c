@@ -79,14 +79,22 @@ void cli_main_loop(struct tudor_device *device) {
                 //Read identity GUID
                 RECGUID guid = {0};
                 printf("Enter identity index: ");
-                scanf("%u", &guid.PartA);
+                if(scanf("%u", &guid.PartA) != 1) {
+                    discard_line();
+                    puts("Invalid identity index!");
+                    goto cmdend;
+                }
                 discard_line();
                 if(abort_cmd_loop) goto cmdend;
 
                 //Read finger
-                enum tudor_finger finger;
+                int finger;
                 printf("Enter finger index (1-5 = right hand thumb - little finger | 6-10 = left hand thumb - little finger): ");
-                scanf("%d", (int*) &finger);
+                if(scanf("%d", &finger) != 1) {
+                    discard_line();
+                    puts("Invalid finger index!");
+                    goto cmdend;
+                }
                 discard_line();
                 if(abort_cmd_loop) goto cmdend;
                 if(finger < TUDOR_FINGER_RH_THUMB || TUDOR_FINGER_LH_LITTLE_FINGER < finger) {
@@ -157,7 +165,11 @@ void cli_main_loop(struct tudor_device *device) {
                 //Read identity GUID
                 RECGUID guid = {0};
                 printf("Enter identity index: ");
-                scanf("%u", &guid.PartA);
+                if(scanf("%u", &guid.PartA) != 1) {
+                    discard_line();
+                    puts("Invalid identity index!");
+                    goto cmdend;
+                }
                 discard_line();
                 if(abort_cmd_loop) goto cmdend;
 

@@ -44,7 +44,31 @@ $ meson compile -C build-asan
 $ meson test -C build-asan --print-errorlogs
 ```
 
+## Static analysis and focused memory checks
+
+After a normal build, install `cppcheck`, `shellcheck`, and `valgrind` alongside
+Clang, then run `python3 tools/analyze.py build`. Diagnostics are saved under
+`build-analysis`; a nonzero exit indicates findings or a scanner failure, not
+necessarily a confirmed defect. The script only analyzes source code.
+
+For focused memory and descriptor checks:
+
+```sh
+meson test -C build --timeout-multiplier 10 --print-errorlogs \
+  --wrapper 'valgrind --error-exitcode=97 --leak-check=full --errors-for-leak-kinds=definite' \
+  winapi-overlapped wdf-lifecycle winusb-borrowed datastore tudor-ipc tudor-state
+```
+
+Tests need permission to create local Unix sockets and a private D-Bus bus.
+The release timestamp test compiles the implementation with `NDEBUG` even in a
+debug build. See [the September 2026 review](CODE-REVIEW-2026-09-13.md) for the
+reviewed issues, evidence, and remaining validation limits.
+
 ## Hardware validation
+
+The [September 13 local validation](HARDWARE-VALIDATION-2026-09-13.md) records
+results for the reviewed `12.1` build, including successful fingerprint checks
+and USB recovery, and a failed service-only restart.
 
 Automated tests do not prove that a vendor-driver ABI works on hardware. The
 package revision 12 candidate should pass this sequence on USB `06cb:0081`.

@@ -200,6 +200,7 @@ HANDLE wdf_get_device_reg_key(struct winwdf_device *dev) { return dev->reg_key; 
 void wdf_add_device_queue(struct winwdf_device *dev, struct winwdf_queue* queue) {
     //Allocate and insert queue node
     struct dev_queue_node *q = (struct dev_queue_node*) malloc(sizeof(struct dev_queue_node));
+    if(!q) { perror("Couldn't allocate WDF queue node"); abort(); }
     q->queue = queue;
 
     cant_fail_ret(pthread_mutex_lock(&dev->queues_lock));
@@ -221,6 +222,7 @@ void wdf_remove_device_queue(struct winwdf_device *dev, struct winwdf_queue* que
         else dev->queues_head = q->next;
         if(q->next) q->next->prev = q->prev;
         free(q);
+        break;
     }
     if(!dev->is_dying) cant_fail_ret(pthread_mutex_unlock(&dev->queues_lock));
 }

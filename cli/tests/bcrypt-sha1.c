@@ -42,7 +42,13 @@ static void expect_hash( BCRYPT_ALG_HANDLE algorithm, const UCHAR *input,
     BCRYPT_HASH_HANDLE hash;
     UCHAR output[20];
 
+    assert(BCryptCreateHash( algorithm, NULL, NULL, 0, NULL, 0, 0 ) != 0);
+    assert(BCryptCreateHash( algorithm, &hash, NULL, 0, NULL, 1, 0 ) != 0);
     assert(!BCryptCreateHash( algorithm, &hash, NULL, 0, NULL, 0, 0 ));
+    ULONG length = 0, returned = 0;
+    assert(!BCryptGetProperty(hash, BCRYPT_HASH_LENGTH, (UCHAR *)&length,
+                             sizeof(length), &returned, 0));
+    assert(length == 20 && returned == sizeof(length));
     assert(!BCryptHashData( hash, (UCHAR *)input, input_size, 0 ));
     assert(!BCryptFinishHash( hash, output, sizeof(output), 0 ));
     assert(!memcmp( output, expected, sizeof(output) ));

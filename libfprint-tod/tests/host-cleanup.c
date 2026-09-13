@@ -309,6 +309,15 @@ static void host_signal_observer(GDBusConnection *con, const gchar *sender,
 
 static void emit_host_died(Fixture *fixture, guint host_id) {
     GError *error = NULL;
+    /* signal_subscribe queues AddMatch asynchronously. Round-trip on the
+     * subscriber connection before the other connection emits its signal. */
+    GVariant *reply = g_dbus_connection_call_sync(fixture->client,
+        "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+        "GetId", NULL, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE,
+        5000, NULL, &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(reply);
+    g_variant_unref(reply);
     g_assert_true(g_dbus_connection_emit_signal(fixture->server, NULL,
         TUDOR_HOST_LAUNCHER_OBJ, TUDOR_HOST_LAUNCHER_INTERF,
         TUDOR_HOST_LAUNCHER_HOST_DIED_SIGNAL,

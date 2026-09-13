@@ -489,7 +489,11 @@ __winfnc NTSTATUS WdfUsbTargetDeviceFormatRequestForControlTransfer(WDF_DRIVER_G
     ((struct libusb_control_setup*) ctx->ctrl_buf)->wLength = (uint16_t) ctx->mem_off.BufferLength;
     
     ctx->transfer = libusb_alloc_transfer(0);
-    if(!ctx->transfer) { return winerr_from_errno(); }
+    if(!ctx->transfer) {
+        free(ctx->ctrl_buf);
+        free(ctx);
+        return winerr_from_errno();
+    }
     ctx->transfer->dev_handle = usb_dev->libusb_dev;
     ctx->transfer->endpoint = 0;
     ctx->transfer->type = LIBUSB_TRANSFER_TYPE_CONTROL;
@@ -534,7 +538,11 @@ __winfnc NTSTATUS WdfUsbTargetPipeFormatRequestForRead(WDF_DRIVER_GLOBALS *globa
     ctx->ctrl_buf = NULL;
     
     ctx->transfer = libusb_alloc_transfer(0);
-    if(!ctx->transfer) { return winerr_from_errno(); }
+    if(!ctx->transfer) {
+        free(ctx->ctrl_buf);
+        free(ctx);
+        return winerr_from_errno();
+    }
 
     ctx->transfer->dev_handle = usb_pipe->usb_if->usb_device->libusb_dev;
     ctx->transfer->endpoint = usb_pipe->libusb_ep->bEndpointAddress;
@@ -580,7 +588,11 @@ __winfnc NTSTATUS WdfUsbTargetPipeFormatRequestForWrite(WDF_DRIVER_GLOBALS *glob
     ctx->ctrl_buf = NULL;
     
     ctx->transfer = libusb_alloc_transfer(0);
-    if(!ctx->transfer) { return winerr_from_errno(); }
+    if(!ctx->transfer) {
+        free(ctx->ctrl_buf);
+        free(ctx);
+        return winerr_from_errno();
+    }
 
     ctx->transfer->dev_handle = usb_pipe->usb_if->usb_device->libusb_dev;
     ctx->transfer->endpoint = usb_pipe->libusb_ep->bEndpointAddress;

@@ -617,8 +617,6 @@ static NTSTATUS get_hash_property( const struct hash *hash, const WCHAR *prop, U
     NTSTATUS status;
 
     status = generic_alg_property( hash->alg_id, prop, buf, size, ret_size );
-    if (status == STATUS_NOT_IMPLEMENTED)
-        // FIXME( "unsupported property %s\n", debugstr_w(prop) );
     return status;
 }
 
@@ -689,7 +687,7 @@ static NTSTATUS prepare_hash( struct hash *hash )
         if ((status = hash_finish( &temp, hash->alg_id, buffer,
                                    alg_props[hash->alg_id].hash_length ))) return status;
     }
-    else memcpy( buffer, hash->secret, hash->secret_len );
+    else if (hash->secret_len) memcpy( buffer, hash->secret, hash->secret_len );
 
     for (i = 0; i < block_bytes; i++) buffer[i] ^= 0x5c;
     if ((status = hash_update( &hash->outer, hash->alg_id, buffer, block_bytes ))) return status;
@@ -713,6 +711,7 @@ NTSTATUS WINAPI BCryptCreateHash( BCRYPT_ALG_HANDLE algorithm, BCRYPT_HASH_HANDL
     }
 
     if (!alg || alg->hdr.magic != MAGIC_ALG) return STATUS_INVALID_HANDLE;
+    if (!handle || (secretlen && !secret)) return STATUS_INVALID_PARAMETER;
     if (object) FIXME( "ignoring object buffer\n" );
 
     if (!(hash = heap_alloc_zero( sizeof(*hash) ))) return STATUS_NO_MEMORY;
@@ -726,7 +725,7 @@ NTSTATUS WINAPI BCryptCreateHash( BCRYPT_ALG_HANDLE algorithm, BCRYPT_HASH_HANDL
         heap_free( hash );
         return STATUS_NO_MEMORY;
     }
-    if (secret)
+    if (secretlen)
     {
         memcpy( hash->secret, secret, secretlen );
     }

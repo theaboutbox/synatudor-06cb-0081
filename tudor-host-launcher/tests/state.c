@@ -11,6 +11,9 @@
 
 #include "state.h"
 
+_Static_assert(sizeof(struct tudor_state_load_request) == 200, "load wire ABI");
+_Static_assert(sizeof(struct tudor_state_store_request) == 204, "store wire ABI");
+
 static const char state_id[] = "06cb-0081-a1b2c3d4e5f6";
 
 static void dispatch_request(void) {

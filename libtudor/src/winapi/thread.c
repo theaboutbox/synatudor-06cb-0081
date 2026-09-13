@@ -26,6 +26,8 @@ struct win_thread {
     pthread_t thread;
     DWORD thread_id;
     bool has_detached;
+    bool exited;
+    pthread_cond_t exit_cond;
 
     pthread_cond_t suspend_cond;
     int suspend_cntr;
@@ -46,6 +48,7 @@ static void thread_release(struct win_thread *thread) {
     if(__atomic_sub_fetch(&thread->refcnt, 1, __ATOMIC_ACQ_REL) != 0) return;
     cant_fail_ret(pthread_mutex_destroy(&thread->lock));
     cant_fail_ret(pthread_cond_destroy(&thread->suspend_cond));
+    cant_fail_ret(pthread_cond_destroy(&thread->exit_cond));
     free(thread);
 }
 
@@ -69,18 +72,27 @@ static void thread_destr(void *data) {
 static DWORD thread_wait(struct win_sync_object *sync_obj, DWORD timeout) {
     struct win_thread *thread = (struct win_thread*) sync_obj;
     TRACE();
-    if(thread->has_detached) return 0;
-
-    if(timeout == INFINITE) {
-        cant_fail_ret(pthread_join(thread->thread, NULL));
-    } else {
-        struct timespec deadline = win_wait_deadline(timeout);
-        int err = pthread_timedjoin_np(thread->thread, NULL, &deadline);
-        if(err == ETIMEDOUT) return WAIT_TIMEOUT;
-        cant_fail_ret(err);
+    struct timespec deadline = {0};
+    if(timeout != INFINITE) deadline = win_wait_deadline(timeout);
+    cant_fail_ret(pthread_mutex_lock(&thread->lock));
+    while(!thread->exited) {
+        int err = timeout == INFINITE ?
+            pthread_cond_wait(&thread->exit_cond, &thread->lock) :
+            pthread_cond_clockwait(&thread->exit_cond, &thread->lock,
+                                   CLOCK_MONOTONIC, &deadline);
+        if(err == ETIMEDOUT && !thread->exited) {
+            cant_fail_ret(pthread_mutex_unlock(&thread->lock));
+            return WAIT_TIMEOUT;
+        }
+        if(err != ETIMEDOUT) cant_fail_ret(err);
     }
-
-    thread->has_detached = TRUE;
+    /* Multiple Windows waiters may observe one thread handle. Join the
+     * pthread exactly once, after its lifecycle callback has finished. */
+    if(!thread->has_detached) {
+        cant_fail_ret(pthread_join(thread->thread, NULL));
+        thread->has_detached = true;
+    }
+    cant_fail_ret(pthread_mutex_unlock(&thread->lock));
     return 0;
 }
 
@@ -96,6 +108,10 @@ static void thread_wait_resume(struct win_thread *thread) {
 static void thread_exit_cleanup(void *arg) {
     struct win_thread *thread = (struct win_thread*) arg;
     notify_thread_lifecycle(thread, false);
+    cant_fail_ret(pthread_mutex_lock(&thread->lock));
+    thread->exited = true;
+    cant_fail_ret(pthread_cond_broadcast(&thread->exit_cond));
+    cant_fail_ret(pthread_mutex_unlock(&thread->lock));
     thread_release(thread);
 }
 
@@ -137,6 +153,9 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
     cant_fail_ret(pthread_cond_init(&thread->suspend_cond, NULL));
 
     cant_fail_ret(pthread_cond_init(&thread->start_cond, NULL));
+    cant_fail_ret(pthread_cond_init(&thread->exit_cond, NULL));
+    thread->thread_id = 0;
+    thread->exited = false;
     thread->start_module = winmodule_get_cur();
     thread->start_proc = start_proc;
     thread->start_param = param;
@@ -156,7 +175,8 @@ __winfnc HANDLE CreateThread(void *security_attrs, SIZE_T stack_size, THREAD_STA
     thread->has_detached = FALSE;
     cant_fail_ret(pthread_mutex_lock(&thread->lock));
     cant_fail_ret(pthread_create(&thread->thread, NULL, thread_entry, thread));
-    cant_fail_ret(pthread_cond_wait(&thread->start_cond, &thread->lock));
+    while(thread->thread_id == 0)
+        cant_fail_ret(pthread_cond_wait(&thread->start_cond, &thread->lock));
     cant_fail_ret(pthread_cond_destroy(&thread->start_cond));
     cant_fail_ret(pthread_mutex_unlock(&thread->lock));
 

@@ -33,7 +33,7 @@ struct win_sync_object;
 /* pthread timed waits take an absolute deadline, while WinAPI takes ms. */
 static inline struct timespec win_wait_deadline(DWORD timeout) {
     struct timespec deadline;
-    cant_fail(clock_gettime(CLOCK_REALTIME, &deadline));
+    cant_fail(clock_gettime(CLOCK_MONOTONIC, &deadline));
     deadline.tv_sec += timeout / 1000;
     deadline.tv_nsec += (long) (timeout % 1000) * 1000000L;
     if(deadline.tv_nsec >= 1000000000L) {

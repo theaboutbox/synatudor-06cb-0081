@@ -79,7 +79,24 @@ static bool suppress_filtered_worker(struct winmodule *module,
     return false;
 }
 
+static void *wait_for_thread(void *handle) {
+    assert(WaitForSingleObject(handle, 1000) == 0);
+    return NULL;
+}
+
+static void test_multiple_thread_waiters(void) {
+    HANDLE thread = CreateThread(NULL, 0, finish_later, NULL, 0, NULL);
+    assert(thread);
+    pthread_t waiters[4];
+    for(size_t i = 0; i < 4; i++)
+        assert(pthread_create(&waiters[i], NULL, wait_for_thread, thread) == 0);
+    for(size_t i = 0; i < 4; i++) assert(pthread_join(waiters[i], NULL) == 0);
+    assert(WaitForSingleObject(thread, 0) == 0);
+    assert(CloseHandle(thread));
+}
+
 int main(void) {
+    test_multiple_thread_waiters();
     HANDLE event = CreateEventA(NULL, FALSE, FALSE, NULL);
     assert(event);
     assert(WaitForSingleObject(event, 0) == WAIT_TIMEOUT);

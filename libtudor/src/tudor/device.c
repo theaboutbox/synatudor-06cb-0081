@@ -118,7 +118,7 @@ bool tudor_enroll_commit(struct tudor_device *device, bool *is_duplicate) {
     //The driver doesn't support enrollment hashes (so we don't call GetEnrollmentHash)
     if((hres = tudor_engine_adapter->CommitEnrollment(device->pipeline, &(WINBIO_IDENTITY) {
         .Type = WINBIO_ID_TYPE_GUID,
-        .TemplateGuid = *(GUID*) &device->enroll_guid
+        .TemplateGuid = winbio_guid(device->enroll_guid)
     }, (UCHAR) device->enroll_finger, NULL, 0)) != ERROR_SUCCESS) {
         log_error("Error commiting enrollment: 0x%x!", hres);
         if(hres == WINBIO_E_DUPLICATE_ENROLLMENT) *is_duplicate = true;
@@ -185,7 +185,7 @@ static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, void *context) {
     SIZE_T payload_size, hash_size;
     if((hres = tudor_engine_adapter->VerifyFeatureSet(res->dev->pipeline, &(WINBIO_IDENTITY) {
         .Type = WINBIO_ID_TYPE_GUID,
-        .TemplateGuid = *(GUID*) &res->args.verify.guid
+        .TemplateGuid = winbio_guid(res->args.verify.guid)
     }, (UCHAR) res->args.verify.finger, &is_match, &payload_ptr, &payload_size, &hash_ptr, &hash_size, &reject_detail)) != ERROR_SUCCESS) {
         if(hres == WINBIO_E_BAD_CAPTURE) retry = TUDOR_RETRY_SCAN;
         if(hres == WINBIO_E_NO_MATCH) {
@@ -277,7 +277,7 @@ static void identify_cb(OVERLAPPED *ovlp, NTSTATUS status, void *context) {
 
     success = true;
     found_match = true;
-    *(res->args.identify.guid) = *(RECGUID*) &identity.TemplateGuid;
+    *(res->args.identify.guid) = tudor_guid(identity.TemplateGuid);
     *(res->args.identify.finger) = (enum tudor_finger) subfactor;
 
     exit:;

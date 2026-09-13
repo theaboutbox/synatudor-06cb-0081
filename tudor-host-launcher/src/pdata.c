@@ -90,6 +90,7 @@ void load_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
         //Load the pairing data
         GFileInputStream *stream = g_file_read(pdata_file, NULL, &error);
         if(!stream) {
+            g_free(pdata_data);
             g_object_unref(pdata_file);
             g_dbus_method_invocation_return_gerror(invoc, error);
             g_clear_error(&error);
@@ -97,6 +98,7 @@ void load_pdata_call(GDBusMethodInvocation *invoc, GVariant *params) {
         }
         gsize bytes_read = 0;
         if(!g_input_stream_read_all(G_INPUT_STREAM(stream), pdata_data ? pdata_data : &pdata_data, pdata_len, &bytes_read, NULL, &error)) {
+            g_free(pdata_data);
             g_object_unref(stream);
             g_object_unref(pdata_file);
             g_dbus_method_invocation_return_gerror(invoc, error);

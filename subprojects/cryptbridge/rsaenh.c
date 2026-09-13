@@ -4194,33 +4194,8 @@ BOOL WINAPI RSAENH_CPGetProvParam(HCRYPTPROV hProv, DWORD dwParam, BYTE *pbData,
             return copy_param(pbData, pdwDataLen, abWTF, sizeof(abWTF));
 
         case PP_KEYSET_SEC_DESCR:
-        {
-            SECURITY_DESCRIPTOR *sd;
-            DWORD err, len, flags = (pKeyContainer->dwFlags & CRYPT_MACHINE_KEYSET);
-
-            if (!open_container_key(pKeyContainer->szName, flags, KEY_READ, &hKey))
-            {
-                SetLastError(NTE_BAD_KEYSET);
-                return FALSE;
-            }
-
-            abort();
-            // err = GetSecurityInfo(hKey, SE_REGISTRY_KEY, dwFlags, NULL, NULL, NULL, NULL, (void **)&sd);
-            RegCloseKey(hKey);
-            if (err)
-            {
-                SetLastError(err);
-                return FALSE;
-            }
-
-            // len = GetSecurityDescriptorLength(sd);
-            if (*pdwDataLen >= len) memcpy(pbData, sd, len);
-            else SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            *pdwDataLen = len;
-
-            LocalFree(sd);
-            return TRUE;
-        }
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return FALSE;
 
         default:
             /* MSDN: Unknown parameter number in dwParam */
@@ -4726,49 +4701,17 @@ BOOL WINAPI RSAENH_CPSetHashParam(HCRYPTPROV hProv, HCRYPTHASH hHash, DWORD dwPa
  */
 BOOL WINAPI RSAENH_CPSetProvParam(HCRYPTPROV hProv, DWORD dwParam, BYTE *pbData, DWORD dwFlags)
 {
-    KEYCONTAINER *pKeyContainer;
-    HKEY hKey;
-
     TRACE("(hProv=%08lx, dwParam=%08x, pbData=%p, dwFlags=%08x)\n", hProv, dwParam, pbData, dwFlags);
 
-    if (!(pKeyContainer = get_key_container(hProv)))
+    if (!get_key_container(hProv))
         return FALSE;
 
     switch (dwParam)
     {
     case PP_KEYSET_SEC_DESCR:
-    {
-        SECURITY_DESCRIPTOR *sd = (SECURITY_DESCRIPTOR *)pbData;
-        DWORD err, flags = (pKeyContainer->dwFlags & CRYPT_MACHINE_KEYSET);
-        BOOL def, present;
-        REGSAM access = WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
-        PSID owner = NULL, group = NULL;
-        PACL dacl = NULL, sacl = NULL;
-
-        if (!open_container_key(pKeyContainer->szName, flags, access, &hKey))
-        {
-            SetLastError(NTE_BAD_KEYSET);
-            return FALSE;
-        }
-
-        // if ((dwFlags & OWNER_SECURITY_INFORMATION && !GetSecurityDescriptorOwner(sd, &owner, &def)) ||
-        //     (dwFlags & GROUP_SECURITY_INFORMATION && !GetSecurityDescriptorGroup(sd, &group, &def)) ||
-        //     (dwFlags & DACL_SECURITY_INFORMATION && !GetSecurityDescriptorDacl(sd, &present, &dacl, &def)) ||
-        //     (dwFlags & SACL_SECURITY_INFORMATION && !GetSecurityDescriptorSacl(sd, &present, &sacl, &def)))
-        // {
-        //     RegCloseKey(hKey);
-        //     return FALSE;
-        // }
-
-        // err = SetSecurityInfo(hKey, SE_REGISTRY_KEY, dwFlags, owner, group, dacl, sacl);
-        RegCloseKey(hKey);
-        if (err)
-        {
-            SetLastError(err);
-            return FALSE;
-        }
-        return TRUE;
-    }
+        /* This bridge has no Windows security-descriptor implementation. */
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
     default:
         FIXME("unimplemented parameter %08x\n", dwParam);
         return FALSE;

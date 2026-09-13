@@ -754,23 +754,47 @@ __winfnc BOOL CryptDecodeObject(DWORD cert_enc_type, const char *struct_type, co
         switch((uintptr_t) struct_type) {
             case X509_ECC_SIGNATURE: {
                 //Decode signature
-                ECDSA_SIG *sig;
-                LIBCRYPTO_ERR(sig = d2i_ECDSA_SIG(NULL, &enc, (long) enc_size));
+                if(!enc || !enc_size || !struct_info_size) {
+                    winerr_set_code(ERROR_INVALID_PARAMETER);
+                    return FALSE;
+                }
+                ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &enc, (long) enc_size);
+                if(!sig) {
+                    winerr_set_code(ERROR_INVALID_DATA);
+                    return FALSE;
+                }
 
                 //Store signature
                 const BIGNUM *sig_r = ECDSA_SIG_get0_r(sig), *sig_s = ECDSA_SIG_get0_s(sig);
-                int sig_size = sizeof(CERT_ECC_SIGNATURE) + BN_num_bytes(sig_r) + BN_num_bytes(sig_s);
-                if(struct_info && *struct_info_size >= sig_size) {
-                    CERT_ECC_SIGNATURE *ecc_sig = (CERT_ECC_SIGNATURE*) struct_info;
-                    ecc_sig->r.cbData = BN_num_bytes(sig_r);
-                    ecc_sig->r.pbData = (BYTE*) struct_info + sizeof(CERT_ECC_SIGNATURE);
-                    ecc_sig->s.cbData = BN_num_bytes(sig_s);
-                    ecc_sig->s.pbData = (BYTE*) struct_info + sizeof(CERT_ECC_SIGNATURE) + ecc_sig->r.cbData;
-                    LIBCRYPTO_ERR(BN_bn2lebinpad(sig_r, ecc_sig->r.pbData, ecc_sig->r.cbData));
-                    LIBCRYPTO_ERR(BN_bn2lebinpad(sig_s, ecc_sig->s.pbData, ecc_sig->s.cbData));
-                } else if(struct_info) { winerr_set_code(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
-
+                if(BN_is_negative(sig_r) || BN_is_negative(sig_s)) {
+                    ECDSA_SIG_free(sig);
+                    winerr_set_code(ERROR_INVALID_DATA);
+                    return FALSE;
+                }
+                DWORD r_size = BN_num_bytes(sig_r), s_size = BN_num_bytes(sig_s);
+                /* The pinned PAL copies 32 bytes from each decoded component,
+                 * ignoring cbData. Keep the API's logical lengths, but reserve
+                 * separate zero-padded P-256 slots so short integers cannot
+                 * read the next component or past the returned allocation. */
+                DWORD r_capacity = r_size < 32 ? 32 : r_size;
+                DWORD s_capacity = s_size < 32 ? 32 : s_size;
+                DWORD sig_size = sizeof(CERT_ECC_SIGNATURE) + r_capacity + s_capacity;
+                DWORD capacity = struct_info ? *struct_info_size : 0;
                 *struct_info_size = sig_size;
+                if(struct_info && capacity >= sig_size) {
+                    CERT_ECC_SIGNATURE *ecc_sig = (CERT_ECC_SIGNATURE*) struct_info;
+                    ecc_sig->r.cbData = r_size;
+                    ecc_sig->r.pbData = (BYTE*) struct_info + sizeof(CERT_ECC_SIGNATURE);
+                    ecc_sig->s.cbData = s_size;
+                    ecc_sig->s.pbData = ecc_sig->r.pbData + r_capacity;
+                    LIBCRYPTO_ERR(BN_bn2lebinpad(sig_r, ecc_sig->r.pbData, r_capacity));
+                    LIBCRYPTO_ERR(BN_bn2lebinpad(sig_s, ecc_sig->s.pbData, s_capacity));
+                } else if(struct_info) {
+                    ECDSA_SIG_free(sig);
+                    winerr_set_code(ERROR_INSUFFICIENT_BUFFER);
+                    return FALSE;
+                }
+
                 ECDSA_SIG_free(sig);
                 return TRUE;
             }

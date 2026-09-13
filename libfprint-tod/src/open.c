@@ -306,7 +306,18 @@ static void init_host_proc(FpiDeviceTudor *tdev, GTask *task, GUsbDevice *usb_de
     if(loglvl < LOG_VERBOSE) loglvl = LOG_VERBOSE;
     if(loglvl > LOG_ERROR) loglvl = LOG_ERROR;
 
-    tdev->send_msg->transfer_fd = tdev->usb_fd;
+    /* The device retains usb_fd across host restarts. The message owns a
+     * separate copy, including when sending or initialization fails. */
+    tdev->send_msg->transfer_fd = dup(tdev->usb_fd);
+    if(tdev->send_msg->transfer_fd < 0) {
+        int saved_errno = errno;
+        dispose_dev(tdev);
+        g_task_return_new_error(task, G_IO_ERROR,
+            g_io_error_from_errno(saved_errno),
+            "Duplicating USB descriptor for IPC: %s", g_strerror(saved_errno));
+        g_object_unref(task);
+        return;
+    }
     tdev->send_msg->size = sizeof(struct ipc_msg_init); 
     tdev->send_msg->init = (struct ipc_msg_init) {
         .type = IPC_MSG_INIT,

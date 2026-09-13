@@ -158,7 +158,11 @@ void fpi_device_tudor_enroll(FpDevice *dev) {
     //Generate a new GUID
     RECGUID guid = {0};
     guid.PartA = g_random_int();
-    *((uint64_t*) &guid.PartB) = g_get_real_time();
+    guint64 timestamp = (guint64)g_get_real_time();
+    guid.PartB = (uint16_t)timestamp;
+    guid.PartC = (uint16_t)(timestamp >> 16);
+    guid.PartD = (uint16_t)(timestamp >> 32);
+    guid.PartE = timestamp >> 48;
     g_debug("Generated new tudor host record GUID for enrollment: %08x...", guid.PartA);
 
     //Get the finger

@@ -48,20 +48,19 @@ void wdf_evtqueue_enqueue(struct wdf_object *obj, wdf_evtqueue_action_fnc *actio
     if(!flushing_queue) cant_fail_ret(pthread_mutex_lock(&queue_mutex));
     act->next = queue_head;
     queue_head = act;
-    if(!flushing_queue) cant_fail_ret(pthread_mutex_unlock(&queue_mutex));
-
-    cant_fail_ret(pthread_mutex_lock(&obj->evtqueue_lock));
     act->obj_next = obj->evtqueue_acts_head;
     obj->evtqueue_acts_head = act;
-    cant_fail_ret(pthread_mutex_unlock(&obj->evtqueue_lock));
+    if(!flushing_queue) cant_fail_ret(pthread_mutex_unlock(&queue_mutex));
 }
 
 void wdf_evtqueue_clear_obj(struct wdf_object *obj) {
-    cant_fail_ret(pthread_mutex_lock(&obj->evtqueue_lock));
+    /* The global and per-object links describe the same actions. Protect
+     * both with the queue mutex, including against a concurrent flush. */
+    if(!flushing_queue) cant_fail_ret(pthread_mutex_lock(&queue_mutex));
 
     //Orphan queued actions
     for(struct wdf_evtqueue_action *act = obj->evtqueue_acts_head; act; act = act->obj_next) act->object = NULL;
     obj->evtqueue_acts_head = NULL;
 
-    cant_fail_ret(pthread_mutex_unlock(&obj->evtqueue_lock));
+    if(!flushing_queue) cant_fail_ret(pthread_mutex_unlock(&queue_mutex));
 }

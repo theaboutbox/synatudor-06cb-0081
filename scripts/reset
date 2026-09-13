@@ -107,7 +107,6 @@ chmod 0600 /run/synatudor-0081-maintenance.lock
 flock --exclusive --nonblock "$maintenance_lock_fd" ||
   die 'another Synaptics fingerprint maintenance operation is already running'
 
-activation_inhibited=0
 service_management_armed=0
 service_unit_state=
 declare -a temporary_runtime_masks=()
@@ -286,13 +285,11 @@ inhibit_service_activation() {
       [[ $service_unit_state == masked-runtime ]] || return 1
     fi
   done
-  activation_inhibited=1
 }
 
 allow_service_activation() {
   local unit failed=0
   (( ${#temporary_runtime_masks[@]} )) || {
-    activation_inhibited=0
     if (( service_management_armed )) &&
        [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
       service_mask_owner_file_is_valid || return 1
@@ -312,7 +309,6 @@ allow_service_activation() {
     [[ $service_unit_state != masked-runtime ]] || return 1
   done
   temporary_runtime_masks=()
-  activation_inhibited=0
   if [[ -e $SERVICE_MASK_OWNER_FILE || -L $SERVICE_MASK_OWNER_FILE ]]; then
     service_mask_owner_file_is_valid || return 1
     rm -f -- "$SERVICE_MASK_OWNER_FILE" || return 1

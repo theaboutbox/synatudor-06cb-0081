@@ -46,7 +46,7 @@ find_sensor() {
 }
 
 sensor_identity() {
-  local sensor_path=$1 serial swapped= i
+  local sensor_path=$1 serial swapped='' i
 
   [[ -r $sensor_path/serial ]] || \
     die 'the fingerprint reader has no readable USB serial; refusing to guess its saved-state directory'
@@ -95,7 +95,7 @@ ownership_failure_count() {
     printf 'unavailable\n'
     return
   fi
-  if (( ${#value} == 10 )) && [[ $value > 4294967295 ]]; then
+  if (( 10#$value > 4294967295 )); then
     printf 'unavailable\n'
     return
   fi

@@ -86,7 +86,7 @@ static bool get_state_cb(const char *name, enum tudor_state_value_type *type,
         .state_id = {0},
         .name = {0}
     };
-    strncpy(req.state_id, state_id, TUDOR_STATE_ID_SIZE);
+    memcpy(req.state_id, state_id, sizeof(state_id));
     strncpy(req.name, name, TUDOR_STATE_PROPERTY_NAME_SIZE);
 
     void *buf = malloc(TUDOR_STATE_MAX_MESSAGE_SIZE);
@@ -153,7 +153,7 @@ static void set_state_cb(const char *name, enum tudor_state_value_type type,
         (struct tudor_state_store_request*) calloc(1, req_size);
     if(!req) abort_perror("Couldn't allocate state request buffer");
     req->type = TUDOR_STATE_MSG_STORE;
-    strncpy(req->state_id, state_id, TUDOR_STATE_ID_SIZE);
+    memcpy(req->state_id, state_id, sizeof(state_id));
     strncpy(req->name, name, TUDOR_STATE_PROPERTY_NAME_SIZE);
     req->value_type = type;
     if(data_size) memcpy(req->data, data, data_size);

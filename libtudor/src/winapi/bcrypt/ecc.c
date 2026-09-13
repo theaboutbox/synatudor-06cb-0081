@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <limits.h>
+#include <pthread.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 #include <openssl/param_build.h>
@@ -22,9 +23,15 @@ typedef unsigned char p256_param_t[P256_PARAM_SIZE];
 
 #define P256_CURVE_NID NID_X9_62_prime256v1
 
-static const EC_GROUP *p256_get_curve() {
-    static EC_GROUP *p256_curve = NULL;
-    if(!p256_curve) LIBCRYPTO_ERR(p256_curve = EC_GROUP_new_by_curve_name(P256_CURVE_NID));
+static EC_GROUP *p256_curve;
+static pthread_once_t p256_curve_once = PTHREAD_ONCE_INIT;
+
+static void p256_init_curve(void) {
+    LIBCRYPTO_ERR(p256_curve = EC_GROUP_new_by_curve_name(P256_CURVE_NID));
+}
+
+static const EC_GROUP *p256_get_curve(void) {
+    cant_fail_ret(pthread_once(&p256_curve_once, p256_init_curve));
     return p256_curve;
 }
 
@@ -82,9 +89,10 @@ static NTSTATUS p256_generate_key_pair(struct bcrypt_ecc_algorithm *algo, struct
 }
 
 static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_key *key, const char *import_type, void *buf, size_t buf_size) {
+    if(!buf || !import_type) return WINERR_SET_CODE;
     NTSTATUS status;
     BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB*) buf;
-    p256_param_t *key_params = (p256_param_t*) (ecc_blob + 1);
+    p256_param_t *key_params = (p256_param_t*) (ecc_blob ? ecc_blob + 1 : NULL);
 
     BIGNUM *pub_x, *pub_y, *priv_d;
     if(strcmp(import_type, "ECCPUBLICBLOB") == 0) {
@@ -182,7 +190,7 @@ static NTSTATUS p256_import_key(struct bcrypt_ecc_algorithm *algo, struct p256_k
 
 static NTSTATUS p256_export_key(struct bcrypt_ecc_algorithm *algo, struct p256_key *key, const char *export_type, void *buf, size_t *buf_size) {
     BCRYPT_ECCKEY_BLOB *ecc_blob = (BCRYPT_ECCKEY_BLOB*) buf;
-    p256_param_t *key_params = (p256_param_t*) (ecc_blob + 1);
+    p256_param_t *key_params = (p256_param_t*) (ecc_blob ? ecc_blob + 1 : NULL);
 
     if(strcmp(export_type, "ECCPUBLICBLOB") == 0) {
         if(!key->has_public) return WINERR_SET_CODE;

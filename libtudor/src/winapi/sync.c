@@ -138,7 +138,7 @@ static DWORD evt_wait(struct win_sync_object *sync_obj, DWORD timeout) {
     //Wait for the event
     while(!evt->state) {
         if(timeout != INFINITE) {
-            int err = pthread_cond_timedwait(&evt->cond, &evt->lock, &deadline);
+            int err = pthread_cond_clockwait(&evt->cond, &evt->lock, CLOCK_MONOTONIC, &deadline);
             if(err == ETIMEDOUT) {
                 if(!evt->state) res = WAIT_TIMEOUT;
                 break;
@@ -186,7 +186,11 @@ void win_set_event(HANDLE handle) {
     //Signal the event
     cant_fail_ret(pthread_mutex_lock(&evt->lock));
     evt->state = true;
-    cant_fail_ret(pthread_cond_broadcast(&evt->cond));
+    if(evt->manual_reset) {
+        cant_fail_ret(pthread_cond_broadcast(&evt->cond));
+    } else {
+        cant_fail_ret(pthread_cond_signal(&evt->cond));
+    }
     cant_fail_ret(pthread_mutex_unlock(&evt->lock));
 }
 
@@ -196,7 +200,6 @@ void win_reset_event(HANDLE handle) {
     //Reset the event
     cant_fail_ret(pthread_mutex_lock(&evt->lock));
     evt->state = false;
-    cant_fail_ret(pthread_cond_broadcast(&evt->cond));
     cant_fail_ret(pthread_mutex_unlock(&evt->lock));
 }
 

@@ -154,8 +154,9 @@ static void test_tls_master_secret(const dll_image& image) {
     const auto secret = independent_ecdh_secret();
     /* TLS 1.2 P_SHA256, independently assembled using OpenSSL HMAC rather
      * than calling the bridge's EVP TLS1-PRF implementation. */
-    std::vector<uint8_t> input(label, label + 13);
-    input.insert(input.end(), seed.begin(), seed.end());
+    std::vector<uint8_t> input(13 + seed.size());
+    std::memcpy(input.data(), label, 13);
+    std::memcpy(input.data() + 13, seed.data(), seed.size());
     auto a = independent_hmac(secret, input);
     std::array<uint8_t, 48> expected{};
     for(size_t offset = 0; offset < expected.size(); offset += a.size()) {

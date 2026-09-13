@@ -5,10 +5,25 @@
 #include "winbio.h"
 #include "loader.h"
 #include "wdf.h"
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* These ABI structs have identical bytes but are distinct C types. memcpy
+ * avoids undefined type-punning under optimized strict-aliasing builds. */
+static inline GUID winbio_guid(RECGUID guid) {
+    GUID result;
+    memcpy(&result, &guid, sizeof(result));
+    return result;
+}
+
+static inline RECGUID tudor_guid(GUID guid) {
+    RECGUID result;
+    memcpy(&result, &guid, sizeof(result));
+    return result;
+}
 
 struct async_args_enroll {
     bool *done;

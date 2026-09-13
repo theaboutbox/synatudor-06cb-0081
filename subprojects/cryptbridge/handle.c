@@ -40,11 +40,13 @@
 BOOL        WINAPI InitializeCriticalSectionEx(CRITICAL_SECTION *,DWORD,DWORD)
 {
     TRACE("Stub");
+    return FALSE;
 }
 
 BOOL        WINAPI HeapFree(HANDLE,DWORD,LPVOID ptr)
 {
     free(ptr);
+    return TRUE;
 }
 
 LPVOID WINAPI HeapAlloc( HANDLE heap, DWORD flags, SIZE_T size )
@@ -113,7 +115,7 @@ void        WINAPI InitializeCriticalSection(CRITICAL_SECTION *lpCrit) {}
 void        WINAPI DeleteCriticalSection(CRITICAL_SECTION *lpCrit) {}
 void        WINAPI LeaveCriticalSection(CRITICAL_SECTION *lpCrit) {}
 void        WINAPI EnterCriticalSection(CRITICAL_SECTION *lpCrit) {}
-HLOCAL      WINAPI LocalFree(HLOCAL mem) {free(mem);}
+HLOCAL      WINAPI LocalFree(HLOCAL mem) {free(mem); return NULL;}
 
 
 BOOL WINAPI CryptProtectDataB( DATA_BLOB* pDataIn, LPCWSTR szDataDescr,

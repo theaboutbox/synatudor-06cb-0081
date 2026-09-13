@@ -1,4 +1,5 @@
 #include <gio/gunixfdmessage.h>
+#include <sys/socket.h>
 #include <tudor/dbus-launcher.h>
 #include "drivers_api.h"
 #include "ipc.h"
@@ -66,9 +67,11 @@ static gboolean sock_ready(GSocket *sock, GIOCondition cond, gpointer user_data)
 
                 //Get the FD
                 GUnixFDList *fds = g_unix_fd_message_get_fd_list(fdmsg);
-                if(g_unix_fd_list_get_length(fds) >= 1) {
-                    msg->transfer_fd = g_unix_fd_list_get(fds, 0, &error);
-                    if(msg->transfer_fd < 0) fd_error = error;
+                if(g_unix_fd_list_get_length(fds) != 1 || msg->transfer_fd >= 0) {
+                    fd_error = fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,
+                        "Expected at most one IPC file descriptor");
+                } else {
+                    msg->transfer_fd = g_unix_fd_list_get(fds, 0, &fd_error);
                 }
             }
             g_object_unref(cmsg);
@@ -79,6 +82,14 @@ static gboolean sock_ready(GSocket *sock, GIOCondition cond, gpointer user_data)
     if(fd_error) {
         ipc_msg_buf_free(msg);
         g_task_return_error(task, fd_error);
+        g_object_unref(task);
+        return G_SOURCE_REMOVE;
+    }
+
+    if(flags & (MSG_TRUNC | MSG_CTRUNC)) {
+        ipc_msg_buf_free(msg);
+        g_task_return_error(task, fpi_device_error_new_msg(
+            FP_DEVICE_ERROR_PROTO, "Received truncated IPC message"));
         g_object_unref(task);
         return G_SOURCE_REMOVE;
     }
@@ -146,9 +157,12 @@ bool send_ipc_msg(FpiDeviceTudor *tdev, IPCMessageBuf *msg, GError **error) {
     int num_cmsgs = 0;
     if(msg->transfer_fd >= 0) {
         GUnixFDMessage *fdmsg = G_UNIX_FD_MESSAGE(g_unix_fd_message_new());
-        int fd = msg->transfer_fd;
-        msg->transfer_fd = -1;
-        if(!g_unix_fd_message_append_fd(fdmsg, fd, error)) {
+        /* append_fd duplicates the descriptor; consume our owned copy on
+         * both success and failure so later messages cannot resend it. */
+        int fd = ipc_msg_buf_steal_fd(msg);
+        gboolean appended = g_unix_fd_message_append_fd(fdmsg, fd, error);
+        close(fd);
+        if(!appended) {
             g_object_unref(fdmsg);
             return false;
         }

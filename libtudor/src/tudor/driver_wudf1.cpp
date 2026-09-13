@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
+#include <new>
 #include <pthread.h>
 #include <time.h>
 
@@ -1299,7 +1300,15 @@ struct MyRequest final : public IWDFIoRequest {
             : reqType(t), ctl(c), complete(false), informationSize(0),
               completionStatus(STATUS_PENDING), cancelState(0),
               nativeRefs(1), ovlp(overlapped),
-              outMem(out, out_size), inMem(in, in_size) {}
+              inputStorage((c & 3u) != 3u ? in_size : 0),
+              outMem(out, out_size),
+              inMem(inputStorage.empty() ? in : inputStorage.data(), in_size) {
+            /* Buffered and direct IOCTLs have a captured input buffer on
+             * Windows. The adapter may reuse its stack as soon as dispatch
+             * returns, before the asynchronous vendor worker reads it. */
+            if(!inputStorage.empty())
+                memcpy(inputStorage.data(), in, in_size);
+        }
 
         WDF_REQUEST_TYPE reqType;
         ULONG ctl;
@@ -1311,6 +1320,7 @@ struct MyRequest final : public IWDFIoRequest {
         std::atomic<uintptr_t> cancelState;
         std::atomic<unsigned int> nativeRefs;
         OVERLAPPED *ovlp;
+        std::vector<BYTE> inputStorage;
         MyMem outMem, inMem;
 
         void retain_native() {
@@ -1735,6 +1745,31 @@ public:
         request->release_native();
     }
 };
+
+extern "C" __attribute__((visibility("hidden")))
+int tudor_internal_test_buffered_input(void) {
+    BYTE input[32] = {0}, output[64] = {0};
+    input[4] = 1;
+    MyRequest request(WdfRequestTypeOther, SYNA_CAPTURE_IOCTL,
+                      output, sizeof(output), input, sizeof(input), nullptr);
+    /* The asynchronous vendor worker can run after StartCapture returns and
+     * reuses its stack. Model that reuse before reading the WDF input. */
+    memset(input, 0xa5, sizeof(input));
+    IWDFMemory *memory = nullptr;
+    request.GetInputMemory(&memory);
+    SIZE_T size = 0;
+    auto *data = static_cast<const BYTE*>(memory->GetDataBuffer(&size));
+    if(size != sizeof(input) || data == input || data[4] != 1) return 1;
+    for(size_t i = 0; i < sizeof(input); ++i)
+        if(data[i] != (i == 4 ? 1 : 0)) return 2;
+    request.GetOutputMemory(&memory);
+    if(memory->GetDataBuffer(&size) != output || size != sizeof(output)) return 3;
+    MyRequest empty(WdfRequestTypeOther, SYNA_CAPTURE_IOCTL,
+                    nullptr, 0, nullptr, 0, nullptr);
+    empty.GetInputMemory(&memory);
+    if(memory->GetDataBuffer(&size) != nullptr || size != 0) return 4;
+    return 0;
+}
 
 extern "C" __attribute__((visibility("hidden")))
 int tudor_internal_test_capture_recovery(void) {
@@ -2374,13 +2409,15 @@ struct MyDevice : public IWDFDevice3 {
             /* [annotation][in] */ 
             _In_  BOOL Enable){
             //printf("AssignDeviceInterfaceState\r\n");
-            LPOLESTR str;
-            StringFromIID(pDeviceInterfaceGuid, &str);
-            std::wcout << L"MyDevice::AssignDeviceInterfaceState "
-                        << str
-                        << L"="
-                        << Enable
-                        << std::endl;
+            LPOLESTR str = nullptr;
+            if(StringFromIID(pDeviceInterfaceGuid, &str)) {
+                std::wcout << L"MyDevice::AssignDeviceInterfaceState "
+                            << str
+                            << L"="
+                            << Enable
+                            << std::endl;
+                free(str);
+            }
             fflush(stdout);
             return 0;
         }
@@ -2394,9 +2431,6 @@ struct MyDevice : public IWDFDevice3 {
 
 
         {
-            printf("RetrieveDeviceName %p %p %u\r\n", pDeviceName, pdwDeviceNameLength, *pdwDeviceNameLength );
-            fflush(stdout);
-
             if (!pdwDeviceNameLength) {
                 return -1;
             }
@@ -3002,10 +3036,16 @@ static NTSTATUS tudor_devctrl_wudf1(void *context, OVERLAPPED *ovlp,
         return STATUS_INTERNAL_ERROR;
 
     if (myQueue && myQueue->ioctl) {
-        MyRequest *wudf_req = new MyRequest(WdfRequestTypeOther, code,
-                                             out_buf, out_size,
-                                             const_cast<void*>(in_buf), in_size,
-                                             ovlp);
+        if((in_size && !in_buf) || (out_size && !out_buf))
+            return (NTSTATUS)0xc000000du; /* STATUS_INVALID_PARAMETER */
+        MyRequest *wudf_req;
+        try {
+            wudf_req = new MyRequest(WdfRequestTypeOther, code,
+                                     out_buf, out_size,
+                                     const_cast<void*>(in_buf), in_size, ovlp);
+        } catch(const std::bad_alloc&) {
+            return (NTSTATUS)0xc0000017u; /* STATUS_NO_MEMORY */
+        }
         *op_ctx = wudf_req;
 
         if(code == SYNA_CAPTURE_IOCTL)

@@ -58,7 +58,7 @@ WINAPI(GetTickCount)
 __winfnc void GetSystemTimeAsFileTime(FILETIME *outTime) {
     TRACE();
     struct timeval time;
-    assert(gettimeofday(&time, NULL) == 0);
+    cant_fail(gettimeofday(&time, NULL));
 
     /* FILETIME is 100-nanosecond ticks since 1601-01-01 UTC. */
     uint64_t ticks = ((uint64_t) time.tv_sec + 11644473600ULL) * 10000000ULL +

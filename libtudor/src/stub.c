@@ -8,6 +8,7 @@
 
 #define STUB_PAGE_SIZE 8192
 
+#if defined(DBGIMPORT) || defined(DBGWDF)
 static inline void encode_mov(uint8_t *targ, int reg, uint64_t val) {
     targ[0] = 0x48;                 //REX - 64 bit operands
     targ[1] = 0xb8 | reg;           //MOV r64, imm64
@@ -20,6 +21,7 @@ static inline void encode_mov(uint8_t *targ, int reg, uint64_t val) {
     targ[8] = (val >> 48) & 0xff;   //imm64 - byte 6
     targ[9] = (val >> 56) & 0xff;   //imm64 - byte 7
 }
+#endif
 
 #ifdef DBGIMPORT
 #define IMPORT_STUB_SIZE 32
