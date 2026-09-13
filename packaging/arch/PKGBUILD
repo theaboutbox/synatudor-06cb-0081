@@ -45,7 +45,7 @@ options=(!lto)
 
 _release_name="$_project-$pkgver.tar.gz"
 _release_url="${SYNA_TUDOR_SOURCE_URL:-$url/releases/download/v$pkgver/$_release_name}"
-_release_sha256="${SYNA_TUDOR_SOURCE_SHA256:-be21c75857b30963e576e754869308b606cfce34d8f19c6225864d1a9688c9b9}"
+_release_sha256="${SYNA_TUDOR_SOURCE_SHA256:-fa416774e6d8d2226bb1cef0cce8c90a9f6aad4dc776e83b4916f20dfe7e808b}"
 
 source=(
   "$_release_name::$_release_url"
