@@ -150,6 +150,7 @@ static std::atomic<bool> suppress_pairing_worker{false};
 static std::atomic<bool> pairing_worker_was_suppressed{false};
 static void *vendor_device_base;
 static void *vendor_protocol_strategy(void);
+static void log_vendor_capture_readiness(const char *stage);
 
 static bool vendor_vtable_matches(const struct dll_image *image,
                                   const void *interface,
@@ -436,6 +437,12 @@ static void capture_thread_lifecycle(struct winmodule *module,
        !capture_relay.cancel_requested &&
        worker->request_generation == capture_relay.request_generation &&
        worker->worker_generation == capture_relay.worker_generation) {
+        /* This callback runs on the capture worker after vendor code returns,
+         * so its readiness writes are visible. The lifecycle lock protects
+         * the current generation and excludes teardown before this snapshot.
+         * Log only the validated primary worker which is scheduling recovery. */
+        if(start_param == vendor_device_base)
+            log_vendor_capture_readiness("capture worker exit");
         capture_relay.recovery_pending = true;
         capture_relay.recovery_request_generation =
             worker->request_generation;

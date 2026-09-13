@@ -11,6 +11,8 @@ $ export SYNA_TUDOR_INSTALLER=/path/to/huy103af07m6.exe
 $ meson setup build -DDBGIMPORT=true -DDBGWDF=false -DTOD=true -DUNMOUNTFS=true
 $ meson compile -C build
 $ meson test -C build --print-errorlogs
+$ bash tests/reset-ownership.sh
+$ bash tests/setup.sh
 ```
 
 The suite covers Windows wait, thread-start filtering, and string behavior;
@@ -44,7 +46,7 @@ $ meson test -C build-asan --print-errorlogs
 ## Hardware validation
 
 Automated tests do not prove that a vendor-driver ABI works on hardware. The
-package revision 11 candidate should pass this sequence on USB `06cb:0081`.
+package revision 12 candidate should pass this sequence on USB `06cb:0081`.
 Keep password login available. The optional vendor-unpair step changes pairing
 and local enrollment state and may invalidate existing Windows and Linux
 enrollments; it is not a proven secure erase of the sensor database.

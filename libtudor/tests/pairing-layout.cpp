@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "loader.h"
-#include "winapi/windows.h"
+#include "winapi/api.h"
 
 extern "C" void *tudor_internal_test_vendor_device_layout(
     const struct dll_image *, const void *, const void *, const void *);
@@ -187,6 +187,21 @@ int pairing_layout_test(const char *driver_path) {
     assert(load_dll(&image, pairing_test_hook.image_name, driver_data.data(),
                     static_cast<uint32_t>(driver_data.size())));
     auto *image_base = static_cast<uint8_t*>(image.base_addr);
+    /* Direct vendor entries need the same module/TIB context as a Windows
+     * worker. In particular, vendor tracing queries its current module. */
+    const char *environment[] = {nullptr};
+    winmodule module{};
+    module.name = pairing_test_hook.image_name;
+    module.cmdline = "software-only-pairing-layout-test";
+    module.environ = environment;
+    winmodule *saved_module = winmodule_get_cur();
+    winmodule_register(&module);
+    winmodule_set_cur(&module);
+    win_init_tib();
+    typedef BOOL __winfnc DllMain(HANDLE, DWORD, void *);
+    assert(image.entry_point);
+    assert(reinterpret_cast<DllMain*>(image.entry_point)(
+        module.handle, 1, nullptr));
     assert(original_pairing_target == image_base + 0x23738);
     assert(original_calibration_target == image_base + 0x1a644);
     assert(original_calibration_retry_target == image_base + 0x1a644);
@@ -347,6 +362,8 @@ int pairing_layout_test(const char *driver_path) {
     assert(observed_strategy == &test_strategy);
     assert(CloseHandle(thread));
 
+    assert(reinterpret_cast<DllMain*>(image.entry_point)(
+        module.handle, 0, nullptr));
     destroy_dll(&image);
     assert(!original_pairing_target);
     assert(!original_calibration_target);
@@ -367,5 +384,7 @@ int pairing_layout_test(const char *driver_path) {
     test_calibration_observer_binding(image);
     destroy_dll(&image);
     assert(!*calibration_observer_test_hook.original_target);
+    winmodule_set_cur(saved_module);
+    winmodule_unregister(&module);
     return 0;
 }
