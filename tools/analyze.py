@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run source scanners against a configured Meson build without touching hardware."""
 
+import utils.session
 import argparse
 import concurrent.futures
 import json
