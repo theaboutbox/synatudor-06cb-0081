@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Builds a local synatudor-0081 .deb for Ubuntu. Nothing is installed and the
+# reader is not touched. The package embeds Lenovo's DLLs, so never publish it.
+set -Eeuo pipefail
+umask 077
+
+repo_root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
+build_dir=${BUILD_DIR:-$repo_root/build-ubuntu}
+out_dir=${OUT_DIR:-$repo_root/dist}
+version=0.1.0-1ubuntu2
+
+meson_args=(--prefix=/usr --libdir=lib/x86_64-linux-gnu
+  -DDBGIMPORT=false -DDBGWDF=false -DTOD=true -DUNMOUNTFS=true)
+if [[ -d $build_dir/meson-info ]]; then
+  meson setup --reconfigure "$build_dir" "$repo_root" "${meson_args[@]}"
+else
+  meson setup "$build_dir" "$repo_root" "${meson_args[@]}"
+fi
+meson compile -C "$build_dir"
+meson test -C "$build_dir" --print-errorlogs
+bash "$repo_root/tests/reset-ownership.sh"
+bash "$repo_root/tests/setup.sh"
+
+stage=$(mktemp -d)
+trap 'rm -rf -- "$stage"' EXIT
+root=$stage/root
+meson install -C "$build_dir" --destdir "$root" >/dev/null
+for name in setup reset reset-ownership uninstall; do
+  install -Dm755 "$repo_root/scripts/$name" "$root/usr/bin/synatudor-$name"
+done
+install -Dm644 "$repo_root/LICENSE" "$root/usr/share/doc/synatudor-0081/LICENSE"
+install -Dm644 "$repo_root/NOTICE" "$root/usr/share/doc/synatudor-0081/NOTICE"
+
+# Depend on whichever Ubuntu packages provide the libraries we link against.
+# ldd exits nonzero on the shell scripts, which is expected.
+depends=$(
+  set +o pipefail
+  find "$root" -type f -executable -exec ldd {} + 2>/dev/null |
+    awk '/=> \//{print $3}' | sort -u | grep -v "$build_dir" |
+    while read -r lib; do
+      dpkg -S "$(readlink -f "$lib")" 2>/dev/null | cut -d: -f1 || true
+    done | sort -u | paste -sd, | sed 's/,/, /g'
+)
+
+mkdir -p "$root/DEBIAN"
+cat > "$root/DEBIAN/control" <<CONTROL
+Package: synatudor-0081
+Version: $version
+Architecture: amd64
+Maintainer: Local build <root@localhost>
+Depends: fprintd, libpam-fprintd, libfprint-2-tod1, usbutils, $depends
+Section: misc
+Priority: optional
+Description: Synaptics Tudor TOD driver for the 06cb:0081 fingerprint sensor
+ Local build of synatudor-06cb-0081 for Ubuntu. Embeds vendor DLLs.
+CONTROL
+
+# Services are deliberately not started here: the reader is first opened by
+# synatudor-setup, after the user has been told to keep the sensor uncovered.
+cat > "$root/DEBIAN/postinst" <<'SCRIPT'
+#!/bin/sh
+set -e
+ldconfig
+systemctl daemon-reload || true
+systemctl reload dbus.service || true
+udevadm control --reload || true
+SCRIPT
+cat > "$root/DEBIAN/prerm" <<'SCRIPT'
+#!/bin/sh
+set -e
+systemctl stop fprintd.service tudor-host-launcher.service || true
+SCRIPT
+cat > "$root/DEBIAN/postrm" <<'SCRIPT'
+#!/bin/sh
+set -e
+ldconfig
+systemctl daemon-reload || true
+systemctl reload dbus.service || true
+udevadm control --reload || true
+SCRIPT
+chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm" "$root/DEBIAN/postrm"
+chmod -R u+rwX,go+rX,go-w "$root"
+
+mkdir -p "$out_dir"
+chmod 700 "$out_dir"
+dpkg-deb --root-owner-group --build "$root" "$out_dir/synatudor-0081_${version}_amd64.deb"
