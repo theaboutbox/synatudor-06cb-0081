@@ -85,6 +85,12 @@ if (( EUID != 0 )); then
   exec sudo -- "$self"
 fi
 
+# Pairing restarts the reader, so it can be off the USB bus for a moment.
+for _ in {1..15}; do
+  [[ -n $(grep -lx 0081 /sys/bus/usb/devices/*/idProduct 2>/dev/null) ]] && break
+  sleep 1
+done
+
 sensor_path=$(find_sensor)
 [[ -r $sensor_path/serial ]] || die 'the fingerprint reader has no readable USB serial'
 sensor_serial=$(<"$sensor_path/serial")

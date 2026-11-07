@@ -17,8 +17,8 @@ usage() {
 Usage: synatudor-setup [--finger FINGER] [--no-pam] [--calibrate-only]
 
 Initializes a Synaptics 06cb:0081 reader, enrolls and verifies one finger,
-then configures PAM on Omarchy. Password fallback is retained. This command
-never issues the separate vendor-unpair maintenance operation.
+then leaves PAM for you to enable with pam-auth-update. Password fallback is
+retained. This command never issues the separate vendor-unpair maintenance operation.
 
 Options:
   --finger FINGER    Finger to enroll (default: right-index-finger).
@@ -275,12 +275,14 @@ fi
 target_user=$(id -un) || die 'could not determine the current user'
 [[ -t 0 && -t 1 ]] || die 'setup needs an interactive terminal'
 [[ $(uname -m) == x86_64 ]] || die 'the pinned Windows driver requires x86-64 Linux'
-[[ -e /etc/arch-release ]] || die 'this setup helper currently supports Arch Linux and Omarchy'
+grep -qx 'ID=ubuntu' /etc/os-release || die 'this setup helper is the Ubuntu port; use the upstream script on other distributions'
 sensor_path=$(find_sensor)
 sensor_identity "$sensor_path"
 unset sensor_path
-pacman -Q synatudor-0081 libfprint-tod fprintd >/dev/null || \
-  die 'install synatudor-0081, libfprint-tod, and fprintd first'
+for package in synatudor-0081 libfprint-2-tod1 fprintd; do
+  [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) == 'install ok installed' ]] || \
+    die 'install synatudor-0081, libfprint-2-tod1, and fprintd first'
+done
 command -v fprintd-list >/dev/null || die 'fprintd-list is unavailable'
 [[ -x /usr/bin/fprintd-enroll ]] || die 'fprintd-enroll is unavailable'
 command -v fprintd-verify >/dev/null || die 'fprintd-verify is unavailable'
@@ -391,18 +393,7 @@ fi
 printf '\nVerify the enrolled finger once before authentication is enabled.\n\n'
 fprintd-verify -f "$finger" "$target_user"
 
-if (( ! configure_pam )); then
-  printf 'Enrollment and verification succeeded. PAM was not changed.\n'
-  exit 0
-fi
-
-if [[ -x /usr/bin/omarchy-hw-laptop-closed && \
-      -f /etc/pam.d/omarchy-lock-password ]]; then
-  [[ -x /usr/lib/synatudor/omarchy-pam ]] || die 'Omarchy PAM helper is unavailable'
-  sudo /usr/lib/synatudor/omarchy-pam apply --verified-user "$target_user"
-  printf 'Fingerprint authentication is ready for sudo, polkit, and the Omarchy lock screen.\n'
-else
-  printf '%s\n' \
-    'Enrollment and verification succeeded.' \
-    'PAM was not changed because this system is not a supported Omarchy installation.'
-fi
+printf '%s\n' \
+  'Enrollment and verification succeeded. PAM was not changed.' \
+  'To use your fingerprint for login and sudo, run: sudo pam-auth-update' \
+  'and enable "Fingerprint authentication". Password login stays available.'

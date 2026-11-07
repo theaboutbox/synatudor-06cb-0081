@@ -11,8 +11,8 @@ usage() {
   cat <<'EOF'
 Usage: synatudor-uninstall [--purge]
 
-Removes the driver, rolls back PAM changes made by synatudor-setup, and
-restores stock libfprint when it was replaced during installation.
+Disables the fprintd PAM profile and removes the driver. fprintd and Ubuntu's
+libfprint stay installed.
 
 Without --purge, reader calibration, pairing, and enrollment state is kept.
 
@@ -32,7 +32,7 @@ while (( $# )); do
   shift
 done
 
-# pacman removes this file while the command is still running. Continue from a
+# apt removes this file while the command is still running. Continue from a
 # private copy so the rest of the rollback cannot be truncated mid-script.
 if [[ ${SYNATUDOR_UNINSTALL_PRIVATE_COPY:-0} != 1 ]]; then
   self=$(readlink -f -- "$0") || die 'could not resolve this script path'
@@ -70,33 +70,16 @@ read_saved_state() {
   saved_value=$(sudo cat -- "$path")
 }
 
-original_provider=unknown
-if read_saved_state /var/lib/tudor/installer/original-libfprint-provider; then
-  original_provider=$saved_value
-  case $original_provider in
-    libfprint|libfprint-tod|libfprint-git|none) ;;
-    *) die 'invalid saved libfprint provider; refusing to guess during rollback' ;;
-  esac
-fi
+is_installed() {
+  [[ $(dpkg-query -W -f='${Status}' "$1" 2>/dev/null) == 'install ok installed' ]]
+}
 
-fprintd_was_installed=unknown
-if read_saved_state /var/lib/tudor/installer/fprintd-was-installed; then
-  fprintd_was_installed=$saved_value
-  case $fprintd_was_installed in
-    0|1) ;;
-    *) die 'invalid saved fprintd installation state; refusing to guess during rollback' ;;
-  esac
-fi
-
-# Authentication configuration is disabled before any driver or provider is
-# removed. The helper uses its checksummed snapshot and refuses on conflicts.
-if sudo test -f /var/lib/tudor/pam-backups/active; then
-  [[ -x /usr/lib/synatudor/omarchy-pam ]] || die 'managed PAM backup exists but its rollback helper is missing'
-  sudo /usr/lib/synatudor/omarchy-pam rollback
-fi
+# Authentication is disabled before the driver is removed, so login never
+# waits on a reader that no longer has a driver.
+sudo pam-auth-update --disable fprintd
 
 fingerprint_purge_result=not-requested
-if (( purge )) && pacman -Q synatudor-0081 >/dev/null 2>&1; then
+if (( purge )) && is_installed synatudor-0081; then
   if listing=$(fprintd-list "$target_user" 2>&1); then
     if grep -Eiq '(left|right)-(thumb|index-finger|middle-finger|ring-finger|little-finger)' <<<"$listing"; then
       fingerprint_purge_result=failed
@@ -129,7 +112,7 @@ elif [[ $fingerprint_purge_result == none ]]; then
 fi
 
 restart_fprintd_on_exit() {
-  if pacman -Q fprintd >/dev/null 2>&1; then
+  if is_installed fprintd; then
     sudo systemctl reset-failed fprintd.service >/dev/null 2>&1 || true
     sudo systemctl start --no-block fprintd.service >/dev/null 2>&1 || true
   fi
@@ -137,60 +120,9 @@ restart_fprintd_on_exit() {
 trap 'restart_fprintd_on_exit; rm -f -- "${SYNATUDOR_UNINSTALL_PRIVATE_PATH:-}"' EXIT
 
 sudo systemctl stop fprintd.service tudor-host-launcher.service 2>/dev/null || true
-if pacman -Q synatudor-0081 >/dev/null 2>&1; then
-  sudo pacman --noconfirm -R synatudor-0081
+if is_installed synatudor-0081; then
+  sudo apt-get remove -y synatudor-0081
 fi
-
-case $fprintd_was_installed in
-  0)
-    if pacman -Q fprintd >/dev/null 2>&1; then
-      printf 'Removing fprintd because it was absent before installation...\n'
-      if ! sudo pacman --noconfirm -R fprintd; then
-        printf '%s\n' \
-          'warning: fprintd is now required by another package; it has been retained' >&2
-      fi
-    fi
-    ;;
-  1)
-    printf 'Retained fprintd because it was installed before this driver.\n'
-    ;;
-  unknown)
-    printf '%s\n' \
-      'warning: no saved fprintd installation state was found; fprintd has been retained' >&2
-    ;;
-esac
-
-case $original_provider in
-  libfprint)
-    sudo pacman --noconfirm --ask=4 -S libfprint
-    printf 'Restored stock libfprint, which was present before installation.\n'
-    ;;
-  libfprint-tod)
-    printf 'Retained libfprint-tod, which was present before installation.\n'
-    ;;
-  libfprint-git)
-    printf '%s\n' \
-      'The previous provider was libfprint-git, which is not in the Arch repositories.' \
-      'libfprint-tod has been retained; reinstall libfprint-git manually to restore the exact previous provider.'
-    ;;
-  none)
-    if pacman -Q fprintd >/dev/null 2>&1; then
-      printf '%s\n' \
-        'warning: no libfprint provider was originally installed, but fprintd still needs one; libfprint-tod has been retained' >&2
-    elif pacman -Q libfprint-tod >/dev/null 2>&1; then
-      if sudo pacman --noconfirm -R libfprint-tod; then
-        printf 'Removed libfprint-tod because no provider was installed before this driver.\n'
-      else
-        printf '%s\n' \
-          'warning: libfprint-tod is now required by another package; it has been retained' >&2
-      fi
-    fi
-    ;;
-  unknown)
-    printf '%s\n' \
-      'warning: no saved original libfprint provider was found; the current provider has been retained' >&2
-    ;;
-esac
 
 sudo systemctl daemon-reload
 sudo udevadm control --reload
