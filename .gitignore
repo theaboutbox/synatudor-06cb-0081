@@ -27,3 +27,5 @@
 compile_commands.json
 core
 core.*
+config.bat
+node_modules
